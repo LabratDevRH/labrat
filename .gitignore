@@ -12,6 +12,14 @@ __pycache__/
 runs/*
 !runs/final/
 !runs/brainrig_20260924T133937Z_seed2026/
+# the two training logs behind the website's "Watching it learn" charts (site/assets/training.json), so the curves
+# can be checked against them; nothing else from those runs
+!runs/lever_v3/
+runs/lever_v3/*
+!runs/lever_v3/log.jsonl
+!runs/steer_v1/
+runs/steer_v1/*
+!runs/steer_v1/log.jsonl
 build/
 shots/
 live/dev_shots/
