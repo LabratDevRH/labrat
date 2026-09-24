@@ -1,0 +1,22 @@
+# secrets: never commit
+.env
+.env.*
+launch_journal.json
+
+# python
+__pycache__/
+*.pyc
+
+# training runs, renders and recordings are large and local. Kept: the final brain (runs/final) and the recorded
+# session of the RatTest launch, so anyone can replay it and check the brain commit
+runs/*
+!runs/final/
+!runs/brainrig_20260924T133937Z_seed2026/
+build/
+shots/
+live/dev_shots/
+*.mp4
+*.mkv
+*.webm
+*.log
+seq_*.txt
