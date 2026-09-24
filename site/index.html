@@ -3,14 +3,26 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>labrat · a virtual rat launched a coin</title>
-<meta name="description" content="Subject R-01 is a virtual rat: DeepMind's open-source rodent model in a physics simulation, driven by two trained artificial neural networks. Its head moves the cursor and a lever press clicks. It launched RatTest ($RATTEST) on pons, doing all 11 clicks itself.">
+<title>labrat · a virtual rat launches a coin</title>
+<meta name="description" content="Subject R-01 is a virtual rat: DeepMind's open-source rodent model in a physics simulation, driven by two trained artificial neural networks. Its head moves the cursor and a lever press clicks. It launches Labrat ($LABRAT) on pons itself, doing all 11 clicks.">
 <meta name="theme-color" content="#000000">
 <meta name="color-scheme" content="dark">
 <meta property="og:type" content="website">
-<meta property="og:title" content="labrat · a virtual rat launched a coin">
-<meta property="og:description" content="A simulated rat with a brain of two trained neural networks. Its head is the mouse, a lever press is the click. 11 of 11 clicks, 0 misses, one signature.">
-<link rel="icon" href="assets/mark.svg" type="image/svg+xml">
+<meta property="og:site_name" content="labrat">
+<meta property="og:title" content="labrat · a virtual rat launches a coin">
+<meta property="og:description" content="A simulated rat with a brain of two trained neural networks. Its head is the mouse, a lever press is the click. It launches $LABRAT on pons itself: every click is the rat's.">
+<meta property="og:image" content="https://lab-rat.net/assets/labrat-logo.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1254">
+<meta property="og:image:height" content="1254">
+<meta property="og:image:alt" content="The labrat logo: a pixel-art rat in yellow, pink and violet on black">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="labrat · a virtual rat launches a coin">
+<meta name="twitter:description" content="A simulated rat with a brain of two trained neural networks. Its head is the mouse, a lever press is the click. It launches $LABRAT on pons itself.">
+<meta name="twitter:image" content="https://lab-rat.net/assets/labrat-logo.jpg">
+<meta name="twitter:image:alt" content="The labrat logo: a pixel-art rat in yellow, pink and violet on black">
+<link rel="icon" href="assets/labrat-logo.jpg" type="image/jpeg">
+<link rel="apple-touch-icon" href="assets/labrat-logo.jpg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap">
@@ -26,11 +38,15 @@
 <link rel="modulepreload" href="js/live.js">
 <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" integrity="sha384-61S/Nu32S3E5+n+KpCOTb2eRYps6fVKm+9Gz1QBvSePFthb46f063Aa/qe/lykFZ" crossorigin="anonymous">
 <script src="config.js"></script>
+<script src="coin.js"></script>
+<script>/* which coin state to show before site.js fills it in: "live" only with a real contract address in coin.js */
+(function () { var c = window.LABRAT_COIN;
+  document.documentElement.setAttribute('data-coin', c && /^0x[0-9a-fA-F]{40}$/.test(String(c.address || '')) ? 'live' : 'soon'); })();</script>
 <script type="module" src="js/site.js"></script>
 </head>
 <body>
 
-<!-- shared drawing defs: the rat mark and the logo ramp (kept out of layout, not display:none, so gradients resolve) -->
+<!-- shared drawing defs: the logo-palette gradients and the icons (kept out of layout, not display:none, so gradients resolve) -->
 <svg class="defs" aria-hidden="true" focusable="false">
   <defs>
     <linearGradient id="g-mark" x1="0" y1="0" x2="1" y2="0">
@@ -45,15 +61,6 @@
     <radialGradient id="g-glow"><stop offset="0" stop-color="#FFF40F" stop-opacity=".9"/><stop offset=".35" stop-color="#F5AC29" stop-opacity=".45"/>
       <stop offset="1" stop-color="#E86E3D" stop-opacity="0"/></radialGradient>
     <radialGradient id="g-glow-m"><stop offset="0" stop-color="#D60C94" stop-opacity=".7"/><stop offset="1" stop-color="#8808B5" stop-opacity="0"/></radialGradient>
-    <symbol id="ratmark" viewBox="0 0 44 27">
-      <g transform="translate(42 11) scale(-1 1)" stroke-linejoin="round" stroke-linecap="round">
-        <path d="M31 1.6C37.5 3 40.5 8.6 36.6 11.8C33.4 14.4 29.4 12.2 31 9.6" fill="none" stroke="url(#g-mark)" stroke-width="1.8"/>
-        <path d="M0 0C2-1.6 5-3.4 8.5-4.6C11-7.2 16-9.2 22-8.6C28-8 32.5-5 32.5-.6C32.5 2.6 30 4.4 26.5 4.6C20 5.6 13 5.4 9 4C6 3.2 2.5 1.8 0 0Z" fill="url(#g-mark)"/>
-        <circle cx="11.6" cy="-6.4" r="2.9" fill="#f59aaf"/>
-        <circle cx="6.1" cy="-1.5" r=".95" fill="#000"/>
-        <circle cx=".4" cy="0" r="1.1" fill="#FFF40F"/>
-      </g>
-    </symbol>
     <symbol id="i-ext" viewBox="0 0 16 16"><path d="M6 3h7v7M13 3 4 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-gh" viewBox="0 0 16 16"><path fill="currentColor" d="M8 .2a8 8 0 0 0-2.5 15.6c.4 0 .5-.2.5-.4v-1.5c-2.2.5-2.7-1-2.7-1-.4-.9-.9-1.2-.9-1.2-.7-.5.1-.5.1-.5.8.1 1.2.8 1.2.8.7 1.3 1.9.9 2.3.7.1-.5.3-.9.5-1.1-1.8-.2-3.6-.9-3.6-4 0-.9.3-1.6.8-2.1-.1-.2-.4-1 .1-2.1 0 0 .7-.2 2.2.8a7.4 7.4 0 0 1 4 0c1.5-1 2.2-.8 2.2-.8.4 1.1.2 1.9.1 2.1.5.6.8 1.3.8 2.1 0 3.1-1.9 3.8-3.6 4 .3.3.5.8.5 1.5v2.2c0 .2.1.5.6.4A8 8 0 0 0 8 .2Z"/></symbol>
     <symbol id="i-copy" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.9c0-.8-.6-1.4-1.4-1.4H3.9c-.8 0-1.4.6-1.4 1.4v5.2c0 .8.6 1.4 1.4 1.4h1.6"/></g></symbol>
@@ -68,7 +75,7 @@
 <header class="nav" id="nav">
   <div class="nav-in">
     <a class="brand" href="#top" aria-label="labrat, back to top">
-      <svg class="brand-mark" aria-hidden="true"><use href="#ratmark"/></svg>
+      <img class="brand-mark" src="assets/labrat-logo.jpg" width="1254" height="1254" alt="" decoding="async">
       <span class="brand-word">lab<b>rat</b></span>
     </a>
     <nav class="links" id="links" aria-label="Sections">
@@ -90,19 +97,32 @@
 <!-- ================================================================ HERO -->
 <section class="hero" id="top">
   <div class="wrap hero-grid">
-    <div class="hero-id reveal">
+    <div class="hero-id">
       <p class="eyebrow"><span class="dot"></span>Operant lab &middot; Subject R-01 &middot; Robinhood Chain</p>
       <h1 class="word" aria-label="labrat">
-        <svg class="word-mark" aria-hidden="true"><use href="#ratmark"/></svg><span class="w1" aria-hidden="true">lab</span><span class="w2" aria-hidden="true">rat</span>
+        <img class="word-mark" src="assets/labrat-logo.jpg" width="1254" height="1254" alt="" decoding="async" fetchpriority="high"><span class="w1" aria-hidden="true">lab</span><span class="w2" aria-hidden="true">rat</span>
       </h1>
     </div>
     <div class="hero-copy reveal">
-      <p class="hook">We gave a virtual rat a brain made of two trained neural networks and taught it to press a lever. Then its head became the mouse, the lever became the click, and it launched a real coin, doing every one of the <b>11&nbsp;clicks</b> itself.</p>
+      <p class="hook">We gave a virtual rat a brain made of two trained neural networks and taught it to press a lever. Its head is the mouse and the lever is the click. <span class="if-soon">Next, it launches our coin on pons by itself, doing every one of the <b>11&nbsp;clicks</b>.</span><span class="if-live">Then it launched our coin on pons by itself, doing every one of the <b>11&nbsp;clicks</b>.</span></p>
+
+      <!-- the coin: "Launching soon" while coin.js has window.LABRAT_COIN = null; after the launch, its facts (filled in by site.js) -->
+      <div class="coin-card" id="hero-coin">
+        <img class="cc-logo" src="assets/labrat-logo.jpg" width="1254" height="1254" alt="The Labrat coin logo: a pixel-art rat" decoding="async">
+        <div class="cc-main">
+          <p class="cc-top"><span class="cc-name">Labrat</span><span class="cc-sym">$LABRAT</span><span class="cc-pill if-soon"><i aria-hidden="true"></i>Launching soon</span><span class="cc-pill on if-live">Launched<span class="js-launched-sep"></span></span></p>
+          <p class="cc-line if-soon">The rat will launch it itself, live, on pons.</p>
+          <div class="cc-ca if-live"><span class="cc-ca-k">Contract</span><a class="hex js-addr-link" target="_blank" rel="noopener"><span class="js-addr"></span></a><button class="copy js-addr-copy" type="button" aria-label="Copy contract address"><svg aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+        </div>
+      </div>
+
       <div class="ctas">
-        <a class="btn primary" href="https://www.ponsfamily.com/launchpad/0x41e20894bE505f0bAE018B75E0E39534E49Aa456" target="_blank" rel="noopener">$RATTEST on pons<svg aria-hidden="true"><use href="#i-ext"/></svg></a>
-        <a class="btn" href="https://robinhoodchain.blockscout.com/token/0x41e20894bE505f0bAE018B75E0E39534E49Aa456" target="_blank" rel="noopener">Contract on explorer<svg aria-hidden="true"><use href="#i-ext"/></svg></a>
+        <a class="btn primary if-live js-pons" target="_blank" rel="noopener">$LABRAT on pons<svg aria-hidden="true"><use href="#i-ext"/></svg></a>
+        <a class="btn if-live js-explorer" target="_blank" rel="noopener">Contract on explorer<svg aria-hidden="true"><use href="#i-ext"/></svg></a>
+        <a class="btn if-soon" href="#launch">How the rat launches it</a>
         <a class="btn ghost" href="https://github.com/LabratDevRH/labrat" target="_blank" rel="noopener"><svg class="lead-ic" aria-hidden="true"><use href="#i-gh"/></svg>GitHub repo</a>
       </div>
+      <p class="cc-tx if-live"><span class="js-need-tx">Launch transaction <a class="hex js-tx-link" target="_blank" rel="noopener"><span class="js-tx-short"></span></a></span><span class="js-need-block"><span class="js-need-tx"> &middot; </span>block <a class="hex js-block-link" target="_blank" rel="noopener"><span class="js-block"></span></a></span></p>
       <p class="hero-note"><span class="pill">not a real rat brain</span> a simulated body driven by artificial networks</p>
     </div>
   </div>
@@ -151,13 +171,13 @@
   </div>
 
   <div class="wrap wide">
-    <ul class="facts reveal" aria-label="The launch in numbers">
-      <li><b>11<small>/11</small></b><span>clicks by the rat</span></li>
-      <li><b>0</b><span>misses</span></li>
-      <li><b>17<small>/17</small></b><span>safety checks passed</span></li>
-      <li><b>1</b><span>signature to launch</span></li>
+    <ul class="facts reveal" aria-label="R-01 in numbers">
+      <li><b>11</b><span>steps per launch, each one a click by the rat</span></li>
+      <li><b>800<small>/800</small></b><span>clean lever presses in testing</span></li>
+      <li><b>2</b><span>trained neural networks</span></li>
       <li><b>2,312</b><span>artificial units</span></li>
       <li><b>643,072</b><span>connections</span></li>
+      <li><b>38</b><span>body motors the brain drives</span></li>
     </ul>
   </div>
 </section>
@@ -432,8 +452,8 @@
   <div class="wrap">
     <header class="sec-hd reveal">
       <p class="idx"><span>03</span>The launch</p>
-      <h2 id="launch-h">How the rat launched a coin</h2>
-      <p class="lead">On 24 September 2026, R-01 launched <b>RatTest ($RATTEST)</b> on pons, a coin launchpad on Robinhood Chain. Here is how a rat uses a website.</p>
+      <h2 id="launch-h">How the rat launches a coin</h2>
+      <p class="lead">R-01 launches our coin, <b>Labrat ($LABRAT)</b>, on pons, a coin launchpad on Robinhood Chain, and it does every click itself. Here is how a rat uses a website.</p>
     </header>
 
     <div class="io2">
@@ -499,78 +519,83 @@
       </ol>
       <div class="rig-notes">
         <p><b>Between steps.</b> The rig puts R-01 back in its standing start pose, and the brain rests while the rig types or scrolls. That is the jump you see in the replay.</p>
-        <p><b>Who did what.</b> We chose the name, ticker, description, image and the 2% creator fee before the run, and a person pressed Start. The rig typed our text, and after the 17 checks it signed with our wallet. The rat's brain made all 11 clicks, and nothing reached the page without one.</p>
+        <p><b>Who does what.</b> We choose the name, ticker, description, image and settings before the run, and a person presses Start. The rig types our text and, only if every check passes, signs the launch transaction once. The rat's brain makes all 11 clicks, and nothing reaches the page without one.</p>
       </div>
     </div>
 
     <!-- the 11 steps -->
     <div class="panel steps11 reveal">
       <div class="steps11-hd">
-        <h3>The 11 clicks</h3>
-        <p class="mono-sub">simulated time from cue light to the rat's click</p>
+        <h3>The 11 steps</h3>
+        <p class="mono-sub">each one a lever press by the rat</p>
       </div>
       <ol class="s11" id="s11">
-        <li><span class="n">01</span><div class="sx"><b>Terms of Use</b><span>ticked the checkbox</span></div><span class="lat" style="--s:1.0"><i></i><em>1.00 s</em></span></li>
-        <li><span class="n">02</span><div class="sx"><b>Privacy Policy</b><span>ticked the checkbox</span></div><span class="lat" style="--s:.34"><i></i><em>0.34 s</em></span></li>
-        <li><span class="n">03</span><div class="sx"><b>Accept and continue</b><span>closed the terms dialog</span></div><span class="lat" style="--s:.66"><i></i><em>0.66 s</em></span></li>
-        <li><span class="n">04</span><div class="sx"><b>Choose image</b><span>opened the picker; the rig chose the coin image</span></div><span class="lat" style="--s:.38"><i></i><em>0.38 s</em></span></li>
-        <li><span class="n">05</span><div class="sx"><b>Name</b><span>clicked the box; the rig typed <code>RatTest</code></span></div><span class="lat" style="--s:.46"><i></i><em>0.46 s</em></span></li>
-        <li><span class="n">06</span><div class="sx"><b>Ticker</b><span>clicked the box; the rig typed <code>RATTEST</code></span></div><span class="lat" style="--s:.5"><i></i><em>0.50 s</em></span></li>
-        <li><span class="n">07</span><div class="sx"><b>Description</b><span>clicked the box; the rig typed the text with the brain fingerprint</span></div><span class="lat" style="--s:.52"><i></i><em>0.52 s</em></span></li>
-        <li><span class="n">08</span><div class="sx"><b>Advanced</b><span>opened the advanced settings</span></div><span class="lat" style="--s:.24"><i></i><em>0.24 s</em></span></li>
-        <li><span class="n">09</span><div class="sx"><b>Creator tax</b><span>clicked the box; the rig typed <code>2</code> (a 2% creator fee)</span></div><span class="lat" style="--s:.5"><i></i><em>0.50 s</em></span></li>
-        <li><span class="n">10</span><div class="sx"><b>Launch token</b><span>opened pons's review screen</span></div><span class="lat" style="--s:.46"><i></i><em>0.46 s</em></span></li>
-        <li><span class="n">11</span><div class="sx"><b>Confirm</b><span>pons asked the wallet for the launch transaction</span></div><span class="lat" style="--s:.9"><i></i><em>0.90 s</em></span></li>
+        <li><span class="n">01</span><div class="sx"><b>Terms of Use</b><span>ticks the checkbox</span></div></li>
+        <li><span class="n">02</span><div class="sx"><b>Privacy Policy</b><span>ticks the checkbox</span></div></li>
+        <li><span class="n">03</span><div class="sx"><b>Accept and continue</b><span>closes the terms dialog</span></div></li>
+        <li><span class="n">04</span><div class="sx"><b>Choose image</b><span>opens the picker; the rig chooses the coin logo</span></div></li>
+        <li><span class="n">05</span><div class="sx"><b>Name</b><span>clicks the box; the rig types <code>Labrat</code></span></div></li>
+        <li><span class="n">06</span><div class="sx"><b>Ticker</b><span>clicks the box; the rig types <code>LABRAT</code></span></div></li>
+        <li><span class="n">07</span><div class="sx"><b>Description</b><span>clicks the box; the rig types the text with the brain fingerprint</span></div></li>
+        <li><span class="n">08</span><div class="sx"><b>Advanced</b><span>opens the advanced settings</span></div></li>
+        <li><span class="n">09</span><div class="sx"><b>Settings field</b><span>clicks the box; the rig types our setting</span></div></li>
+        <li><span class="n">10</span><div class="sx"><b>Launch token</b><span>opens pons's review screen</span></div></li>
+        <li><span class="n">11</span><div class="sx"><b>Confirm</b><span>pons asks for the launch transaction</span></div></li>
       </ol>
-      <p class="steps11-sum"><b>11 of 11</b> hit on the first try &middot; <b>0</b> misses &middot; <b>0.54 s</b> average from cue to click &middot; <b>41 s</b> from brain-on to the Confirm click (the rig ran 88&nbsp;s in all)</p>
+      <p class="steps11-sum">A step only moves on when the rat presses the lever with the cursor inside the lit target. A press anywhere else is ignored and never reaches the page, so the rat has to hit every one of the <b>11</b> targets itself.</p>
     </div>
 
     <!-- checks + signing + result -->
     <div class="launch-end">
       <div class="panel checks reveal">
-        <h3>17 safety checks, then one signature</h3>
-        <p>pons builds the launch transaction. Before anything is signed, the rig decodes it and checks it field by field. All 17 passed:</p>
+        <h3>Checked field by field, then signed once</h3>
+        <p>pons builds the launch transaction. Before anything is signed, the rig decodes it and checks it field by field. Every check has to pass:</p>
         <ul class="chk">
           <li><svg aria-hidden="true"><use href="#i-check"/></svg>sent to the pons launch contract</li>
           <li><svg aria-hidden="true"><use href="#i-check"/></svg>calls the launch function</li>
-          <li><svg aria-hidden="true"><use href="#i-check"/></svg>pays exactly the 0.0005 ETH fee</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>pays exactly what pons charges to launch</li>
           <li><svg aria-hidden="true"><use href="#i-check"/></svg>paired with ETH</li>
-          <li><svg aria-hidden="true"><use href="#i-check"/></svg>name is RatTest</li>
-          <li><svg aria-hidden="true"><use href="#i-check"/></svg>ticker is RATTEST</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>name is Labrat</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>ticker is LABRAT</li>
           <li><svg aria-hidden="true"><use href="#i-check"/></svg>description is exactly what was typed</li>
           <li><svg aria-hidden="true"><use href="#i-check"/></svg>brain fingerprint is in it</li>
-          <li><svg aria-hidden="true"><use href="#i-check"/></svg>our wallet is the creator</li>
           <li><svg aria-hidden="true"><use href="#i-check"/></svg>the image is the one pons stored</li>
           <li><svg aria-hidden="true"><use href="#i-check"/></svg>no social links added</li>
-          <li><svg aria-hidden="true"><use href="#i-check"/></svg>creator tax is 2%</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>every setting is exactly what we chose</li>
           <li><svg aria-hidden="true"><use href="#i-check"/></svg>no developer buy</li>
           <li><svg aria-hidden="true"><use href="#i-check"/></svg>the unused number field is 0</li>
           <li><svg aria-hidden="true"><use href="#i-check"/></svg>nothing extra tacked on the end</li>
           <li><svg aria-hidden="true"><use href="#i-check"/></svg>encoded the standard way</li>
-          <li><svg aria-hidden="true"><use href="#i-check"/></svg>sent from our wallet</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>created and sent by us, nobody else</li>
         </ul>
-        <p class="signed"><span class="seal">signed once</span>Then the rig signed it with our wallet, once: the wallet's very first transaction (nonce&nbsp;0). Anything that didn't match would have stopped the launch unsigned.</p>
+        <p class="signed"><span class="seal">signed once</span>Only then does the rig sign it, once. Anything that doesn't match stops the launch unsigned. In a dry rehearsal the rig runs every check and then refuses to sign, so nothing is created.</p>
       </div>
 
-      <div class="panel result reveal">
+      <div class="panel result reveal" id="launch-result">
         <figure class="coin-fig">
           <div class="coin">
-            <img src="assets/coin.jpg" width="560" height="560" alt="RatTest's coin image: a rendered white rat with a dark head at a glowing cue light" loading="lazy" decoding="async">
+            <img src="assets/labrat-logo.jpg" width="1254" height="1254" alt="The Labrat coin logo: a pixel-art rat in yellow, pink and violet on black" loading="lazy" decoding="async">
             <span class="coin-ring" aria-hidden="true"></span>
           </div>
-          <figcaption class="coin-cap">Coin image: a 3D render of the simulated rat, not a photo.</figcaption>
+          <figcaption class="coin-cap">The coin's logo, and this site's.</figcaption>
         </figure>
         <p class="result-k">The result</p>
-        <h3 class="result-h">RatTest <span>$RATTEST</span></h3>
-        <dl class="kv">
-          <div><dt>Contract</dt><dd><a class="hex" href="https://robinhoodchain.blockscout.com/token/0x41e20894bE505f0bAE018B75E0E39534E49Aa456" target="_blank" rel="noopener">0x41e20894bE505f0bAE018B75E0E39534E49Aa456</a><button class="copy" type="button" data-copy="0x41e20894bE505f0bAE018B75E0E39534E49Aa456" aria-label="Copy contract address"><svg aria-hidden="true"><use href="#i-copy"/></svg></button></dd></div>
-          <div><dt>Transaction</dt><dd><a class="hex" href="https://robinhoodchain.blockscout.com/tx/0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207" target="_blank" rel="noopener">0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207</a><button class="copy" type="button" data-copy="0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207" aria-label="Copy transaction hash"><svg aria-hidden="true"><use href="#i-copy"/></svg></button></dd></div>
-          <div><dt>Block</dt><dd><a class="hex" href="https://robinhoodchain.blockscout.com/block/71412612" target="_blank" rel="noopener">71,412,612</a></dd></div>
-          <div><dt>Creator fee</dt><dd>2% to <a class="hex" href="https://robinhoodchain.blockscout.com/address/0x790c66fAEd9C5B6e78296a9743FbF423b390591a" target="_blank" rel="noopener">0x790c66fAEd9C5B6e78296a9743FbF423b390591a</a></dd></div>
-        </dl>
-        <div class="ctas sm">
-          <a class="btn primary" href="https://www.ponsfamily.com/launchpad/0x41e20894bE505f0bAE018B75E0E39534E49Aa456" target="_blank" rel="noopener">View on pons<svg aria-hidden="true"><use href="#i-ext"/></svg></a>
-          <a class="btn" href="https://robinhoodchain.blockscout.com/token/0x41e20894bE505f0bAE018B75E0E39534E49Aa456" target="_blank" rel="noopener">Explorer<svg aria-hidden="true"><use href="#i-ext"/></svg></a>
+        <h3 class="result-h">Labrat <span>$LABRAT</span></h3>
+        <div class="if-soon">
+          <p class="result-pill"><span class="cc-pill"><i aria-hidden="true"></i>Launching soon</span></p>
+          <p class="result-p">Not launched yet. R-01 will launch it itself, live, on pons. Its contract, the launch transaction and the block appear here once it has.</p>
+        </div>
+        <div class="if-live">
+          <dl class="kv">
+            <div><dt>Contract</dt><dd><a class="hex js-addr-link" target="_blank" rel="noopener"><span class="js-addr"></span></a><button class="copy js-addr-copy" type="button" aria-label="Copy contract address"><svg aria-hidden="true"><use href="#i-copy"/></svg></button></dd></div>
+            <div class="js-need-tx"><dt>Transaction</dt><dd><a class="hex js-tx-link" target="_blank" rel="noopener"><span class="js-tx"></span></a><button class="copy js-tx-copy" type="button" aria-label="Copy transaction hash"><svg aria-hidden="true"><use href="#i-copy"/></svg></button></dd></div>
+            <div class="js-need-block"><dt>Block</dt><dd><a class="hex js-block-link" target="_blank" rel="noopener"><span class="js-block"></span></a></dd></div>
+            <div class="js-need-date"><dt>Launched</dt><dd class="js-date"></dd></div>
+          </dl>
+          <div class="ctas sm">
+            <a class="btn primary js-pons" target="_blank" rel="noopener">View on pons<svg aria-hidden="true"><use href="#i-ext"/></svg></a>
+            <a class="btn js-explorer" target="_blank" rel="noopener">Explorer<svg aria-hidden="true"><use href="#i-ext"/></svg></a>
+          </div>
         </div>
       </div>
     </div>
@@ -614,18 +639,17 @@
     <header class="sec-hd reveal">
       <p class="idx"><span>04</span>Proof</p>
       <h2 id="proof-h">Don't take our word for it</h2>
-      <p class="lead">Everything the rat did can be checked: the brain it used is fingerprinted on-chain, and the session re-runs bit for bit.</p>
+      <p class="lead">Everything the rat does can be checked: the brain it uses is fingerprinted on-chain, and the session re-runs bit for bit.</p>
     </header>
 
     <div class="proof-grid">
       <article class="panel proof reveal">
         <p class="proof-n">A</p>
-        <h3>The brain's fingerprint is in the coin</h3>
-        <p>Before the run we computed a sha256 fingerprint over the whole brain: both networks, the physics scene and the code that runs them. The rig typed it into the coin's description, so it went on-chain inside the launch transaction. Change one dial and the fingerprint changes.</p>
+        <h3>The brain's fingerprint goes in the coin</h3>
+        <p>Before the run we compute a sha256 fingerprint over the whole brain: both networks, the physics scene and the code that runs them. The rig types it into the coin's description, so it goes on-chain inside the launch transaction. Change one dial and the fingerprint changes.</p>
         <div class="quote">
-          <p class="quote-k">RatTest's description</p>
-          <p class="quote-t">launched by a virtual rat: its trained brain steered the cursor and clicked every button. brain sha256 <mark>9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8</mark></p>
-          <button class="copy txt" type="button" data-copy="9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8"><svg aria-hidden="true"><use href="#i-copy"/></svg><span>copy hash</span></button>
+          <p class="quote-k">The coin's description</p>
+          <p class="quote-t">launched by a virtual rat: its trained brain steered the cursor and clicked every button. brain sha256 <mark>&lt;the brain's 64-character fingerprint&gt;</mark></p>
         </div>
         <p class="covers"><span>covers</span><code>scene.xml</code><code>policy.pt</code><code>steer.pt</code><code>env.py</code><code>cursor_env.py</code><code>steer_env.py</code><code>session.py</code><code>ptload.py</code></p>
       </article>
@@ -635,22 +659,22 @@
         <h3>The session replays bit for bit</h3>
         <p>Every session saves its commands, the brain's actions and every physics frame. The replay re-runs the same brain from the same start with the same commands, and prints <b>MATCH</b> only if every frame, every click and the session fingerprint come out identical.</p>
         <div class="term">
-          <div class="term-bar"><i></i><i></i><i></i><span>terminal</span><button class="copy txt" type="button" data-copy="python replay_session.py runs/brainrig_20260924T133937Z_seed2026"><svg aria-hidden="true"><use href="#i-copy"/></svg><span>copy</span></button></div>
-<pre><code><span class="pr">$</span> python replay_session.py runs/brainrig_20260924T133937Z_seed2026
-<span class="dm">brain commit  </span> 9778ea092a29&hellip;dcec8 OK
+          <div class="term-bar"><i></i><i></i><i></i><span>terminal</span></div>
+<pre><code><span class="pr">$</span> python replay_session.py runs/&lt;the launch session&gt;
+<span class="dm">brain commit  </span> &lt;the brain fingerprint&gt; OK
 <span class="dm">frames        </span> identical
 <span class="dm">clicks        </span> 11 recorded, identical
-<span class="dm">recorded proof</span> e1800ae3570e&hellip;bef8d6
-<span class="dm">replayed proof</span> e1800ae3570e&hellip;bef8d6
+<span class="dm">recorded proof</span> &lt;the session fingerprint&gt;
+<span class="dm">replayed proof</span> &lt;the same fingerprint&gt;
 <span class="ok">MATCH</span></code></pre>
         </div>
-        <p class="fine">Exact on the recording machine. A different CPU or numpy build can round the networks' float maths differently; the session records the versions used (Python 3.14.2, numpy 2.4.2, MuJoCo 3.13.0, Windows 11).</p>
+        <p class="fine">Exact on the recording machine. A different CPU or numpy build can round the networks' float maths differently, so every session records the Python, numpy and MuJoCo versions it used.</p>
       </article>
 
       <article class="panel proof reveal">
         <p class="proof-n">C</p>
         <h3>Check it on GitHub</h3>
-        <p>The code, both trained networks, the recorded RatTest session and the training logs behind the charts above are in the public repo. Read the rules the rat trained under, check the fingerprint yourself, or run the replay.</p>
+        <p>The code, both trained networks, the training logs behind the charts above and recorded sessions are in the public repo. Read the rules the rat trained under, check the fingerprint yourself, or run a replay.</p>
         <a class="gh-card" href="https://github.com/LabratDevRH/labrat" target="_blank" rel="noopener">
           <svg aria-hidden="true"><use href="#i-gh"/></svg>
           <span><b>LabratDevRH/labrat</b><em>github.com/LabratDevRH/labrat</em></span>
@@ -658,9 +682,9 @@
         </a>
         <ul class="repo-list">
           <li><code>runs/final/</code> the two networks</li>
-          <li><code>runs/brainrig_20260924T133937Z_seed2026/</code> the launch session</li>
           <li><code>train.py</code> &middot; <code>env.py</code> &middot; <code>steer_env.py</code> the training and the rules</li>
           <li><code>runs/lever_v3/log.jsonl</code> &middot; <code>runs/steer_v1/log.jsonl</code> the training logs</li>
+          <li><code>session.py</code> &middot; <code>replay_session.py</code> the launch session and its bit-exact replay</li>
         </ul>
       </article>
     </div>
@@ -683,12 +707,12 @@
         <h3>When it says LIVE TRAINING: we're training R-01 at that moment</h3>
         <p>Training runs many simulated rats in parallel, with random exploration switched on, and every so often saves a checkpoint: a snapshot of all the dials.</p>
         <p>A small program next to the training takes the <b>newest saved checkpoint</b> and plays it in <b>its own separate simulation</b>, in real time at 25 frames a second, making its best move each time. Whenever training saves again, the rat you see gets the new dials, so you can watch it improve. The charts are the training log, row by row as it is written.</p>
-        <p class="fine">&ldquo;LIVE&rdquo; appears only while a training run is actually streaming. The rest of the time the panel says REPLAY.</p>
+        <p class="fine">&ldquo;LIVE&rdquo; appears only while a training run is actually streaming. The rest of the time the panel says REPLAY, or STANDBY while no recording is loaded.</p>
       </article>
       <article class="panel watch reveal">
         <span class="badge legend replay-l"><b>REPLAY</b></span>
-        <h3>When it says REPLAY: a recording of the launch</h3>
-        <p>When nothing is training, you're watching a <b>replay of the recorded RatTest launch session</b> from 24 September 2026: re-run from its saved log with the same brain, the same start and the same commands. The lit targets and clicks are the real ones from that session.</p>
+        <h3>When it says REPLAY: a recording of a launch session</h3>
+        <p>When nothing is training, you're watching a <b>replay of a recorded launch session</b>, named next to the badge: a <b>dry rehearsal</b> of the Labrat launch, where the rat does all 11 steps on the real pons page and the rig checks the transaction and then refuses to sign, so nothing is created. It is re-run from its saved log with the same brain, the same start and the same commands, so the lit targets and clicks are the real ones from that session.</p>
         <p>Between targets the rig puts the rat back in its standing start pose, so it jumps, and the long waits while the rig types play fast-forward. It is a recording, not live. The readout beside it shows the recorded training logs of the two networks it uses.</p>
       </article>
     </div>
@@ -704,10 +728,10 @@
   <div class="wrap">
     <div class="foot-top">
       <a class="brand big" href="#top" aria-label="labrat, back to top">
-        <svg class="brand-mark" aria-hidden="true"><use href="#ratmark"/></svg>
+        <img class="brand-mark" src="assets/labrat-logo.jpg" width="1254" height="1254" alt="" loading="lazy" decoding="async">
         <span class="brand-word">lab<b>rat</b></span>
       </a>
-      <p class="foot-honest">Subject R-01 is a simulated rat driven by two trained artificial neural networks. It is not a biological brain, and no animal was involved. labrat is an independent project, not affiliated with DeepMind, Robinhood or pons. Nothing on this site signs or sends a transaction. $RATTEST is an experiment, not financial advice.</p>
+      <p class="foot-honest">Subject R-01 is a simulated rat driven by two trained artificial neural networks. It is not a biological brain, and no animal was involved. labrat is an independent project, not affiliated with DeepMind, Robinhood or pons. Nothing on this site signs or sends a transaction. $LABRAT is an experiment, not financial advice.</p>
     </div>
     <div class="foot-cols">
       <div>
@@ -722,8 +746,9 @@
         <p class="foot-k">Links</p>
         <ul>
           <li><a href="https://github.com/LabratDevRH/labrat" target="_blank" rel="noopener">github.com/LabratDevRH/labrat</a></li>
-          <li><a href="https://www.ponsfamily.com/launchpad/0x41e20894bE505f0bAE018B75E0E39534E49Aa456" target="_blank" rel="noopener">$RATTEST on pons</a></li>
-          <li><a href="https://robinhoodchain.blockscout.com/token/0x41e20894bE505f0bAE018B75E0E39534E49Aa456" target="_blank" rel="noopener">Contract on the explorer</a></li>
+          <li class="if-soon">$LABRAT: launching soon</li>
+          <li class="if-live"><a class="js-pons" target="_blank" rel="noopener">$LABRAT on pons</a></li>
+          <li class="if-live"><a class="js-explorer" target="_blank" rel="noopener">Contract on the explorer</a></li>
         </ul>
       </div>
       <div>
@@ -734,7 +759,7 @@
         </ul>
       </div>
     </div>
-    <p class="foot-base"><span>labrat &middot; operant lab &middot; Subject R-01</span><span class="mono">CA 0x41e2&hellip;a456 &middot; block 71,412,612</span></p>
+    <p class="foot-base"><span>labrat &middot; operant lab &middot; Subject R-01</span><span class="mono if-soon">$LABRAT &middot; launching soon</span><span class="mono if-live">$LABRAT &middot; CA <span class="js-addr-short"></span></span></p>
   </div>
 </footer>
 

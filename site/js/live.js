@@ -5,9 +5,10 @@
      two trained artificial neural networks. It is not a real rat and not a biological brain.
    - LIVE: only while a publisher (live/publish_training.py) is streaming a training run through the relay. What
      plays then is the latest saved training checkpoint, playing in its own simulation next to the training.
-   - REPLAY: otherwise, the recorded RatTest launch session (site/replay/ratest.bin + ratest.json), in a loop up to
-     its "loop_end". It is always labelled as a replay, never as live. The recorded timeline (the rig lighting a
-     target, the rat's click, the rig typing / scrolling, the transaction) is narrated on the HUD and the wall screen.
+   - REPLAY: otherwise, a recorded launch session (site/replay/session.bin + session.json, written by
+     live/export_replay.py; its "label" names it), in a loop up to its "loop_end". It is always labelled as a replay,
+     never as live. The recorded timeline (the rig lighting a target, the rat's click, the rig typing / scrolling,
+     the transaction check) is narrated on the HUD and the wall screen. No clip (session.json missing): STANDBY.
      The long waits where the rat only stands while the rig types play fast-forward (x4 by default), and the HUD
      says so; the clock always shows recorded session time.
    - TEST: a publisher's test stream (hello "test": true / label "TEST ...", local relays only) plays like a stream
@@ -57,10 +58,11 @@ const LIVE_NOTE = 'latest saved checkpoint, playing in its own simulation';
 const CAPTION = 'Virtual rat: DeepMind’s open-source rodent model (Apache-2.0) in MuJoCo, driven by two ' +
   'trained artificial neural networks, not a real brain. The wall screen is a schematic.';
 const CAPTION_SHORT = 'Virtual rat (DeepMind rodent model, MuJoCo) · artificial neural networks, not a real brain';
-// tags for the recorded session's timeline kinds (ratest.json "timeline")
+// tags for the recorded session's timeline kinds (session.json "timeline")
 const KIND = {start: 'SESSION', brain_on: 'BRAIN ON', lit: 'TARGET LIT', click: 'RAT CLICK', image: 'RIG', typing: 'RIG TYPES',
-  scroll: 'RIG SCROLLS', tx_requested: 'TRANSACTION', tx_checked: 'CHECKED', tx_signed: 'SIGNED', tx_sent: 'BROADCAST',
-  tx_mined: 'MINED'};
+  scroll: 'RIG SCROLLS', tx_requested: 'TRANSACTION', tx_checked: 'CHECKED', tx_refused: 'NOT SIGNED',
+  tx_signed: 'SIGNED', tx_sent: 'BROADCAST', tx_mined: 'MINED'};
+const REPLAY_LABEL = 'Replay: a recorded launch session';   // when session.json carries no label of its own
 
 /* ================================================================ entry point */
 export async function mountLive(el, opts = {}) {
@@ -116,8 +118,8 @@ function paths(opts) {
   try { root = opts.base ? new URL(opts.base, location.href) : new URL('../', import.meta.url); }
   catch (_) { root = new URL('./', location.href); }
   const u = p => new URL(p, root).href;
-  return {rat: opts.ratUrl || u('assets/rat.json'), replayJson: opts.replayJson || u('replay/ratest.json'),
-    replayBin: opts.replayBin || u('replay/ratest.bin')};
+  return {rat: opts.ratUrl || u('assets/rat.json'), replayJson: opts.replayJson || u('replay/session.json'),
+    replayBin: opts.replayBin || u('replay/session.bin')};
 }
 
 function relayUrl(opts) {
@@ -147,7 +149,7 @@ function q2m(w, x, y, z, o) {
 async function loadReplay(P) {
   const meta = await getJSON(P.replayJson);
   const nb = 65, ff = HDR + nb * 7, fb = ff * 4;
-  // the loop stops at "loop_end" (the coin is mined; the rest of the recording is the rig finishing up), so only
+  // the loop stops at "loop_end" (after the last event; the rest of the recording is the rig finishing up), so only
   // the frames up to it are fetched. A server that ignores Range sends the whole clip, which works the same.
   const lf = Number(meta.loop_end), lfps = Number(meta.fps) > 0 ? Number(meta.fps) : 20;
   const want = Number.isFinite(lf) && lf > 2 ? (Math.ceil(lf * lfps) + 3) * fb : 0;
@@ -570,7 +572,7 @@ async function mount(el, opts, st) {
   canvas.className = 'lr-canvas';
   canvas.setAttribute('role', 'img');
   canvas.setAttribute('aria-label', 'Real-time 3D view of the virtual rat (DeepMind’s rodent model in MuJoCo) in its ' +
-    'operant chamber. Shows the live training run when one is streaming, otherwise a labelled replay of the RatTest ' +
+    'operant chamber. Shows the live training run when one is streaming, otherwise a labelled replay of a recorded ' +
     'launch session.');
   el.insertBefore(canvas, el.firstChild);
   const renderer = new THREE.WebGLRenderer({canvas, antialias: false, alpha: false, depth: false, stencil: false,
@@ -904,7 +906,7 @@ async function mount(el, opts, st) {
     }
     if (mode === 'replay' && replay) {
       const m = replay.meta || {};
-      const lbl = String(m.label || 'Replay: the RatTest launch session, recorded 2026-09-24').replace(/^\s*replay\s*[:·-]\s*/i, '');
+      const lbl = String(m.label || REPLAY_LABEL).replace(/^\s*replay\s*[:·-]\s*/i, '');
       return {live: false, source: 'replay', label: 'REPLAY · ' + lbl, task: m.task || 'cursor', run: m.run || null,
         steps: null, waiting: LV.relayLive};
     }

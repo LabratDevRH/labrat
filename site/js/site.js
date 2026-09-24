@@ -1,11 +1,14 @@
-/* labrat site behaviour: nav, reveals, copy buttons, the live panel's badge / readout / charts, and the recorded
-   training curves. The 3D view itself is js/live.js (imported dynamically, so this page works without it).
+/* labrat site behaviour: nav, reveals, copy buttons, the coin card (coin.js), the live panel's badge / readout /
+   charts, and the recorded training curves. The 3D view itself is js/live.js (imported dynamically, so this page
+   works without it).
 
    Honesty rules this file enforces:
    - "LIVE TRAINING" only when live.js reports live === true (a publisher is streaming a training run), and then the
      caption says what it is: the newest saved checkpoint, playing in its own simulation.
-   - otherwise it is a REPLAY of the recorded RatTest session, and the readout shows the RECORDED training logs,
-     labelled as recorded / not live. */
+   - otherwise it is a REPLAY of a recorded launch session (replay/session.json names it), or STANDBY when there is
+     none, and the readout shows the RECORDED training logs, labelled as recorded / not live.
+   - the coin: "Launching soon" until coin.js sets window.LABRAT_COIN with a real contract address; then only its
+     public facts (contract, links, transaction, block, date). */
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
@@ -62,15 +65,75 @@ const RM = window.matchMedia ? matchMedia('(prefers-reduced-motion: reduce)') : 
       const ok = document.execCommand('copy'); ta.remove(); return ok;
     } catch (e) { return false; }
   }
-  $$('.copy[data-copy]').forEach(b => b.addEventListener('click', async () => {
+  // delegated, so copy buttons filled in later (the coin card) work too
+  document.addEventListener('click', async e => {
+    const b = e.target.closest && e.target.closest('.copy[data-copy]');
+    if (!b || b.dataset.busy) return;
+    b.dataset.busy = '1';
     const ok = await write(b.dataset.copy);
-    const span = b.querySelector('span'), was = span ? span.textContent : null;
+    const span = b.querySelector('span'), was = span ? span.textContent : null, label = b.getAttribute('aria-label');
     b.classList.toggle('done', ok);
     if (span) span.textContent = ok ? 'copied' : 'copy failed';
     b.setAttribute('aria-label', ok ? 'Copied' : 'Copy failed');
-    setTimeout(() => { b.classList.remove('done'); if (span) span.textContent = was; b.removeAttribute('aria-label'); }, 1600);
-  }));
+    setTimeout(() => {
+      b.classList.remove('done'); if (span) span.textContent = was;
+      if (label) b.setAttribute('aria-label', label); else b.removeAttribute('aria-label');
+      delete b.dataset.busy;
+    }, 1600);
+  });
 })();
+
+/* ------------------------------------------------------------------ the coin ($LABRAT), from coin.js
+   null (or anything without a real contract address): "Launching soon", no address, no links, no numbers.
+   Set after the launch: the contract, pons and explorer links, the transaction and the block. Only the fields
+   below are read. */
+const COIN = (function coin() {
+  const HEX40 = /^0x[0-9a-fA-F]{40}$/, HEX64 = /^0x[0-9a-fA-F]{64}$/;
+  const EXPLORER = 'https://robinhoodchain.blockscout.com';
+  const c = window.LABRAT_COIN;
+  const ok = !!c && typeof c === 'object' && HEX40.test(String(c.address || ''));
+  if (c && !ok) console.warn('labrat: coin.js has no valid contract address; showing "Launching soon"');
+  document.documentElement.setAttribute('data-coin', ok ? 'live' : 'soon');
+  if (!ok) return null;
+  // links only to pons and the Robinhood Chain explorer; anything else falls back to the address's own pages
+  const onHost = (u, host) => {
+    try { const x = new URL(String(u)); return x.protocol === 'https:' && (x.hostname === host || x.hostname.endsWith('.' + host)) ? x.href : null; }
+    catch (e) { return null; }
+  };
+  const addr = String(c.address);
+  const tx = HEX64.test(String(c.tx || '')) ? String(c.tx) : null;
+  const block = Number.isInteger(+c.block) && +c.block > 0 ? +c.block : null;
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(c.launched || '')) ? String(c.launched) : null;
+  const k = {
+    addr, tx, block, date,
+    pons: onHost(c.pons, 'ponsfamily.com') || 'https://www.ponsfamily.com/launchpad/' + addr,
+    explorer: onHost(c.explorer, 'robinhoodchain.blockscout.com') || EXPLORER + '/token/' + addr,
+    txUrl: tx ? EXPLORER + '/tx/' + tx : null,
+    blockUrl: block ? EXPLORER + '/block/' + block : null,
+  };
+  const short = (h, a = 6, b = 4) => h.slice(0, a) + '…' + h.slice(-b);
+  const each = (sel, f) => $$(sel).forEach(f);
+  each('.js-addr', e => { e.textContent = addr; });
+  each('.js-addr-short', e => { e.textContent = short(addr); });
+  each('.js-addr-link', e => { e.href = k.explorer; });
+  each('.js-addr-copy', e => { e.dataset.copy = addr; });
+  each('.js-pons', e => { e.href = k.pons; });
+  each('.js-explorer', e => { e.href = k.explorer; });
+  each('.js-need-tx', e => { e.hidden = !tx; });
+  each('.js-tx', e => { e.textContent = tx || ''; });
+  each('.js-tx-short', e => { e.textContent = tx ? short(tx, 10, 6) : ''; });
+  each('.js-tx-link', e => { if (tx) e.href = k.txUrl; });
+  each('.js-tx-copy', e => { if (tx) e.dataset.copy = tx; });
+  each('.js-need-block', e => { e.hidden = !block; });
+  each('.js-block', e => { e.textContent = block ? block.toLocaleString('en-US') : ''; });
+  each('.js-block-link', e => { if (block) e.href = k.blockUrl; });
+  each('.js-need-date', e => { e.hidden = !date; });
+  each('.js-date', e => { e.textContent = date || ''; });
+  each('.js-launched-sep', e => { e.textContent = date ? ' · ' + date : ''; });
+  each('.cc-tx', e => { e.hidden = !tx && !block; });
+  return k;
+})();
+void COIN;
 
 /* ------------------------------------------------------------------ formatting */
 const fmtSteps = n => {
@@ -241,13 +304,13 @@ function resumeMarker(rows) {
 
 /* ------------------------------------------------------------------ the live panel */
 const LIVE = {
-  mode: null, st: {}, rows: [], run: null, runKey: null, lastWindow: [], phGone: false, failed: false,
+  mode: null, st: {}, rows: [], run: null, runKey: null, lastWindow: [], phGone: false, failed: false, tgt: null,
   el: $('#live'), badge: $('#badge'), badgeT: $('#badge-t'), label: $('#live-label'),
   nav: $('#nav-status'), navT: $('#nav-status-t'), hudMode: $('#hud-mode'), note: $('#hud-note'),
   ph: $('#live-ph'), phTitle: $('#ph-title'), phSub: $('#ph-sub'),
   cReward: makeChart($('#c-reward')), cSuccess: makeChart($('#c-success')),
 };
-const REPLAY_LABEL = 'Replay: the RatTest launch session, recorded 2026-09-24';
+const REPLAY_LABEL = 'Replay: a recorded launch session';   // when replay/session.json carries no label of its own
 
 const stripTag = s => String(s || '').replace(/^\s*(LIVE|REPLAY|STANDBY)\s*[·:-]\s*/i, '').replace(/^\s*replay\s*[:·-]\s*/i, '').trim();
 
@@ -262,7 +325,7 @@ function setMode(mode) {
   L.nav.className = 'nav-status ' + B[0]; L.navT.textContent = B[2];
   L.nav.title = mode === 'live' ? 'A training run is streaming now'
     : mode === 'test' ? 'A publisher test stream (not a live training run)'
-    : mode === 'replay' ? 'Showing a replay of the recorded launch session' : 'Status of the live panel';
+    : mode === 'replay' ? 'Showing a replay of a recorded launch session' : 'Status of the live panel';
   L.nav.setAttribute('aria-label', 'Live panel: ' + B[2]);
 
   if (mode === 'live') {
@@ -278,19 +341,20 @@ function setMode(mode) {
     L.label.textContent = 'Replay: ' + (stripTag(st.label) || stripTag(REPLAY_LABEL)) + ' · not live' +
       (st.waiting ? ' · a training stream is connecting…' : '');
   } else if (mode === 'standby') {
-    L.label.textContent = st.waiting ? 'A training stream is connecting…' : 'No training run is streaming right now.';
+    L.label.textContent = st.waiting ? 'A training stream is connecting…'
+      : 'No training run is streaming right now. The recorded launch replay plays here once it is published.';
   } else if (mode === 'offline') {
-    L.label.textContent = 'The 3D view could not load here. The recorded session and the code are on GitHub.';
+    L.label.textContent = 'The 3D view could not load here. The code and the recorded sessions are on GitHub.';
     L.phTitle.textContent = '3D view unavailable';
-    L.phSub.textContent = 'the recorded session and the code are on GitHub';
+    L.phSub.textContent = 'the code and the recorded sessions are on GitHub';
     showPlaceholder();
   } else {
-    L.label.textContent = st.loading === true ? 'Loading the recorded replay of the RatTest launch…' : 'Connecting to the lab…';
+    L.label.textContent = st.loading === true ? 'Loading the recorded launch replay…' : 'Connecting to the lab…';
   }
   renderHUD();
 }
 
-/* run names are long (brainrig_20260924T133937Z_seed2026): let them wrap after underscores, not mid-word */
+/* run names are long (brainrig_<utc time>_seed<n>): let them wrap after underscores, not mid-word */
 function setRun(el, name) {
   const html = esc(name).replace(/_/g, '_<wbr>');
   if (el.innerHTML !== html) el.innerHTML = html;
@@ -326,21 +390,34 @@ function renderHUD() {
     return;
   }
 
-  // not live: the recorded launch session, and the recorded training logs of the two networks it uses
-  L.hudMode.textContent = L.mode === 'connecting' ? 'waiting' : 'recorded · not live';
-  task.textContent = 'RatTest launch (recorded)'; task.title = '';
-  setRun(run, (L.mode === 'replay' && st.run) ? String(st.run) : 'brainrig_20260924T133937Z_seed2026');
+  // not live: a recorded launch session (the replay), or nothing yet (standby), and the recorded training logs of
+  // the two networks the brain uses
+  const replay = L.mode === 'replay';
+  L.hudMode.textContent = L.mode === 'connecting' ? 'waiting' : replay ? 'recorded · not live' : 'standby';
+  task.textContent = replay ? 'Coin launch, 11 steps (recorded)' : 'Coin launch, 11 steps';
+  task.title = replay ? 'A replay of a recorded launch session, not live' : '';
+  setRun(run, replay && st.run ? String(st.run) : '—');
   stepsK.textContent = 'Brain';
   steps.textContent = 'lever 32.5 M + steering 1.15 M steps';
-  fallsK.textContent = 'Clicks'; falls.textContent = '11 / 11';
-  loggedK.textContent = 'Misses'; logged.textContent = '0';
+  // the replay's own progress, from live.js (the target lit now, and how many the rat has clicked)
+  const T = replay && L.tgt && L.tgt.total ? L.tgt : null;
+  fallsK.textContent = 'Target'; falls.textContent = T && T.n > 0 ? T.n + ' / ' + T.total : '—';
+  loggedK.textContent = 'Clicked'; logged.textContent = T ? Math.min(T.done | 0, T.total) + ' / ' + T.total : '—';
   const j = RECORDED && RECORDED.runs;
   if (j) {
     L.cReward.set(j.lever_v3 ? j.lever_v3.rows : [], { key: 'clean_rate', color: COL.gold, fmt: pct, label: 'Lever net · clean presses', yMin: null, yMax: 1, marker: null });
     const sr = j.steer_v1 ? j.steer_v1.rows : [];
     L.cSuccess.set(sr, { key: 'hits', color: COL.pink, fmt: v => num(v, 2), label: 'Steering net · targets per attempt (of 4)', yMin: 0, yMax: null, marker: resumeMarker(sr) });
   }
-  L.note.textContent = 'Recorded training logs of the two networks in this brain (not live). Live charts appear here whenever a training run is streaming.';
+  L.note.textContent = 'Charts: the recorded training logs of the two networks (not live). Live charts appear here whenever a training run is streaming.';
+}
+
+/* live.js onTarget (replay only): {n, total, label, lit, done}; the readout shows it while the replay plays */
+function onTarget(t) {
+  if (!t || typeof t !== 'object' || !Number.isFinite(t.total)) return;
+  const was = LIVE.tgt;
+  LIVE.tgt = {n: t.n | 0, total: t.total | 0, done: t.done | 0};
+  if (LIVE.mode === 'replay' && (!was || was.n !== LIVE.tgt.n || was.done !== LIVE.tgt.done)) renderHUD();
 }
 
 function hidePlaceholder() {
@@ -490,6 +567,7 @@ recordedReady.then(() => renderHUD());
       loader: false,             // the dot-rat placeholder (#live-ph) is this page's one loading message
       onStatus: s => { try { onStatus(s); } catch (e) { console.warn('labrat: onStatus', e); } },
       onMetrics: (r, info) => { try { onMetrics(r, info); } catch (e) { console.warn('labrat: onMetrics', e); } },
+      onTarget: t => { try { onTarget(t); } catch (e) { console.warn('labrat: onTarget', e); } },
     });
     // null: the 3D view could not start here; the dot-rat placeholder stays up with the offline message
     if (!handle) { LIVE.failed = true; setMode('offline'); return; }
