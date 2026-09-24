@@ -1,0 +1,742 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>labrat · a virtual rat launched a coin</title>
+<meta name="description" content="Subject R-01 is a virtual rat: DeepMind's open-source rodent model in a physics simulation, driven by two trained artificial neural networks. Its head moves the cursor and a lever press clicks. It launched RatTest ($RATTEST) on pons, doing all 11 clicks itself.">
+<meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
+<meta property="og:type" content="website">
+<meta property="og:title" content="labrat · a virtual rat launched a coin">
+<meta property="og:description" content="A simulated rat with a brain of two trained neural networks. Its head is the mouse, a lever press is the click. 11 of 11 clicks, 0 misses, one signature.">
+<link rel="icon" href="assets/mark.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="css/site.css">
+<script>document.documentElement.classList.add('js');</script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+}, "integrity": {
+  "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js": "sha384-61S/Nu32S3E5+n+KpCOTb2eRYps6fVKm+9Gz1QBvSePFthb46f063Aa/qe/lykFZ"
+} }
+</script>
+<link rel="modulepreload" href="js/live.js">
+<link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" integrity="sha384-61S/Nu32S3E5+n+KpCOTb2eRYps6fVKm+9Gz1QBvSePFthb46f063Aa/qe/lykFZ" crossorigin="anonymous">
+<script src="config.js"></script>
+<script type="module" src="js/site.js"></script>
+</head>
+<body>
+
+<!-- shared drawing defs: the rat mark and the logo ramp (kept out of layout, not display:none, so gradients resolve) -->
+<svg class="defs" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="g-mark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8808B5"/><stop offset=".35" stop-color="#D60C94"/>
+      <stop offset=".65" stop-color="#EA3560"/><stop offset="1" stop-color="#F5AC29"/></linearGradient>
+    <linearGradient id="g-ramp" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4B04C4"/><stop offset=".22" stop-color="#8808B5"/><stop offset=".45" stop-color="#D60C94"/>
+      <stop offset=".62" stop-color="#EA3560"/><stop offset=".78" stop-color="#E86E3D"/><stop offset=".9" stop-color="#F5AC29"/>
+      <stop offset="1" stop-color="#FCF010"/></linearGradient>
+    <linearGradient id="g-gold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#E86E3D"/><stop offset=".55" stop-color="#F5AC29"/><stop offset="1" stop-color="#FCF010"/></linearGradient>
+    <radialGradient id="g-glow"><stop offset="0" stop-color="#FFF40F" stop-opacity=".9"/><stop offset=".35" stop-color="#F5AC29" stop-opacity=".45"/>
+      <stop offset="1" stop-color="#E86E3D" stop-opacity="0"/></radialGradient>
+    <radialGradient id="g-glow-m"><stop offset="0" stop-color="#D60C94" stop-opacity=".7"/><stop offset="1" stop-color="#8808B5" stop-opacity="0"/></radialGradient>
+    <symbol id="ratmark" viewBox="0 0 44 27">
+      <g transform="translate(42 11) scale(-1 1)" stroke-linejoin="round" stroke-linecap="round">
+        <path d="M31 1.6C37.5 3 40.5 8.6 36.6 11.8C33.4 14.4 29.4 12.2 31 9.6" fill="none" stroke="url(#g-mark)" stroke-width="1.8"/>
+        <path d="M0 0C2-1.6 5-3.4 8.5-4.6C11-7.2 16-9.2 22-8.6C28-8 32.5-5 32.5-.6C32.5 2.6 30 4.4 26.5 4.6C20 5.6 13 5.4 9 4C6 3.2 2.5 1.8 0 0Z" fill="url(#g-mark)"/>
+        <circle cx="11.6" cy="-6.4" r="2.9" fill="#f59aaf"/>
+        <circle cx="6.1" cy="-1.5" r=".95" fill="#000"/>
+        <circle cx=".4" cy="0" r="1.1" fill="#FFF40F"/>
+      </g>
+    </symbol>
+    <symbol id="i-ext" viewBox="0 0 16 16"><path d="M6 3h7v7M13 3 4 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-gh" viewBox="0 0 16 16"><path fill="currentColor" d="M8 .2a8 8 0 0 0-2.5 15.6c.4 0 .5-.2.5-.4v-1.5c-2.2.5-2.7-1-2.7-1-.4-.9-.9-1.2-.9-1.2-.7-.5.1-.5.1-.5.8.1 1.2.8 1.2.8.7 1.3 1.9.9 2.3.7.1-.5.3-.9.5-1.1-1.8-.2-3.6-.9-3.6-4 0-.9.3-1.6.8-2.1-.1-.2-.4-1 .1-2.1 0 0 .7-.2 2.2.8a7.4 7.4 0 0 1 4 0c1.5-1 2.2-.8 2.2-.8.4 1.1.2 1.9.1 2.1.5.6.8 1.3.8 2.1 0 3.1-1.9 3.8-3.6 4 .3.3.5.8.5 1.5v2.2c0 .2.1.5.6.4A8 8 0 0 0 8 .2Z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.9c0-.8-.6-1.4-1.4-1.4H3.9c-.8 0-1.4.6-1.4 1.4v5.2c0 .8.6 1.4 1.4 1.4h1.6"/></g></symbol>
+    <symbol id="i-check" viewBox="0 0 16 16"><path d="m3.5 8.4 2.9 2.9 6.1-6.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="sky" aria-hidden="true"><i class="neb n1"></i><i class="neb n2"></i><i class="neb n3"></i><i class="stars"></i></div>
+
+<header class="nav" id="nav">
+  <div class="nav-in">
+    <a class="brand" href="#top" aria-label="labrat, back to top">
+      <svg class="brand-mark" aria-hidden="true"><use href="#ratmark"/></svg>
+      <span class="brand-word">lab<b>rat</b></span>
+    </a>
+    <nav class="links" id="links" aria-label="Sections">
+      <a href="#live">Live</a>
+      <a href="#subject">Subject</a>
+      <a href="#brain">Brain</a>
+      <a href="#launch">Launch</a>
+      <a href="#proof">Proof</a>
+      <a href="#watching">Watching</a>
+    </nav>
+    <a class="nav-status conn" id="nav-status" href="#live" title="Status of the live panel"><i></i><span id="nav-status-t">connecting</span></a>
+    <a class="nav-gh" href="https://github.com/LabratDevRH/labrat" target="_blank" rel="noopener"><svg aria-hidden="true"><use href="#i-gh"/></svg><span>GitHub</span></a>
+    <button class="menu" id="menu" type="button" aria-expanded="false" aria-controls="links"><span class="menu-bars" aria-hidden="true"><i></i><i></i></span><span class="sr">Menu</span></button>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- ================================================================ HERO -->
+<section class="hero" id="top">
+  <div class="wrap hero-grid">
+    <div class="hero-id reveal">
+      <p class="eyebrow"><span class="dot"></span>Operant lab &middot; Subject R-01 &middot; Robinhood Chain</p>
+      <h1 class="word" aria-label="labrat">
+        <svg class="word-mark" aria-hidden="true"><use href="#ratmark"/></svg><span class="w1" aria-hidden="true">lab</span><span class="w2" aria-hidden="true">rat</span>
+      </h1>
+    </div>
+    <div class="hero-copy reveal">
+      <p class="hook">We gave a virtual rat a brain made of two trained neural networks and taught it to press a lever. Then its head became the mouse, the lever became the click, and it launched a real coin, doing every one of the <b>11&nbsp;clicks</b> itself.</p>
+      <div class="ctas">
+        <a class="btn primary" href="https://www.ponsfamily.com/launchpad/0x41e20894bE505f0bAE018B75E0E39534E49Aa456" target="_blank" rel="noopener">$RATTEST on pons<svg aria-hidden="true"><use href="#i-ext"/></svg></a>
+        <a class="btn" href="https://robinhoodchain.blockscout.com/token/0x41e20894bE505f0bAE018B75E0E39534E49Aa456" target="_blank" rel="noopener">Contract on explorer<svg aria-hidden="true"><use href="#i-ext"/></svg></a>
+        <a class="btn ghost" href="https://github.com/LabratDevRH/labrat" target="_blank" rel="noopener"><svg class="lead-ic" aria-hidden="true"><use href="#i-gh"/></svg>GitHub repo</a>
+      </div>
+      <p class="hero-note"><span class="pill">not a real rat brain</span> a simulated body driven by artificial networks</p>
+    </div>
+  </div>
+
+  <!-- the live panel: js/live.js renders the 3D view into #live-view; site.js owns the badge, readout and charts -->
+  <div class="wrap wide">
+    <section class="live-panel reveal" id="live" aria-labelledby="live-title" data-mode="connecting">
+      <h2 class="sr" id="live-title">Live simulation</h2>
+      <div class="live-bar">
+        <span class="badge conn" id="badge"><i aria-hidden="true"></i><b id="badge-t">CONNECTING</b></span>
+        <span class="live-label" id="live-label" aria-live="polite">Connecting to the lab&hellip;</span>
+        <a class="live-help" href="#watching">What am I watching?</a>
+      </div>
+      <div class="live-body">
+        <div class="stage" id="stage">
+          <div class="live-view" id="live-view"></div>
+          <div class="ph" id="live-ph">
+            <canvas id="ph-canvas" aria-hidden="true"></canvas>
+            <div class="ph-t"><b id="ph-title">Connecting to the lab</b><span id="ph-sub">loading the 3D view of Subject R-01</span></div>
+          </div>
+          <span class="brk" aria-hidden="true"></span>
+        </div>
+        <aside class="hud" id="hud" aria-label="Training readout">
+          <div class="hud-hd"><span class="hud-k">Readout</span><span class="hud-mode" id="hud-mode">waiting</span></div>
+          <dl class="hud-kv">
+            <div><dt>Task</dt><dd id="h-task">&mdash;</dd></div>
+            <div><dt>Run</dt><dd id="h-run" class="mono">&mdash;</dd></div>
+            <div><dt id="h-steps-k">Checkpoint</dt><dd id="h-steps" class="mono">&mdash;</dd></div>
+          </dl>
+          <figure class="chart" id="c-reward">
+            <figcaption><span class="c-l">Reward per attempt</span><b class="c-v">&mdash;</b></figcaption>
+            <div class="c-box"><canvas role="img" aria-label="Reward per practice attempt over training steps"></canvas><div class="c-tip" hidden></div></div>
+          </figure>
+          <figure class="chart" id="c-success">
+            <figcaption><span class="c-l">Success</span><b class="c-v">&mdash;</b></figcaption>
+            <div class="c-box"><canvas role="img" aria-label="Success over training steps"></canvas><div class="c-tip" hidden></div></div>
+          </figure>
+          <div class="hud-foot">
+            <div class="hud-stat"><span>Falls</span><b id="h-falls">&mdash;</b></div>
+            <div class="hud-stat"><span>Steps logged</span><b id="h-logged">&mdash;</b></div>
+          </div>
+          <p class="hud-note" id="hud-note">Training charts appear here while a training run is streaming.</p>
+        </aside>
+      </div>
+    </section>
+  </div>
+
+  <div class="wrap wide">
+    <ul class="facts reveal" aria-label="The launch in numbers">
+      <li><b>11<small>/11</small></b><span>clicks by the rat</span></li>
+      <li><b>0</b><span>misses</span></li>
+      <li><b>17<small>/17</small></b><span>safety checks passed</span></li>
+      <li><b>1</b><span>signature to launch</span></li>
+      <li><b>2,312</b><span>artificial units</span></li>
+      <li><b>643,072</b><span>connections</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================================================================ 01 SUBJECT -->
+<section class="sec" id="subject" aria-labelledby="subject-h">
+  <div class="wrap">
+    <header class="sec-hd reveal">
+      <p class="idx"><span>01</span>The subject</p>
+      <h2 id="subject-h">Meet Subject R-01</h2>
+      <p class="lead">R-01 is a virtual rat. There is no animal and no camera: it is a physics simulation of a rat's body, and a computer brain has to control it.</p>
+    </header>
+
+    <div class="subject-grid">
+      <div class="prose reveal">
+        <p>Its body is <b>DeepMind's open-source virtual rodent</b>, a detailed model of a real rat's skeleton built for neuroscience research (the rat from Aldarondo et&nbsp;al., <i>Nature</i> 2024). It has <b>67 joints</b> moved by <b>38 motors</b> and weighs <b>0.34&nbsp;kg</b>.</p>
+        <p>It lives inside <b>MuJoCo</b>, a physics engine that works out gravity, friction and collisions every 2&nbsp;milliseconds. Nothing is animated by hand: whenever the brain is in control, it decides 50 times a second where each motor should move its joint, and the physics does the rest.</p>
+        <p>That makes it a real balancing act. Push the wrong motors and it wobbles, slips or <b>falls over</b>, the way any body would.</p>
+        <p>Its home is an <b>operant box</b>: the classic lab chamber where rats learn that pressing a lever pays off. Ours has four walls, a floor and a spring-loaded lever hinged on the front wall.</p>
+      </div>
+
+      <figure class="panel chamber reveal">
+        <svg class="chamber-svg" viewBox="0 0 560 330" role="img" aria-labelledby="chamber-t">
+          <title id="chamber-t">Diagram: the simulated rat standing in an operant box, facing a spring lever on the front wall</title>
+          <defs>
+            <pattern id="p-floor" width="16" height="8" patternUnits="userSpaceOnUse"><rect width="8" height="8" fill="#8808B5" fill-opacity=".32"/><rect x="8" width="8" height="8" fill="#4B04C4" fill-opacity=".18"/></pattern>
+            <linearGradient id="g-wall" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4B04C4" stop-opacity=".22"/><stop offset="1" stop-color="#1308AE" stop-opacity=".04"/></linearGradient>
+          </defs>
+          <!-- the box -->
+          <rect x="24" y="30" width="480" height="236" rx="6" fill="url(#g-wall)" stroke="#8808B5" stroke-opacity=".6"/>
+          <rect x="24" y="266" width="480" height="8" fill="url(#p-floor)"/>
+          <line x1="24" y1="266" x2="504" y2="266" stroke="#8808B5" stroke-width="2"/>
+          <rect x="492" y="30" width="12" height="236" fill="#1308AE" fill-opacity=".55" stroke="#8808B5" stroke-opacity=".7"/>
+          <!-- lever on the front wall, hinged at the wall -->
+          <circle cx="468" cy="202" r="30" fill="url(#g-glow)" class="cue-glow"/>
+          <g class="lever-anim">
+            <rect x="436" y="198" width="58" height="9" rx="3" fill="url(#g-gold)"/>
+          </g>
+          <circle cx="492" cy="202" r="4" fill="#000" stroke="#F5AC29" stroke-width="1.5"/>
+          <!-- the rat, side view, facing the lever -->
+          <g transform="translate(150 118)">
+            <path d="M60 120 C 30 124, 0 140, -40 136 C -70 133, -92 140, -110 146" fill="none" stroke="url(#g-mark)" stroke-width="4" stroke-linecap="round"/>
+            <path d="M52 110 C 48 64, 110 38, 170 44 C 205 47, 230 60, 250 80 C 264 92, 282 104, 296 118 C 288 128, 270 132, 250 131 C 224 140, 190 146, 150 146 L 84 146 C 64 146, 54 132, 52 110 Z" fill="url(#g-mark)"/>
+            <rect x="92" y="136" width="14" height="12" rx="5" fill="#D60C94"/>
+            <rect x="120" y="136" width="14" height="12" rx="5" fill="#D60C94"/>
+            <rect x="222" y="134" width="12" height="14" rx="5" fill="#EA3560"/>
+            <path d="M258 128 C 266 118, 278 104, 290 92" fill="none" stroke="#EA3560" stroke-width="10" stroke-linecap="round"/>
+            <circle cx="232" cy="62" r="13" fill="#f59aaf"/>
+            <circle cx="264" cy="96" r="3.4" fill="#000"/>
+            <circle cx="296" cy="118" r="4" fill="#FFF40F"/>
+          </g>
+          <!-- labels -->
+          <g class="svg-lbl">
+            <line x1="480" y1="186" x2="448" y2="120" stroke="#F5AC29" stroke-opacity=".7"/><text x="444" y="112" text-anchor="end">spring lever</text>
+            <text x="498" y="24" text-anchor="end">front wall</text>
+            <line x1="200" y1="176" x2="176" y2="96" stroke="#e255b4" stroke-opacity=".7"/><text x="172" y="90" text-anchor="middle">R-01 (simulated)</text>
+            <text x="40" y="302">floor</text><line x1="62" y1="292" x2="74" y2="276" stroke="#8808B5"/>
+            <text x="40" y="52" class="svg-sub">MuJoCo physics &middot; 2 ms steps</text>
+          </g>
+        </svg>
+        <dl class="spec">
+          <div><dt>Body</dt><dd>DeepMind rodent model, open source</dd></div>
+          <div><dt>Joints</dt><dd><b>67</b></dd></div>
+          <div><dt>Motors</dt><dd><b>38</b> (the brain drives these)</dd></div>
+          <div><dt>Weight</dt><dd><b>0.34</b> kg</dd></div>
+          <div><dt>Physics</dt><dd>MuJoCo, one step every <b>2</b>&nbsp;ms</dd></div>
+          <div><dt>Brain</dt><dd>2 trained artificial networks</dd></div>
+        </dl>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 02 BRAIN -->
+<section class="sec" id="brain" aria-labelledby="brain-h">
+  <div class="wrap">
+    <header class="sec-hd reveal">
+      <p class="idx"><span>02</span>The brain</p>
+      <h2 id="brain-h">How we built its brain</h2>
+      <p class="lead">We never programmed the lever press or the head-steering. We built two artificial neural networks and let them learn by trial and error, the way a lab rat learns a lever: try something, get rewarded, repeat.</p>
+    </header>
+
+    <div class="cards3">
+      <article class="panel concept reveal">
+        <svg class="concept-svg" viewBox="0 0 320 160" role="img" aria-labelledby="dials-t">
+          <title id="dials-t">Diagram: numbers flow from inputs through layers of units to outputs; every connection is a dial</title>
+          <defs><linearGradient id="dl-g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="320" y2="0">
+            <stop offset="0" stop-color="#8808B5"/><stop offset=".5" stop-color="#D60C94"/><stop offset="1" stop-color="#F5AC29"/></linearGradient></defs>
+          <g>
+            <line x1="34" y1="40" x2="122" y2="16" stroke="#8808B5" stroke-opacity="0.18" stroke-width="1.1"/>
+            <line x1="34" y1="40" x2="122" y2="48" stroke="#8808B5" stroke-opacity="0.13" stroke-width="0.8"/>
+            <line x1="34" y1="40" x2="122" y2="80" stroke="url(#dl-g)" stroke-opacity="0.35" stroke-width="1.6"/>
+            <line x1="34" y1="40" x2="122" y2="112" stroke="#8808B5" stroke-opacity="0.12" stroke-width="0.7"/>
+            <line x1="34" y1="40" x2="122" y2="144" stroke="#8808B5" stroke-opacity="0.28" stroke-width="1.5"/>
+            <line x1="34" y1="80" x2="122" y2="16" stroke="#8808B5" stroke-opacity="0.19" stroke-width="1.2"/>
+            <line x1="34" y1="80" x2="122" y2="48" stroke="#8808B5" stroke-opacity="0.12" stroke-width="0.7"/>
+            <line x1="34" y1="80" x2="122" y2="80" stroke="#8808B5" stroke-opacity="0.26" stroke-width="1.4"/>
+            <line x1="34" y1="80" x2="122" y2="112" stroke="#8808B5" stroke-opacity="0.12" stroke-width="0.7"/>
+            <line x1="34" y1="80" x2="122" y2="144" stroke="#8808B5" stroke-opacity="0.22" stroke-width="1.3"/>
+            <line x1="34" y1="120" x2="122" y2="16" stroke="#8808B5" stroke-opacity="0.12" stroke-width="0.7"/>
+            <line x1="34" y1="120" x2="122" y2="48" stroke="#8808B5" stroke-opacity="0.12" stroke-width="0.7"/>
+            <line x1="34" y1="120" x2="122" y2="80" stroke="#8808B5" stroke-opacity="0.22" stroke-width="1.3"/>
+            <line x1="34" y1="120" x2="122" y2="112" stroke="url(#dl-g)" stroke-opacity="0.50" stroke-width="1.9"/>
+            <line x1="34" y1="120" x2="122" y2="144" stroke="#8808B5" stroke-opacity="0.13" stroke-width="0.8"/>
+            <line x1="122" y1="16" x2="210" y2="16" stroke="#8808B5" stroke-opacity="0.15" stroke-width="1.0"/>
+            <line x1="122" y1="16" x2="210" y2="48" stroke="url(#dl-g)" stroke-opacity="0.34" stroke-width="1.6"/>
+            <line x1="122" y1="16" x2="210" y2="80" stroke="url(#dl-g)" stroke-opacity="0.61" stroke-width="2.1"/>
+            <line x1="122" y1="16" x2="210" y2="112" stroke="#8808B5" stroke-opacity="0.30" stroke-width="1.5"/>
+            <line x1="122" y1="16" x2="210" y2="144" stroke="#8808B5" stroke-opacity="0.21" stroke-width="1.2"/>
+            <line x1="122" y1="48" x2="210" y2="16" stroke="url(#dl-g)" stroke-opacity="0.64" stroke-width="2.2"/>
+            <line x1="122" y1="48" x2="210" y2="48" stroke="#8808B5" stroke-opacity="0.12" stroke-width="0.7"/>
+            <line x1="122" y1="48" x2="210" y2="80" stroke="url(#dl-g)" stroke-opacity="0.53" stroke-width="2.0"/>
+            <line x1="122" y1="48" x2="210" y2="112" stroke="#8808B5" stroke-opacity="0.17" stroke-width="1.1"/>
+            <line x1="122" y1="48" x2="210" y2="144" stroke="#8808B5" stroke-opacity="0.13" stroke-width="0.8"/>
+            <line x1="122" y1="80" x2="210" y2="16" stroke="#8808B5" stroke-opacity="0.13" stroke-width="0.8"/>
+            <line x1="122" y1="80" x2="210" y2="48" stroke="#8808B5" stroke-opacity="0.17" stroke-width="1.1"/>
+            <line x1="122" y1="80" x2="210" y2="80" stroke="url(#dl-g)" stroke-opacity="0.49" stroke-width="1.9"/>
+            <line x1="122" y1="80" x2="210" y2="112" stroke="#8808B5" stroke-opacity="0.14" stroke-width="0.9"/>
+            <line x1="122" y1="80" x2="210" y2="144" stroke="#8808B5" stroke-opacity="0.31" stroke-width="1.5"/>
+            <line x1="122" y1="112" x2="210" y2="16" stroke="url(#dl-g)" stroke-opacity="0.34" stroke-width="1.6"/>
+            <line x1="122" y1="112" x2="210" y2="48" stroke="#8808B5" stroke-opacity="0.20" stroke-width="1.2"/>
+            <line x1="122" y1="112" x2="210" y2="80" stroke="#8808B5" stroke-opacity="0.29" stroke-width="1.5"/>
+            <line x1="122" y1="112" x2="210" y2="112" stroke="#8808B5" stroke-opacity="0.12" stroke-width="0.7"/>
+            <line x1="122" y1="112" x2="210" y2="144" stroke="#8808B5" stroke-opacity="0.12" stroke-width="0.7"/>
+            <line x1="122" y1="144" x2="210" y2="16" stroke="#8808B5" stroke-opacity="0.14" stroke-width="0.9"/>
+            <line x1="122" y1="144" x2="210" y2="48" stroke="url(#dl-g)" stroke-opacity="0.37" stroke-width="1.7"/>
+            <line x1="122" y1="144" x2="210" y2="80" stroke="#8808B5" stroke-opacity="0.22" stroke-width="1.3"/>
+            <line x1="122" y1="144" x2="210" y2="112" stroke="#8808B5" stroke-opacity="0.17" stroke-width="1.1"/>
+            <line x1="122" y1="144" x2="210" y2="144" stroke="#8808B5" stroke-opacity="0.31" stroke-width="1.5"/>
+            <line x1="210" y1="16" x2="292" y2="60" stroke="#8808B5" stroke-opacity="0.23" stroke-width="1.3"/>
+            <line x1="210" y1="16" x2="292" y2="100" stroke="#8808B5" stroke-opacity="0.17" stroke-width="1.1"/>
+            <line x1="210" y1="48" x2="292" y2="60" stroke="url(#dl-g)" stroke-opacity="0.47" stroke-width="1.9"/>
+            <line x1="210" y1="48" x2="292" y2="100" stroke="url(#dl-g)" stroke-opacity="0.39" stroke-width="1.7"/>
+            <line x1="210" y1="80" x2="292" y2="60" stroke="#8808B5" stroke-opacity="0.15" stroke-width="1.0"/>
+            <line x1="210" y1="80" x2="292" y2="100" stroke="#8808B5" stroke-opacity="0.30" stroke-width="1.5"/>
+            <line x1="210" y1="112" x2="292" y2="60" stroke="#8808B5" stroke-opacity="0.27" stroke-width="1.4"/>
+            <line x1="210" y1="112" x2="292" y2="100" stroke="url(#dl-g)" stroke-opacity="0.54" stroke-width="2.0"/>
+            <line x1="210" y1="144" x2="292" y2="60" stroke="url(#dl-g)" stroke-opacity="0.41" stroke-width="1.8"/>
+            <line x1="210" y1="144" x2="292" y2="100" stroke="#8808B5" stroke-opacity="0.17" stroke-width="1.1"/>
+          </g>
+          <g fill="#4B04C4" stroke="#8808B5" stroke-width="1.2">
+            <circle cx="34" cy="40" r="6"/><circle cx="34" cy="80" r="6"/><circle cx="34" cy="120" r="6"/>
+            <circle cx="122" cy="16" r="5.5"/><circle cx="122" cy="48" r="5.5" fill="#D60C94"/><circle cx="122" cy="80" r="5.5"/><circle cx="122" cy="112" r="5.5" fill="#D60C94"/><circle cx="122" cy="144" r="5.5"/>
+            <circle cx="210" cy="16" r="5.5" fill="#EA3560"/><circle cx="210" cy="48" r="5.5"/><circle cx="210" cy="80" r="5.5" fill="#E86E3D"/><circle cx="210" cy="112" r="5.5"/><circle cx="210" cy="144" r="5.5" fill="#D60C94"/>
+            <circle cx="292" cy="60" r="6.5" fill="#F5AC29" stroke="#FCF010"/><circle cx="292" cy="100" r="6.5" fill="#FCF010" stroke="#FFF40F"/>
+          </g>
+          <!-- one dial -->
+          <g transform="translate(166 48)">
+            <circle r="11" fill="#000" stroke="#FCF010" stroke-width="1.6"/>
+            <line x1="0" y1="0" x2="6" y2="-7" stroke="#FCF010" stroke-width="2" stroke-linecap="round" class="dial-needle"/>
+          </g>
+          <g class="svg-lbl sm">
+            <text x="34" y="152" text-anchor="middle">in</text>
+            <text x="292" y="130" text-anchor="middle">out</text>
+            <text x="166" y="28" text-anchor="middle" class="gold">a dial</text>
+          </g>
+        </svg>
+        <h3>A network is a big set of tiny dials</h3>
+        <p>Numbers go in: what the rat can sense, like its joint angles and where the lever is. They flow through layers of simple units, and every connection has a dial that turns the signal up or down. Numbers come out: where each motor should move its joint.</p>
+        <p class="kicker">R-01's two networks: <b>2,312</b> units, <b>643,072</b> dials.</p>
+      </article>
+
+      <article class="panel concept reveal">
+        <svg class="concept-svg" viewBox="0 0 320 160" role="img" aria-labelledby="loop-t">
+          <title id="loop-t">Diagram: a loop of try, score, and nudge the dials</title>
+          <defs><marker id="m-arr" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" fill="#F5AC29"/></marker></defs>
+          <g fill="none" stroke="url(#g-ramp)" stroke-width="2" marker-end="url(#m-arr)">
+            <path d="M84 50 C 124 18, 196 18, 234 48"/>
+            <path d="M252 87 C 248 106, 222 118, 186 116"/>
+            <path d="M138 117 C 104 122, 76 110, 67 91"/>
+          </g>
+          <g class="loop-node"><circle cx="60" cy="62" r="26" fill="#0c0420" stroke="#8808B5" stroke-width="1.5"/>
+            <path d="M48 70 l6-14 6 10 6-18 6 22" fill="none" stroke="#e255b4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+          <g class="loop-node"><circle cx="260" cy="62" r="26" fill="#0c0420" stroke="#F5AC29" stroke-width="1.5"/>
+            <text x="260" y="67" text-anchor="middle" class="loop-score">+/&minus;</text></g>
+          <g class="loop-node"><circle cx="160" cy="112" r="22" fill="#0c0420" stroke="#D60C94" stroke-width="1.5"/>
+            <circle cx="160" cy="112" r="9" fill="none" stroke="#FCF010" stroke-width="1.6"/>
+            <g transform="translate(160 112)"><line x1="0" y1="0" x2="5" y2="-6" stroke="#FCF010" stroke-width="2" stroke-linecap="round" class="dial-needle"/></g></g>
+          <g class="svg-lbl sm">
+            <text x="60" y="22" text-anchor="middle">try</text>
+            <text x="260" y="22" text-anchor="middle">score it</text>
+            <text x="160" y="152" text-anchor="middle">nudge the dials</text>
+          </g>
+        </svg>
+        <h3>Learning is trial, error and reward</h3>
+        <p>At first the dials are random, and so are the movements. We score every attempt: points for a clean lever press and for standing well, a penalty for falling over. After each round of practice the dials are nudged towards whatever scored more.</p>
+        <p class="kicker">This is reinforcement learning. The method we used is called <b>PPO</b>.</p>
+      </article>
+
+      <article class="panel concept reveal">
+        <div class="bignums">
+          <div><b>32.5<small>M</small></b><span>practice steps for the lever network</span></div>
+          <div><b>&asymp;7.5<small> days</small></b><span>of simulated time for the lever network, spread over many simulated rats at once</span></div>
+          <div><b>1.15<small>M</small></b><span>practice steps for the steering network</span></div>
+        </div>
+        <h3>Millions of tries</h3>
+        <p>Each practice step is 20&nbsp;milliseconds of simulated time. A network that starts from random dials needs a huge number of tries, so training runs many copies of the rat in parallel.</p>
+      </article>
+    </div>
+
+    <!-- the two networks -->
+    <div class="stages">
+      <article class="panel stage-card reveal">
+        <p class="stage-k"><span>Stage 1</span>The lever-press network</p>
+        <div class="net" aria-label="Lever-press network layers: 200 inputs, 512, 512 and 256 hidden units, 38 outputs">
+          <div class="net-io"><b>200</b><span>senses: body + lever</span></div>
+          <div class="layers warm0"><i data-n="200" style="--u:200"></i><i data-n="512" style="--u:512"></i><i data-n="512" style="--u:512"></i><i data-n="256" style="--u:256"></i><i data-n="38" style="--u:38"></i></div>
+          <div class="net-io out"><b>38</b><span>body motors</span></div>
+        </div>
+        <p>It feels 200 numbers about its body and the lever and drives all 38 motors. Its job: <b>press the lever with a paw and stay standing</b>. A press only counts if it is clean: a paw pushes the lever past 11.5&deg;, the head and belly stay off it, and the rat is upright.</p>
+        <p>Then we tested the lever-press network on its own: 800 fresh attempts in four test suites. Every single time it made a clean press and was still standing 1.2&nbsp;s later:</p>
+        <ul class="suites">
+          <li><span class="sn">Standard</span><span class="sd">the lever task's normal start: standing in front of the lever after a 1&nbsp;s settle</span><span class="sb"><i style="width:100%"></i></span><b>200/200</b></li>
+          <li><span class="sn">Wide</span><span class="sd">new start spots, stiffer or softer lever, grippier or slippier floor</span><span class="sb"><i style="width:100%"></i></span><b>200/200</b></li>
+          <li><span class="sn">Shoves</span><span class="sd">shoved in a random direction before pressing</span><span class="sb"><i style="width:100%"></i></span><b>200/200</b></li>
+          <li><span class="sn">Noisy</span><span class="sd">random jitter added to its own moves</span><span class="sb"><i style="width:100%"></i></span><b>200/200</b></li>
+        </ul>
+      </article>
+
+      <article class="panel stage-card reveal">
+        <p class="stage-k"><span>Stage 2</span>The steering network</p>
+        <div class="net" aria-label="Steering network layers: 21 inputs, 256, 256 and 256 hidden units, 5 outputs">
+          <div class="net-io"><b>21</b><span>senses: target, cursor, head</span></div>
+          <div class="layers warm1"><i data-n="21" style="--u:21"></i><i data-n="256" style="--u:256"></i><i data-n="256" style="--u:256"></i><i data-n="256" style="--u:256"></i><i data-n="5" style="--u:5"></i></div>
+          <div class="net-io out"><b>5</b><span>4 neck motors + PRESS</span></div>
+        </div>
+        <p>It sees 21 numbers: where the lit target is compared with the cursor and how big it is, how its head is turned, and whether it is standing upright. It drives the 4 neck motors that turn the head, plus one <b>PRESS</b> signal.</p>
+        <p>Its job: <b>point the head so the cursor lands on the lit target, and press only when it's on it</b>.</p>
+        <div class="together">
+          <p class="together-k">How the two work together</p>
+          <ol>
+            <li>The steering network turns the head, while the rest of the body just holds its standing pose. The head's direction moves the cursor.</li>
+            <li>On target, it signals PRESS. The lever-press network takes the whole body for up to 1.2&nbsp;s and presses. The cursor holds still.</li>
+            <li>The press is the click. Then the steering network gets the head back.</li>
+          </ol>
+        </div>
+      </article>
+    </div>
+
+    <!-- recorded learning curves -->
+    <div class="panel curves reveal">
+      <div class="curves-hd">
+        <h3>Watching it learn</h3>
+        <p>From the recorded training logs of the two networks in R-01's brain (not live): every row of the steering log, 160 of the lever log's 1,043.</p>
+      </div>
+      <div class="curves-grid">
+        <figure class="chart big" id="c-lever">
+          <figcaption><span class="c-l">Lever-press network &middot; clean presses in practice</span><b class="c-v">&mdash;</b></figcaption>
+          <div class="c-box"><canvas role="img" aria-label="Clean press rate during the lever network's final training run"></canvas><div class="c-tip" hidden></div></div>
+          <p class="c-note">Final training run, from 5&nbsp;M to 35&nbsp;M steps, under the strict clean-press rules. We kept the 32.5&nbsp;M-step snapshot.</p>
+        </figure>
+        <figure class="chart big" id="c-steer">
+          <figcaption><span class="c-l">Steering network &middot; targets clicked per practice attempt (out of 4)</span><b class="c-v">&mdash;</b></figcaption>
+          <div class="c-box"><canvas role="img" aria-label="Targets clicked per practice attempt, out of 4, during the steering network's training"></canvas><div class="c-tip" hidden></div></div>
+          <p class="c-note">Practice had a difficulty dial that rose as it improved. The dip near 0.9&nbsp;M is where training resumed from a saved checkpoint and the dial restarted from easy. By the end it had climbed back only to 0.32 of full difficulty, so the last value is on easier practice targets than the 2.96 it scored at full difficulty before the resume.</p>
+        </figure>
+      </div>
+    </div>
+
+    <aside class="callout reveal" role="note">
+      <svg class="callout-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 7v6.5M12 16.6v.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <div>
+        <p class="callout-t">It is not a real rat brain.</p>
+        <p>R-01's brain is two artificial neural networks: grids of numbers on a computer, driving a simulated body. It is not biological, it is not a copy of a real rat's brain wiring, and no animal was involved.</p>
+      </div>
+    </aside>
+  </div>
+</section>
+
+<!-- ================================================================ 03 LAUNCH -->
+<section class="sec" id="launch" aria-labelledby="launch-h">
+  <div class="wrap">
+    <header class="sec-hd reveal">
+      <p class="idx"><span>03</span>The launch</p>
+      <h2 id="launch-h">How the rat launched a coin</h2>
+      <p class="lead">On 24 September 2026, R-01 launched <b>RatTest ($RATTEST)</b> on pons, a coin launchpad on Robinhood Chain. Here is how a rat uses a website.</p>
+    </header>
+
+    <div class="io2">
+      <figure class="panel io reveal">
+        <svg viewBox="0 0 360 190" role="img" aria-labelledby="hm-t">
+          <title id="hm-t">Diagram: the rat turns its head and the cursor on the screen moves the same way</title>
+          <defs><marker id="m-arr2" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 10 5 0 10Z" fill="#e255b4"/></marker></defs>
+          <!-- head seen from above: ghost (before) and now -->
+          <g transform="translate(78 112) rotate(-14)" opacity=".28">
+            <path d="M0-40C10-30 24-8 24 12 24 30 12 40 0 40-12 40-24 30-24 12-24-8-10-30 0-40Z" fill="#8808B5"/>
+          </g>
+          <g transform="translate(78 112) rotate(34)" class="head-now">
+            <path d="M0-40C10-30 24-8 24 12 24 30 12 40 0 40-12 40-24 30-24 12-24-8-10-30 0-40Z" fill="url(#g-mark)"/>
+            <circle cx="-17" cy="14" r="8.5" fill="#f59aaf"/><circle cx="17" cy="14" r="8.5" fill="#f59aaf"/>
+            <circle cx="-7" cy="-10" r="2.3" fill="#000"/><circle cx="7" cy="-10" r="2.3" fill="#000"/>
+            <circle cx="0" cy="-40" r="3.2" fill="#FFF40F"/>
+          </g>
+          <path d="M58 56 C 72 44, 92 42, 108 50" fill="none" stroke="#e255b4" stroke-width="2" marker-end="url(#m-arr2)"/>
+          <line x1="104" y1="80" x2="276" y2="96" stroke="#FCF010" stroke-opacity=".45" stroke-dasharray="3 5"/>
+          <!-- screen -->
+          <rect x="196" y="24" width="150" height="126" rx="8" fill="#0a0418" stroke="#8808B5" stroke-width="1.4"/>
+          <g fill="#4B04C4" fill-opacity=".5"><rect x="210" y="40" width="70" height="6" rx="3"/><rect x="210" y="54" width="110" height="5" rx="2.5"/><rect x="210" y="66" width="96" height="5" rx="2.5"/><rect x="210" y="118" width="120" height="18" rx="4"/></g>
+          <rect x="250" y="86" width="72" height="20" rx="4" fill="#F5AC29" fill-opacity=".16" stroke="#FCF010" stroke-width="1.6"/>
+          <g fill="#e255b4"><circle cx="222" cy="72" r="1.6" opacity=".35"/><circle cx="234" cy="78" r="1.8" opacity=".5"/><circle cx="247" cy="85" r="2" opacity=".7"/><circle cx="259" cy="91" r="2.2" opacity=".9"/></g>
+          <path d="M270 92 l0 14 4-4 3 6 2.4-1.2-3-6 5.6-.4Z" fill="#fff" stroke="#000" stroke-width=".8"/>
+          <g class="svg-lbl sm"><text x="78" y="178" text-anchor="middle">head turns</text><text x="271" y="170" text-anchor="middle">cursor moves</text></g>
+        </svg>
+        <figcaption><b>The head is the mouse.</b> Turn the head left and the cursor slides left; hold it straight and the cursor stays still. Small turns make fine moves, big turns make big sweeps.</figcaption>
+      </figure>
+
+      <figure class="panel io reveal">
+        <svg viewBox="0 0 360 190" role="img" aria-labelledby="lc-t">
+          <title id="lc-t">Diagram: a paw pushes the lever down and that press is a click on the page</title>
+          <rect x="18" y="34" width="16" height="126" rx="3" fill="#1308AE" fill-opacity=".7" stroke="#8808B5"/>
+          <rect x="34" y="70" width="100" height="9" rx="3.5" fill="none" stroke="#F5AC29" stroke-opacity=".35" stroke-dasharray="4 4"/>
+          <g class="lever-press"><rect x="34" y="86" width="100" height="10" rx="4" fill="url(#g-gold)" transform="rotate(12 34 91)"/></g>
+          <circle cx="34" cy="90" r="4.5" fill="#000" stroke="#F5AC29" stroke-width="1.6"/>
+          <ellipse cx="116" cy="92" rx="15" ry="9" fill="#f59aaf" transform="rotate(12 116 92)"/>
+          <path d="M116 44v26" stroke="#e255b4" stroke-width="2" marker-end="url(#m-arr2)"/>
+          <path d="M156 100 H 196" stroke="url(#g-ramp)" stroke-width="2.4" marker-end="url(#m-arr2)"/>
+          <g class="click-rings" fill="none" stroke="#FCF010"><circle cx="276" cy="100" r="16" stroke-opacity=".55"/><circle cx="276" cy="100" r="28" stroke-opacity=".25"/></g>
+          <rect x="214" y="82" width="126" height="36" rx="8" fill="#D60C94"/>
+          <text x="277" y="105" text-anchor="middle" class="btn-lbl">Confirm</text>
+          <path d="M276 100 l0 14 4-4 3 6 2.4-1.2-3-6 5.6-.4Z" fill="#fff" stroke="#000" stroke-width=".8"/>
+          <g class="svg-lbl sm"><text x="76" y="178" text-anchor="middle">lever press</text><text x="277" y="178" text-anchor="middle">click</text></g>
+        </svg>
+        <figcaption><b>The lever is the click.</b> When the steering network decides the cursor is on target, the rat presses its lever with the whole body. One press, one click.</figcaption>
+      </figure>
+    </div>
+
+    <!-- the rig loop -->
+    <div class="rig reveal">
+      <h3 class="h3c">Each step goes like this</h3>
+      <ol class="loop4">
+        <li><span class="li-ic"><svg viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="13" r="5.5" fill="#FFF40F"/><g stroke="#F5AC29" stroke-width="1.6" stroke-linecap="round"><path d="M14 2.5v2.6M14 20.9v2.6M3.5 13h2.6M21.9 13h2.6M6.6 5.6l1.8 1.8M19.6 18.6l1.8 1.8M21.4 5.6l-1.8 1.8M8.4 18.6l-1.8 1.8"/></g></svg></span>
+          <b>Cue light</b><p>The rig lights up the next thing to click, like the cue light in a lab box, and scrolls it into view.</p></li>
+        <li><span class="li-ic"><svg viewBox="0 0 28 28" aria-hidden="true"><g fill="none" stroke="#e255b4" stroke-width="1.7"><circle cx="14" cy="14" r="8.5"/><path d="M14 2.5v6M14 19.5v6M2.5 14h6M19.5 14h6"/></g><circle cx="14" cy="14" r="2.2" fill="#FCF010"/></svg></span>
+          <b>Aim</b><p>R-01 turns its head and steers the cursor onto the lit target.</p></li>
+        <li><span class="li-ic"><svg viewBox="0 0 28 28" aria-hidden="true"><rect x="3" y="5" width="4" height="18" rx="1" fill="#4B04C4"/><rect x="7" y="12" width="17" height="4.4" rx="2" fill="#F5AC29" transform="rotate(14 7 14)"/><path d="M19 3.5v5.5" stroke="#e255b4" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+          <b>Press = click</b><p>It presses the lever. A click inside the lit target reaches the page. A click anywhere else is ignored and never sent.</p></li>
+        <li><span class="li-ic"><svg viewBox="0 0 28 28" aria-hidden="true"><rect x="3" y="7" width="22" height="14" rx="3" fill="none" stroke="#8808B5" stroke-width="1.6"/><path d="M8 14h7" stroke="#d2c0f0" stroke-width="1.8" stroke-linecap="round"/><path d="M18 10.5v7" stroke="#FCF010" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+          <b>Type</b><p>If it clicked into a text box, the rig types that box's text. The rat does every click, not the typing.</p></li>
+      </ol>
+      <div class="rig-notes">
+        <p><b>Between steps.</b> The rig puts R-01 back in its standing start pose, and the brain rests while the rig types or scrolls. That is the jump you see in the replay.</p>
+        <p><b>Who did what.</b> We chose the name, ticker, description, image and the 2% creator fee before the run, and a person pressed Start. The rig typed our text, and after the 17 checks it signed with our wallet. The rat's brain made all 11 clicks, and nothing reached the page without one.</p>
+      </div>
+    </div>
+
+    <!-- the 11 steps -->
+    <div class="panel steps11 reveal">
+      <div class="steps11-hd">
+        <h3>The 11 clicks</h3>
+        <p class="mono-sub">simulated time from cue light to the rat's click</p>
+      </div>
+      <ol class="s11" id="s11">
+        <li><span class="n">01</span><div class="sx"><b>Terms of Use</b><span>ticked the checkbox</span></div><span class="lat" style="--s:1.0"><i></i><em>1.00 s</em></span></li>
+        <li><span class="n">02</span><div class="sx"><b>Privacy Policy</b><span>ticked the checkbox</span></div><span class="lat" style="--s:.34"><i></i><em>0.34 s</em></span></li>
+        <li><span class="n">03</span><div class="sx"><b>Accept and continue</b><span>closed the terms dialog</span></div><span class="lat" style="--s:.66"><i></i><em>0.66 s</em></span></li>
+        <li><span class="n">04</span><div class="sx"><b>Choose image</b><span>opened the picker; the rig chose the coin image</span></div><span class="lat" style="--s:.38"><i></i><em>0.38 s</em></span></li>
+        <li><span class="n">05</span><div class="sx"><b>Name</b><span>clicked the box; the rig typed <code>RatTest</code></span></div><span class="lat" style="--s:.46"><i></i><em>0.46 s</em></span></li>
+        <li><span class="n">06</span><div class="sx"><b>Ticker</b><span>clicked the box; the rig typed <code>RATTEST</code></span></div><span class="lat" style="--s:.5"><i></i><em>0.50 s</em></span></li>
+        <li><span class="n">07</span><div class="sx"><b>Description</b><span>clicked the box; the rig typed the text with the brain fingerprint</span></div><span class="lat" style="--s:.52"><i></i><em>0.52 s</em></span></li>
+        <li><span class="n">08</span><div class="sx"><b>Advanced</b><span>opened the advanced settings</span></div><span class="lat" style="--s:.24"><i></i><em>0.24 s</em></span></li>
+        <li><span class="n">09</span><div class="sx"><b>Creator tax</b><span>clicked the box; the rig typed <code>2</code> (a 2% creator fee)</span></div><span class="lat" style="--s:.5"><i></i><em>0.50 s</em></span></li>
+        <li><span class="n">10</span><div class="sx"><b>Launch token</b><span>opened pons's review screen</span></div><span class="lat" style="--s:.46"><i></i><em>0.46 s</em></span></li>
+        <li><span class="n">11</span><div class="sx"><b>Confirm</b><span>pons asked the wallet for the launch transaction</span></div><span class="lat" style="--s:.9"><i></i><em>0.90 s</em></span></li>
+      </ol>
+      <p class="steps11-sum"><b>11 of 11</b> hit on the first try &middot; <b>0</b> misses &middot; <b>0.54 s</b> average from cue to click &middot; <b>41 s</b> from brain-on to the Confirm click (the rig ran 88&nbsp;s in all)</p>
+    </div>
+
+    <!-- checks + signing + result -->
+    <div class="launch-end">
+      <div class="panel checks reveal">
+        <h3>17 safety checks, then one signature</h3>
+        <p>pons builds the launch transaction. Before anything is signed, the rig decodes it and checks it field by field. All 17 passed:</p>
+        <ul class="chk">
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>sent to the pons launch contract</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>calls the launch function</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>pays exactly the 0.0005 ETH fee</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>paired with ETH</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>name is RatTest</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>ticker is RATTEST</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>description is exactly what was typed</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>brain fingerprint is in it</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>our wallet is the creator</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>the image is the one pons stored</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>no social links added</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>creator tax is 2%</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>no developer buy</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>the unused number field is 0</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>nothing extra tacked on the end</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>encoded the standard way</li>
+          <li><svg aria-hidden="true"><use href="#i-check"/></svg>sent from our wallet</li>
+        </ul>
+        <p class="signed"><span class="seal">signed once</span>Then the rig signed it with our wallet, once: the wallet's very first transaction (nonce&nbsp;0). Anything that didn't match would have stopped the launch unsigned.</p>
+      </div>
+
+      <div class="panel result reveal">
+        <figure class="coin-fig">
+          <div class="coin">
+            <img src="assets/coin.jpg" width="560" height="560" alt="RatTest's coin image: a rendered white rat with a dark head at a glowing cue light" loading="lazy" decoding="async">
+            <span class="coin-ring" aria-hidden="true"></span>
+          </div>
+          <figcaption class="coin-cap">Coin image: a 3D render of the simulated rat, not a photo.</figcaption>
+        </figure>
+        <p class="result-k">The result</p>
+        <h3 class="result-h">RatTest <span>$RATTEST</span></h3>
+        <dl class="kv">
+          <div><dt>Contract</dt><dd><a class="hex" href="https://robinhoodchain.blockscout.com/token/0x41e20894bE505f0bAE018B75E0E39534E49Aa456" target="_blank" rel="noopener">0x41e20894bE505f0bAE018B75E0E39534E49Aa456</a><button class="copy" type="button" data-copy="0x41e20894bE505f0bAE018B75E0E39534E49Aa456" aria-label="Copy contract address"><svg aria-hidden="true"><use href="#i-copy"/></svg></button></dd></div>
+          <div><dt>Transaction</dt><dd><a class="hex" href="https://robinhoodchain.blockscout.com/tx/0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207" target="_blank" rel="noopener">0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207</a><button class="copy" type="button" data-copy="0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207" aria-label="Copy transaction hash"><svg aria-hidden="true"><use href="#i-copy"/></svg></button></dd></div>
+          <div><dt>Block</dt><dd><a class="hex" href="https://robinhoodchain.blockscout.com/block/71412612" target="_blank" rel="noopener">71,412,612</a></dd></div>
+          <div><dt>Creator fee</dt><dd>2% to <a class="hex" href="https://robinhoodchain.blockscout.com/address/0x790c66fAEd9C5B6e78296a9743FbF423b390591a" target="_blank" rel="noopener">0x790c66fAEd9C5B6e78296a9743FbF423b390591a</a></dd></div>
+        </dl>
+        <div class="ctas sm">
+          <a class="btn primary" href="https://www.ponsfamily.com/launchpad/0x41e20894bE505f0bAE018B75E0E39534E49Aa456" target="_blank" rel="noopener">View on pons<svg aria-hidden="true"><use href="#i-ext"/></svg></a>
+          <a class="btn" href="https://robinhoodchain.blockscout.com/token/0x41e20894bE505f0bAE018B75E0E39534E49Aa456" target="_blank" rel="noopener">Explorer<svg aria-hidden="true"><use href="#i-ext"/></svg></a>
+        </div>
+      </div>
+    </div>
+
+    <!-- what went wrong -->
+    <div class="fixes">
+      <h3 class="h3c reveal">What went wrong, and how we fixed it</h3>
+      <div class="fix-grid">
+        <article class="panel fix reveal">
+          <p class="fix-n">01</p>
+          <h4>The belly flop</h4>
+          <p class="prob"><span>Problem</span>An early lever network found a loophole: flop the whole body onto the lever. The lever went down, so it scored, but that isn't a press.</p>
+          <p class="sol"><span>Fix</span>We closed it. Now a press only counts with a paw on the lever, the head and belly off it, and the rat upright.</p>
+        </article>
+        <article class="panel fix reveal">
+          <p class="fix-n">02</p>
+          <h4>Head-down tumbles</h4>
+          <p class="prob"><span>Problem</span>Sweeping the head down hard to reach low targets tipped the rat over.</p>
+          <p class="sol"><span>Fix</span>We limited how far it could pitch its head up and down. Turning sideways stayed free, for the small sideways moves small targets need.</p>
+        </article>
+        <article class="panel fix reveal">
+          <p class="fix-n">03</p>
+          <h4>Falls after a press</h4>
+          <p class="prob"><span>Problem</span>The lever network was trained to recover its balance for a moment after each press. Taking the body back too early made 6 of 10 test runs through the pons steps fall.</p>
+          <p class="sol"><span>Fix</span>Now it keeps the body for 0.8&nbsp;s after the click to finish recovering before steering resumes.</p>
+        </article>
+        <article class="panel fix reveal">
+          <p class="fix-n">04</p>
+          <h4>Stuck on the tiny Confirm button</h4>
+          <p class="prob"><span>Problem</span>We added a rest between steps, so the rat stands still while the rig types or scrolls. With the head limit, it could then no longer reach the last target: the small Confirm button low on the screen.</p>
+          <p class="sol"><span>Fix</span>With the rest in place the limit was no longer needed, so we removed it: 11 of 11, no falls, on 6 of 6 test runs.</p>
+        </article>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 04 PROOF -->
+<section class="sec" id="proof" aria-labelledby="proof-h">
+  <div class="wrap">
+    <header class="sec-hd reveal">
+      <p class="idx"><span>04</span>Proof</p>
+      <h2 id="proof-h">Don't take our word for it</h2>
+      <p class="lead">Everything the rat did can be checked: the brain it used is fingerprinted on-chain, and the session re-runs bit for bit.</p>
+    </header>
+
+    <div class="proof-grid">
+      <article class="panel proof reveal">
+        <p class="proof-n">A</p>
+        <h3>The brain's fingerprint is in the coin</h3>
+        <p>Before the run we computed a sha256 fingerprint over the whole brain: both networks, the physics scene and the code that runs them. The rig typed it into the coin's description, so it went on-chain inside the launch transaction. Change one dial and the fingerprint changes.</p>
+        <div class="quote">
+          <p class="quote-k">RatTest's description</p>
+          <p class="quote-t">launched by a virtual rat: its trained brain steered the cursor and clicked every button. brain sha256 <mark>9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8</mark></p>
+          <button class="copy txt" type="button" data-copy="9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8"><svg aria-hidden="true"><use href="#i-copy"/></svg><span>copy hash</span></button>
+        </div>
+        <p class="covers"><span>covers</span><code>scene.xml</code><code>policy.pt</code><code>steer.pt</code><code>env.py</code><code>cursor_env.py</code><code>steer_env.py</code><code>session.py</code><code>ptload.py</code></p>
+      </article>
+
+      <article class="panel proof reveal">
+        <p class="proof-n">B</p>
+        <h3>The session replays bit for bit</h3>
+        <p>Every session saves its commands, the brain's actions and every physics frame. The replay re-runs the same brain from the same start with the same commands, and prints <b>MATCH</b> only if every frame, every click and the session fingerprint come out identical.</p>
+        <div class="term">
+          <div class="term-bar"><i></i><i></i><i></i><span>terminal</span><button class="copy txt" type="button" data-copy="python replay_session.py runs/brainrig_20260924T133937Z_seed2026"><svg aria-hidden="true"><use href="#i-copy"/></svg><span>copy</span></button></div>
+<pre><code><span class="pr">$</span> python replay_session.py runs/brainrig_20260924T133937Z_seed2026
+<span class="dm">brain commit  </span> 9778ea092a29&hellip;dcec8 OK
+<span class="dm">frames        </span> identical
+<span class="dm">clicks        </span> 11 recorded, identical
+<span class="dm">recorded proof</span> e1800ae3570e&hellip;bef8d6
+<span class="dm">replayed proof</span> e1800ae3570e&hellip;bef8d6
+<span class="ok">MATCH</span></code></pre>
+        </div>
+        <p class="fine">Exact on the recording machine. A different CPU or numpy build can round the networks' float maths differently; the session records the versions used (Python 3.14.2, numpy 2.4.2, MuJoCo 3.13.0, Windows 11).</p>
+      </article>
+
+      <article class="panel proof reveal">
+        <p class="proof-n">C</p>
+        <h3>Check it on GitHub</h3>
+        <p>The code, both trained networks, the recorded RatTest session and the training logs behind the charts above are in the public repo. Read the rules the rat trained under, check the fingerprint yourself, or run the replay.</p>
+        <a class="gh-card" href="https://github.com/LabratDevRH/labrat" target="_blank" rel="noopener">
+          <svg aria-hidden="true"><use href="#i-gh"/></svg>
+          <span><b>LabratDevRH/labrat</b><em>github.com/LabratDevRH/labrat</em></span>
+          <svg class="gh-ext" aria-hidden="true"><use href="#i-ext"/></svg>
+        </a>
+        <ul class="repo-list">
+          <li><code>runs/final/</code> the two networks</li>
+          <li><code>runs/brainrig_20260924T133937Z_seed2026/</code> the launch session</li>
+          <li><code>train.py</code> &middot; <code>env.py</code> &middot; <code>steer_env.py</code> the training and the rules</li>
+          <li><code>runs/lever_v3/log.jsonl</code> &middot; <code>runs/steer_v1/log.jsonl</code> the training logs</li>
+        </ul>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 05 WATCHING -->
+<section class="sec" id="watching" aria-labelledby="watching-h">
+  <div class="wrap">
+    <header class="sec-hd reveal">
+      <p class="idx"><span>05</span>The live panel</p>
+      <h2 id="watching-h">What you're watching</h2>
+      <p class="lead">The badge in the corner of the <a href="#live">panel at the top</a> tells you which of two things you're seeing.</p>
+    </header>
+
+    <p class="legend-k reveal">Badge legend: what each badge means when the panel shows it</p>
+    <div class="watch-grid">
+      <article class="panel watch reveal">
+        <span class="badge legend live-l"><b>LIVE TRAINING</b></span>
+        <h3>When it says LIVE TRAINING: we're training R-01 at that moment</h3>
+        <p>Training runs many simulated rats in parallel, with random exploration switched on, and every so often saves a checkpoint: a snapshot of all the dials.</p>
+        <p>A small program next to the training takes the <b>newest saved checkpoint</b> and plays it in <b>its own separate simulation</b>, in real time at 25 frames a second, making its best move each time. Whenever training saves again, the rat you see gets the new dials, so you can watch it improve. The charts are the training log, row by row as it is written.</p>
+        <p class="fine">&ldquo;LIVE&rdquo; appears only while a training run is actually streaming. The rest of the time the panel says REPLAY.</p>
+      </article>
+      <article class="panel watch reveal">
+        <span class="badge legend replay-l"><b>REPLAY</b></span>
+        <h3>When it says REPLAY: a recording of the launch</h3>
+        <p>When nothing is training, you're watching a <b>replay of the recorded RatTest launch session</b> from 24 September 2026: re-run from its saved log with the same brain, the same start and the same commands. The lit targets and clicks are the real ones from that session.</p>
+        <p>Between targets the rig puts the rat back in its standing start pose, so it jumps, and the long waits while the rig types play fast-forward. It is a recording, not live. The readout beside it shows the recorded training logs of the two networks it uses.</p>
+      </article>
+    </div>
+    <p class="notice reveal"><b>Never a camera, never a real rat.</b> The 3D rat is a drawing of the simulated body's pose, frame by frame, as the physics engine computed it. The screen on the chamber wall is a drawing for you too: it shows the cursor and the lit target. The rat never sees a screen or the pons page: its steering network is told where the target is as numbers.</p>
+    <p class="notice reveal"><b>Reading the charts.</b> An attempt (an &ldquo;episode&rdquo; in the training log) is one practice try: about 5&nbsp;s at the lever for the lever-press network, up to 15&nbsp;s and 4 targets for the steering network. &ldquo;Falls&rdquo; is the share of attempts that ended with the rat falling over.</p>
+  </div>
+</section>
+
+</main>
+
+<!-- ================================================================ FOOTER -->
+<footer class="foot">
+  <div class="wrap">
+    <div class="foot-top">
+      <a class="brand big" href="#top" aria-label="labrat, back to top">
+        <svg class="brand-mark" aria-hidden="true"><use href="#ratmark"/></svg>
+        <span class="brand-word">lab<b>rat</b></span>
+      </a>
+      <p class="foot-honest">Subject R-01 is a simulated rat driven by two trained artificial neural networks. It is not a biological brain, and no animal was involved. labrat is an independent project, not affiliated with DeepMind, Robinhood or pons. Nothing on this site signs or sends a transaction. $RATTEST is an experiment, not financial advice.</p>
+    </div>
+    <div class="foot-cols">
+      <div>
+        <p class="foot-k">Credits</p>
+        <ul>
+          <li>Body: DeepMind's rodent model from <a href="https://github.com/google-deepmind/dm_control" target="_blank" rel="noopener">dm_control</a> (Apache-2.0), the rat from Aldarondo et al., <i>Nature</i> 2024</li>
+          <li>Physics: <a href="https://mujoco.org" target="_blank" rel="noopener">MuJoCo</a></li>
+          <li>3D view: <a href="https://threejs.org" target="_blank" rel="noopener">three.js</a> (MIT)</li>
+        </ul>
+      </div>
+      <div>
+        <p class="foot-k">Links</p>
+        <ul>
+          <li><a href="https://github.com/LabratDevRH/labrat" target="_blank" rel="noopener">github.com/LabratDevRH/labrat</a></li>
+          <li><a href="https://www.ponsfamily.com/launchpad/0x41e20894bE505f0bAE018B75E0E39534E49Aa456" target="_blank" rel="noopener">$RATTEST on pons</a></li>
+          <li><a href="https://robinhoodchain.blockscout.com/token/0x41e20894bE505f0bAE018B75E0E39534E49Aa456" target="_blank" rel="noopener">Contract on the explorer</a></li>
+        </ul>
+      </div>
+      <div>
+        <p class="foot-k">Sections</p>
+        <ul class="foot-nav">
+          <li><a href="#live">Live</a></li><li><a href="#subject">Subject</a></li><li><a href="#brain">Brain</a></li>
+          <li><a href="#launch">Launch</a></li><li><a href="#proof">Proof</a></li><li><a href="#watching">Watching</a></li>
+        </ul>
+      </div>
+    </div>
+    <p class="foot-base"><span>labrat &middot; operant lab &middot; Subject R-01</span><span class="mono">CA 0x41e2&hellip;a456 &middot; block 71,412,612</span></p>
+  </div>
+</footer>
+
+</body>
+</html>
