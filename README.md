@@ -120,6 +120,17 @@ wss://labrat-relay-production.up.railway.app/publish` (token from `LABRAT_PUBLIS
 `live/start_live_feed.ps1 [-Python <path to python.exe>]` does the same in the background, reading the token from
 `.env` and logging to `runs/publisher.log`; it idles until a run's `log.jsonl` is being written.
 
+## Rat buybacks (built, DRY only)
+
+`live/buyback.py`: every target the rat hits in the live view (the newest saved training checkpoint, playing in its own
+simulation) adds 0.00001 ETH to a batched buyback of $LABRAT, paid only from the claimed creator fees, until the hourly,
+daily or total caps are reached; hits over the caps are counted but add nothing. Only the cursor and steering tasks
+count (they have a lit target). The code sets that rule; the rat does not understand money. It is **DRY**: it counts
+the hits from the relay and simulates each fee claim and buy with `eth_call` on the real chain. It reads no `.env`,
+signs nothing and sends nothing. The LIVE path is gated like the launcher (plus a fixed journal place and a nonce
+check against the chain) and has not been used. The site panel is off (`site/buyback.js`). Notes: `live/BUYBACK.md`;
+tests: `python live/buyback_test.py`.
+
 ## Also in here
 
 - `launch_run.py`, `rollout.py`, `replay.py`: the first version, where a single lever press launched the coin
