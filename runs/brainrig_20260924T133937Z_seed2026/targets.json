@@ -1,0 +1,981 @@
+{
+ "dev_oracle": false,
+ "viewport": [
+  1280,
+  900
+ ],
+ "coords": "page CSS px (norm = /1280, /900)",
+ "targets": [
+  {
+   "n": 1,
+   "key": "t01_terms_tou",
+   "label": "terms checkbox: Terms of Use",
+   "kind": "terms",
+   "state": "done",
+   "detail": "ticked",
+   "lights": [
+    {
+     "at": 1790257188.091396,
+     "box": [
+      513,
+      526.6,
+      164.9,
+      14
+     ],
+     "norm": [
+      0.465198,
+      0.592917,
+      0.064417,
+      0.007778
+     ],
+     "cmd": 0,
+     "step": 39
+    }
+   ],
+   "hit": {
+    "step": 89,
+    "x": 546.5,
+    "y": 540.1,
+    "at": 1790257189.0894845,
+    "seconds_since_first_lit": 1.0,
+    "misses_before": 0,
+    "box": [
+     513,
+     526.6,
+     164.9,
+     14
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {}
+  },
+  {
+   "n": 2,
+   "key": "t02_terms_privacy",
+   "label": "terms checkbox: Privacy Policy",
+   "kind": "terms",
+   "state": "done",
+   "detail": "ticked",
+   "lights": [
+    {
+     "at": 1790257189.6295843,
+     "box": [
+      513,
+      584.1,
+      164.9,
+      14
+     ],
+     "norm": [
+      0.465198,
+      0.656806,
+      0.064417,
+      0.007778
+     ],
+     "cmd": 2,
+     "step": 116
+    }
+   ],
+   "hit": {
+    "step": 133,
+    "x": 551.1,
+    "y": 584.3,
+    "at": 1790257189.9718704,
+    "seconds_since_first_lit": 0.34,
+    "misses_before": 0,
+    "box": [
+     513,
+     584.1,
+     164.9,
+     14
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {}
+  },
+  {
+   "n": 3,
+   "key": "t03_accept",
+   "label": "Accept and continue",
+   "kind": "accept",
+   "state": "done",
+   "detail": "terms accepted, dialog closed",
+   "lights": [
+    {
+     "at": 1790257190.5015988,
+     "box": [
+      477,
+      647.6,
+      164.9,
+      28
+     ],
+     "norm": [
+      0.437073,
+      0.735139,
+      0.064417,
+      0.015556
+     ],
+     "cmd": 4,
+     "step": 159
+    }
+   ],
+   "hit": {
+    "step": 192,
+    "x": 480.2,
+    "y": 657.9,
+    "at": 1790257191.150145,
+    "seconds_since_first_lit": 0.65,
+    "misses_before": 0,
+    "box": [
+     477,
+     647.6,
+     164.9,
+     28
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {}
+  },
+  {
+   "n": 4,
+   "key": "t04_image",
+   "label": "Choose image",
+   "kind": "image",
+   "state": "done",
+   "detail": "coin.png \u00b7 Image ready",
+   "lights": [
+    {
+     "at": 1790257191.8223677,
+     "box": [
+      193,
+      491.4,
+      483.2,
+      64
+     ],
+     "norm": [
+      0.339545,
+      0.581545,
+      0.188763,
+      0.035556
+     ],
+     "cmd": 6,
+     "step": 225
+    }
+   ],
+   "hit": {
+    "step": 244,
+    "x": 487.1,
+    "y": 553.0,
+    "at": 1790257192.1896863,
+    "seconds_since_first_lit": 0.37,
+    "misses_before": 0,
+    "box": [
+     193,
+     491.4,
+     483.2,
+     64
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {
+    "how": "file chooser",
+    "ipfs_status": 200,
+    "uri": "ipfs://bafybeiedfhkewsq4ljrjenvjpy4qn3jurctmlfzoaslhvco5i7jzqid46a"
+   }
+  },
+  {
+   "n": 5,
+   "key": "t05_name",
+   "label": "Name field",
+   "kind": "name",
+   "state": "done",
+   "detail": "RatTest",
+   "lights": [
+    {
+     "at": 1790257196.8145802,
+     "box": [
+      192,
+      280.4,
+      230.6,
+      36
+     ],
+     "norm": [
+      0.240082,
+      0.331545,
+      0.090082,
+      0.02
+     ],
+     "cmd": 8,
+     "step": 475
+    }
+   ],
+   "hit": {
+    "step": 498,
+    "x": 377.2,
+    "y": 303.3,
+    "at": 1790257197.2700503,
+    "seconds_since_first_lit": 0.46,
+    "misses_before": 0,
+    "box": [
+     192,
+     280.4,
+     230.6,
+     36
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {
+    "typed": "RatTest",
+    "reads": "RatTest",
+    "chars": 7,
+    "seconds": 0.73,
+    "ms_per_char": 104.7,
+    "frames_streamed": 19,
+    "fps": 25.9,
+    "refilled": false,
+    "ok": true
+   }
+  },
+  {
+   "n": 6,
+   "key": "t06_ticker",
+   "label": "Ticker field",
+   "kind": "ticker",
+   "state": "done",
+   "detail": "RATTEST",
+   "lights": [
+    {
+     "at": 1790257198.694155,
+     "box": [
+      446.6,
+      280.4,
+      230.6,
+      36
+     ],
+     "norm": [
+      0.439001,
+      0.331545,
+      0.090088,
+      0.02
+     ],
+     "cmd": 10,
+     "step": 569
+    }
+   ],
+   "hit": {
+    "step": 594,
+    "x": 542.5,
+    "y": 312.8,
+    "at": 1790257199.189287,
+    "seconds_since_first_lit": 0.5,
+    "misses_before": 0,
+    "box": [
+     446.6,
+     280.4,
+     230.6,
+     36
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {
+    "typed": "RATTEST",
+    "reads": "RATTEST",
+    "chars": 7,
+    "seconds": 0.74,
+    "ms_per_char": 106.0,
+    "frames_streamed": 18,
+    "fps": 24.3,
+    "refilled": false,
+    "ok": true
+   }
+  },
+  {
+   "n": 7,
+   "key": "t07_description",
+   "label": "Description field",
+   "kind": "description",
+   "state": "done",
+   "detail": "launched by a virtual rat: its trained b\u2026",
+   "lights": [
+    {
+     "at": 1790257200.6244948,
+     "box": [
+      192,
+      364.4,
+      485.2,
+      78
+     ],
+     "norm": [
+      0.339545,
+      0.448212,
+      0.189545,
+      0.043333
+     ],
+     "cmd": 12,
+     "step": 666
+    }
+   ],
+   "hit": {
+    "step": 692,
+    "x": 258.8,
+    "y": 365.0,
+    "at": 1790257201.148739,
+    "seconds_since_first_lit": 0.52,
+    "misses_before": 0,
+    "box": [
+     192,
+     364.4,
+     485.2,
+     78
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {
+    "typed": "launched by a virtual rat: its trained brain steered the cursor and clicked every button. brain sha256 9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8",
+    "reads": "launched by a virtual rat: its trained brain steered the cursor and clicked every button. brain sha256 9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8",
+    "chars": 167,
+    "seconds": 16.79,
+    "ms_per_char": 100.5,
+    "frames_streamed": 286,
+    "fps": 17.0,
+    "refilled": false,
+    "ok": true
+   }
+  },
+  {
+   "n": 8,
+   "key": "t08_advanced",
+   "label": "Advanced",
+   "kind": "advanced",
+   "state": "done",
+   "detail": "open",
+   "lights": [
+    {
+     "at": 1790257219.9700398,
+     "box": [
+      191,
+      377.8,
+      487.2,
+      54
+     ],
+     "norm": [
+      0.339545,
+      0.449757,
+      0.190326,
+      0.03
+     ],
+     "cmd": 14,
+     "step": 1633
+    }
+   ],
+   "hit": {
+    "step": 1645,
+    "x": 293.6,
+    "y": 382.4,
+    "at": 1790257220.2093213,
+    "seconds_since_first_lit": 0.24,
+    "misses_before": 0,
+    "box": [
+     191,
+     377.8,
+     487.2,
+     54
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {}
+  },
+  {
+   "n": 9,
+   "key": "t09_tax",
+   "label": "Creator tax field",
+   "kind": "tax",
+   "state": "done",
+   "detail": "2",
+   "lights": [
+    {
+     "at": 1790257221.0588365,
+     "box": [
+      191,
+      685.5,
+      462.5,
+      39
+     ],
+     "norm": [
+      0.329871,
+      0.783281,
+      0.180652,
+      0.021667
+     ],
+     "cmd": 16,
+     "step": 1687
+    }
+   ],
+   "hit": {
+    "step": 1712,
+    "x": 205.4,
+    "y": 700.7,
+    "at": 1790257221.549525,
+    "seconds_since_first_lit": 0.49,
+    "misses_before": 0,
+    "box": [
+     191,
+     685.5,
+     462.5,
+     39
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {
+    "typed": "2",
+    "reads": "2",
+    "chars": 1,
+    "seconds": 0.1,
+    "ms_per_char": 95.9,
+    "frames_streamed": 8,
+    "fps": 83.4,
+    "refilled": false,
+    "ok": true
+   }
+  },
+  {
+   "n": 10,
+   "key": "t10_launch",
+   "label": "Launch token",
+   "kind": "launch",
+   "state": "done",
+   "detail": "pons's review \"Launch RATTEST\" is open",
+   "lights": [
+    {
+     "at": 1790257223.6866486,
+     "box": [
+      194,
+      384.3,
+      481.2,
+      42
+     ],
+     "norm": [
+      0.339545,
+      0.450347,
+      0.187982,
+      0.023333
+     ],
+     "cmd": 18,
+     "step": 1819
+    }
+   ],
+   "hit": {
+    "step": 1842,
+    "x": 543.9,
+    "y": 419.5,
+    "at": 1790257224.1497579,
+    "seconds_since_first_lit": 0.46,
+    "misses_before": 0,
+    "box": [
+     194,
+     384.3,
+     481.2,
+     42
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {}
+  },
+  {
+   "n": 11,
+   "key": "t11_confirm",
+   "label": "Confirm",
+   "kind": "confirm",
+   "state": "done",
+   "detail": "pons requested the launch transaction",
+   "lights": [
+    {
+     "at": 1790257227.327431,
+     "box": [
+      477,
+      736.2,
+      81.2,
+      28
+     ],
+     "norm": [
+      0.404382,
+      0.833611,
+      0.031726,
+      0.015556
+     ],
+     "cmd": 20,
+     "step": 2001
+    }
+   ],
+   "hit": {
+    "step": 2046,
+    "x": 479.3,
+    "y": 760.0,
+    "at": 1790257228.2304761,
+    "seconds_since_first_lit": 0.9,
+    "misses_before": 0,
+    "box": [
+     477,
+     736.2,
+     81.2,
+     28
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {}
+  }
+ ],
+ "clicks": [
+  {
+   "step": 89,
+   "x": 546.5,
+   "y": 540.1,
+   "norm": [
+    0.42698,
+    0.600056
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t01_terms_tou",
+   "at": 1790257189.0894544
+  },
+  {
+   "step": 133,
+   "x": 551.1,
+   "y": 584.3,
+   "norm": [
+    0.430517,
+    0.649256
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t02_terms_privacy",
+   "at": 1790257189.9718218
+  },
+  {
+   "step": 192,
+   "x": 480.2,
+   "y": 657.9,
+   "norm": [
+    0.37513,
+    0.730949
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t03_accept",
+   "at": 1790257191.150103
+  },
+  {
+   "step": 244,
+   "x": 487.1,
+   "y": 553.0,
+   "norm": [
+    0.380519,
+    0.614418
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t04_image",
+   "at": 1790257192.189663
+  },
+  {
+   "step": 498,
+   "x": 377.2,
+   "y": 303.3,
+   "norm": [
+    0.294676,
+    0.33695
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t05_name",
+   "at": 1790257197.2700005
+  },
+  {
+   "step": 594,
+   "x": 542.5,
+   "y": 312.8,
+   "norm": [
+    0.423814,
+    0.347607
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t06_ticker",
+   "at": 1790257199.1892564
+  },
+  {
+   "step": 692,
+   "x": 258.8,
+   "y": 365.0,
+   "norm": [
+    0.202163,
+    0.405582
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t07_description",
+   "at": 1790257201.1487093
+  },
+  {
+   "step": 1645,
+   "x": 293.6,
+   "y": 382.4,
+   "norm": [
+    0.229337,
+    0.424834
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t08_advanced",
+   "at": 1790257220.2092624
+  },
+  {
+   "step": 1712,
+   "x": 205.4,
+   "y": 700.7,
+   "norm": [
+    0.160475,
+    0.778595
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t09_tax",
+   "at": 1790257221.5494838
+  },
+  {
+   "step": 1842,
+   "x": 543.9,
+   "y": 419.5,
+   "norm": [
+    0.424911,
+    0.466162
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t10_launch",
+   "at": 1790257224.1497266
+  },
+  {
+   "step": 2046,
+   "x": 479.3,
+   "y": 760.0,
+   "norm": [
+    0.374422,
+    0.844448
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t11_confirm",
+   "at": 1790257228.2304242
+  }
+ ],
+ "hits_forwarded": 11,
+ "misses_masked": 0,
+ "page_mousedowns": [
+  [
+   546,
+   540,
+   1790257189092
+  ],
+  [
+   551,
+   584,
+   1790257189973
+  ],
+  [
+   480,
+   657,
+   1790257191151
+  ],
+  [
+   487,
+   552,
+   1790257192194
+  ],
+  [
+   377,
+   303,
+   1790257197273
+  ],
+  [
+   542,
+   312,
+   1790257199192
+  ],
+  [
+   258,
+   365,
+   1790257201150
+  ],
+  [
+   293,
+   382,
+   1790257220211
+  ],
+  [
+   205,
+   700,
+   1790257221553
+  ],
+  [
+   543,
+   419,
+   1790257224152
+  ],
+  [
+   479,
+   760,
+   1790257228235
+  ]
+ ],
+ "page_mousedowns_not_from_a_hit": [],
+ "commands": [
+  {
+   "cmd": [
+    "target",
+    0.46519775390625,
+    0.5929166666666666,
+    0.06441650390625,
+    0.0077777777777777776
+   ],
+   "target": "t01_terms_tou",
+   "at": 1790257188.0913904
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t01_terms_tou",
+   "at": 1790257189.0860085
+  },
+  {
+   "cmd": [
+    "target",
+    0.46519775390625,
+    0.6568055555555555,
+    0.06441650390625,
+    0.0077777777777777776
+   ],
+   "target": "t02_terms_privacy",
+   "at": 1790257189.629581
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t02_terms_privacy",
+   "at": 1790257189.964989
+  },
+  {
+   "cmd": [
+    "target",
+    0.43707275390625,
+    0.7351388888888889,
+    0.06441650390625,
+    0.015555555555555555
+   ],
+   "target": "t03_accept",
+   "at": 1790257190.5015955
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t03_accept",
+   "at": 1790257191.1463478
+  },
+  {
+   "cmd": [
+    "target",
+    0.339544677734375,
+    0.5815451388888889,
+    0.188763427734375,
+    0.035555555555555556
+   ],
+   "target": "t04_image",
+   "at": 1790257191.8223655
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t04_image",
+   "at": 1790257192.1849823
+  },
+  {
+   "cmd": [
+    "target",
+    0.240081787109375,
+    0.33154513888888887,
+    0.090081787109375,
+    0.02
+   ],
+   "target": "t05_name",
+   "at": 1790257196.8145766
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t05_name",
+   "at": 1790257197.2662356
+  },
+  {
+   "cmd": [
+    "target",
+    0.43900146484375,
+    0.33154513888888887,
+    0.090087890625,
+    0.02
+   ],
+   "target": "t06_ticker",
+   "at": 1790257198.69415
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t06_ticker",
+   "at": 1790257199.185892
+  },
+  {
+   "cmd": [
+    "target",
+    0.339544677734375,
+    0.44821180555555556,
+    0.189544677734375,
+    0.043333333333333335
+   ],
+   "target": "t07_description",
+   "at": 1790257200.624491
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t07_description",
+   "at": 1790257201.1450164
+  },
+  {
+   "cmd": [
+    "target",
+    0.339544677734375,
+    0.4497569444444444,
+    0.190325927734375,
+    0.03
+   ],
+   "target": "t08_advanced",
+   "at": 1790257219.9700356
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t08_advanced",
+   "at": 1790257220.2051783
+  },
+  {
+   "cmd": [
+    "target",
+    0.32987060546875,
+    0.78328125,
+    0.18065185546875,
+    0.021666666666666667
+   ],
+   "target": "t09_tax",
+   "at": 1790257221.0588324
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t09_tax",
+   "at": 1790257221.5453956
+  },
+  {
+   "cmd": [
+    "target",
+    0.339544677734375,
+    0.45034722222222223,
+    0.187982177734375,
+    0.023333333333333334
+   ],
+   "target": "t10_launch",
+   "at": 1790257223.6866462
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t10_launch",
+   "at": 1790257224.1453743
+  },
+  {
+   "cmd": [
+    "target",
+    0.40438232421875,
+    0.8336111111111111,
+    0.03172607421875,
+    0.015555555555555555
+   ],
+   "target": "t11_confirm",
+   "at": 1790257227.3274271
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t11_confirm",
+   "at": 1790257228.2257078
+  }
+ ],
+ "typing": {
+  "name": {
+   "chars": 7,
+   "seconds": 0.73,
+   "ms_per_char": 104.7,
+   "frames_streamed": 19,
+   "fps": 25.9,
+   "refilled": false,
+   "ok": true
+  },
+  "ticker": {
+   "chars": 7,
+   "seconds": 0.74,
+   "ms_per_char": 106.0,
+   "frames_streamed": 18,
+   "fps": 24.3,
+   "refilled": false,
+   "ok": true
+  },
+  "description": {
+   "chars": 167,
+   "seconds": 16.79,
+   "ms_per_char": 100.5,
+   "frames_streamed": 286,
+   "fps": 17.0,
+   "refilled": false,
+   "ok": true
+  },
+  "tax": {
+   "chars": 1,
+   "seconds": 0.1,
+   "ms_per_char": 95.9,
+   "frames_streamed": 8,
+   "fps": 83.4,
+   "refilled": false,
+   "ok": true
+  }
+ }
+}

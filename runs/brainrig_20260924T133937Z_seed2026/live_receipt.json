@@ -1,0 +1,129 @@
+{
+  "tx": "0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207",
+  "mode": "live",
+  "status": 1,
+  "block": 71412612,
+  "token": "0x41e20894bE505f0bAE018B75E0E39534E49Aa456",
+  "curve": "0x540def0bF6f4Ba8a068C78C9613184f1f7604D91",
+  "creator": "0x790c66fAEd9C5B6e78296a9743FbF423b390591a",
+  "nonce": 0,
+  "value_wei": "500000000000000",
+  "send_error": null,
+  "explorer_tx": "https://robinhoodchain.blockscout.com/tx/0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207",
+  "explorer_token": "https://robinhoodchain.blockscout.com/token/0x41e20894bE505f0bAE018B75E0E39534E49Aa456",
+  "pons_coin": "https://www.ponsfamily.com/launchpad/0x41e20894bE505f0bAE018B75E0E39534E49Aa456",
+  "gas_used": 3712937,
+  "effective_gas_price_wei": 41626000,
+  "gas_fee_eth": 0.000154554715562,
+  "total_cost_eth": 0.000654554715562,
+  "receipt": {
+    "blockHash": "0x0a702ce426cccbfb0f3c6d876eaefa6295ce80c24863acb227f8f1d208a07928",
+    "blockNumber": "0x441ab84",
+    "contractAddress": null,
+    "cumulativeGasUsed": "0x462ccf",
+    "effectiveGasPrice": "0x27b2990",
+    "from": "0x790c66faed9c5b6e78296a9743fbf423b390591a",
+    "gasUsed": "0x38a7a9",
+    "gasUsedForL1": "0x0",
+    "l1BlockNumber": "0x18d74b8",
+    "logs": [
+      {
+        "address": "0x41e20894be505f0bae018b75e0e39534e49aa456",
+        "topics": [
+          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x000000000000000000000000540def0bf6f4ba8a068c78c9613184f1f7604d91"
+        ],
+        "data": "0x0000000000000000000000000000000000000000033b2e3c9fd0803ce8000000",
+        "blockNumber": "0x441ab84",
+        "transactionHash": "0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207",
+        "transactionIndex": "0x8",
+        "blockHash": "0x0a702ce426cccbfb0f3c6d876eaefa6295ce80c24863acb227f8f1d208a07928",
+        "blockTimestamp": "0x6ab52851",
+        "logIndex": "0x14",
+        "removed": false
+      },
+      {
+        "address": "0x540def0bf6f4ba8a068c78c9613184f1f7604d91",
+        "topics": [
+          "0x908408e307fc569b417f6cbec5d5a06f44a0a505ac0479b47d421a4b2fd6a1e6"
+        ],
+        "data": "0x00000000000000000000000041e20894be505f0bae018b75e0e39534e49aa456",
+        "blockNumber": "0x441ab84",
+        "transactionHash": "0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207",
+        "transactionIndex": "0x8",
+        "blockHash": "0x0a702ce426cccbfb0f3c6d876eaefa6295ce80c24863acb227f8f1d208a07928",
+        "blockTimestamp": "0x6ab52851",
+        "logIndex": "0x15",
+        "removed": false
+      },
+      {
+        "address": "0x540def0bf6f4ba8a068c78c9613184f1f7604d91",
+        "topics": [
+          "0xe4b7e48fbd47c2f602bacadee76ad33b16542ddb4997cfc0de04c311adcfa8c7",
+          "0x000000000000000000000000790c66faed9c5b6e78296a9743fbf423b390591a"
+        ],
+        "data": "0x",
+        "blockNumber": "0x441ab84",
+        "transactionHash": "0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207",
+        "transactionIndex": "0x8",
+        "blockHash": "0x0a702ce426cccbfb0f3c6d876eaefa6295ce80c24863acb227f8f1d208a07928",
+        "blockTimestamp": "0x6ab52851",
+        "logIndex": "0x16",
+        "removed": false
+      },
+      {
+        "address": "0x263ed295dafae1d9aadd6e56c4b6f9f38ee019dd",
+        "topics": [
+          "0x3d0ce9bfc3ed7d6862dbb28b2dea94561fe714a1b4d019aa8af39730d1ad7c3d",
+          "0x0000000000000000000000007ed598bcef8bd9edd8c97a195c6d13f40801ec7e"
+        ],
+        "data": "0x0000000000000000000000000000000000000000000000000001c6bf52634000",
+        "blockNumber": "0x441ab84",
+        "transactionHash": "0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207",
+        "transactionIndex": "0x8",
+        "blockHash": "0x0a702ce426cccbfb0f3c6d876eaefa6295ce80c24863acb227f8f1d208a07928",
+        "blockTimestamp": "0x6ab52851",
+        "logIndex": "0x17",
+        "removed": false
+      },
+      {
+        "address": "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e",
+        "topics": [
+          "0x8d4aad4953d0ca700d468f3753aa14432d1b35b43ec6409f051fb6aa43a89607",
+          "0x00000000000000000000000041e20894be505f0bae018b75e0e39534e49aa456",
+          "0x000000000000000000000000540def0bf6f4ba8a068c78c9613184f1f7604d91",
+          "0x000000000000000000000000790c66faed9c5b6e78296a9743fbf423b390591a"
+        ],
+        "data": "0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003a4965bf58a40000",
+        "blockNumber": "0x441ab84",
+        "transactionHash": "0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207",
+        "transactionIndex": "0x8",
+        "blockHash": "0x0a702ce426cccbfb0f3c6d876eaefa6295ce80c24863acb227f8f1d208a07928",
+        "blockTimestamp": "0x6ab52851",
+        "logIndex": "0x18",
+        "removed": false
+      }
+    ],
+    "logsBloom": "0x00000020000020000000000400000000000000000000000000008000000000000000000000000000000000001000010001000000100000000100800080000000000000100040000000000008000100000000000000008000000000000000000004000040020000000000010000000801000000000000000000000010080008000000000000020000000040000000100000000000000400000000000000000000020000000000100000000040000800000000000000000000000000000000000000000002000000000000000000000000000000000000001100000000000020000000200000000000000000808000000001000000010000000000000000000000",
+    "status": "0x1",
+    "to": "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e",
+    "transactionHash": "0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207",
+    "transactionIndex": "0x8",
+    "type": "0x2"
+  },
+  "signed": true,
+  "broadcast": true,
+  "wallet": "0x790c66fAEd9C5B6e78296a9743FbF423b390591a",
+  "brain_commit": "9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8",
+  "description": "launched by a virtual rat: its trained brain steered the cursor and clicked every button. brain sha256 9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8",
+  "coin": {
+    "name": "RatTest",
+    "symbol": "RATTEST",
+    "x": "",
+    "website": "",
+    "tax_bps": 200
+  },
+  "recorded_utc": "2026-09-24T13:41:05Z",
+  "journal": "launch_journal.json (copy; the original stays in the ratbrain folder)"
+}

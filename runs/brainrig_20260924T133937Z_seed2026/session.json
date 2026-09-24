@@ -1,0 +1,442 @@
+{
+ "kind": "cursor_session",
+ "seed": 2026,
+ "preroll_s": 2.0,
+ "cursor0": [
+  0.5,
+  0.5
+ ],
+ "policy": "runs/brainrig_20260924T133937Z_seed2026/steer.pt",
+ "policy_sha256": "3b9da3e23581ad96d1256e930d75a5c7c2119410fe4133dab4a20759e353d88e",
+ "press_policy": "runs/brainrig_20260924T133937Z_seed2026/press.pt",
+ "press_sha256": "3f55d8cea25de8bc026eb44b46ee35666c4e8c876a9d5f2d3055bcce37675bac",
+ "scene_sha256": "cd95f2230d856acf4d55347a86dbb075f37b1695637ba9b72b811b3e56785c74",
+ "code_sha256": {
+  "env.py": "1dd8dc838d96be977bc345e61eb76f0ab8c6fbe15b472e26e32af64672c8ad17",
+  "cursor_env.py": "330d3b0a6995915666e902c3985962f7a0efe09b39ed592f026a6957537c7758",
+  "steer_env.py": "17a6ed7fc647012303c7ddce7d00ba283a247025e50f6c1d8929419431315201",
+  "session.py": "1981007dc734892adf19cd05c40c6f6f3ebdc6b92040985c6ea77b484bfd9416",
+  "ptload.py": "f6f8d0988b6df4e2822a6aa1b9a856220eedc2b361cc425f98d30f52da9be831"
+ },
+ "brain_commit": "9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8",
+ "session_proof": "e1800ae3570e14f75bd6d281b18ba794542b723de17c133bda7b00c6babef8d6",
+ "steps": 3834,
+ "commands": [
+  [
+   39,
+   [
+    "target",
+    0.465198,
+    0.592917,
+    0.064417,
+    0.007778
+   ]
+  ],
+  [
+   89,
+   [
+    "hold"
+   ]
+  ],
+  [
+   116,
+   [
+    "target",
+    0.465198,
+    0.656806,
+    0.064417,
+    0.007778
+   ]
+  ],
+  [
+   133,
+   [
+    "hold"
+   ]
+  ],
+  [
+   159,
+   [
+    "target",
+    0.437073,
+    0.735139,
+    0.064417,
+    0.015556
+   ]
+  ],
+  [
+   192,
+   [
+    "hold"
+   ]
+  ],
+  [
+   225,
+   [
+    "target",
+    0.339545,
+    0.581545,
+    0.188763,
+    0.035556
+   ]
+  ],
+  [
+   244,
+   [
+    "hold"
+   ]
+  ],
+  [
+   475,
+   [
+    "target",
+    0.240082,
+    0.331545,
+    0.090082,
+    0.02
+   ]
+  ],
+  [
+   498,
+   [
+    "hold"
+   ]
+  ],
+  [
+   569,
+   [
+    "target",
+    0.439001,
+    0.331545,
+    0.090088,
+    0.02
+   ]
+  ],
+  [
+   594,
+   [
+    "hold"
+   ]
+  ],
+  [
+   666,
+   [
+    "target",
+    0.339545,
+    0.448212,
+    0.189545,
+    0.043333
+   ]
+  ],
+  [
+   692,
+   [
+    "hold"
+   ]
+  ],
+  [
+   1633,
+   [
+    "target",
+    0.339545,
+    0.449757,
+    0.190326,
+    0.03
+   ]
+  ],
+  [
+   1645,
+   [
+    "hold"
+   ]
+  ],
+  [
+   1687,
+   [
+    "target",
+    0.329871,
+    0.783281,
+    0.180652,
+    0.021667
+   ]
+  ],
+  [
+   1712,
+   [
+    "hold"
+   ]
+  ],
+  [
+   1819,
+   [
+    "target",
+    0.339545,
+    0.450347,
+    0.187982,
+    0.023333
+   ]
+  ],
+  [
+   1842,
+   [
+    "hold"
+   ]
+  ],
+  [
+   2001,
+   [
+    "target",
+    0.404382,
+    0.833611,
+    0.031726,
+    0.015556
+   ]
+  ],
+  [
+   2046,
+   [
+    "hold"
+   ]
+  ]
+ ],
+ "clicks": [
+  [
+   89,
+   0.4269800244922657,
+   0.6000557747071451,
+   true
+  ],
+  [
+   133,
+   0.4305166008720989,
+   0.649256144070373,
+   true
+  ],
+  [
+   192,
+   0.3751301752629655,
+   0.7309489989869076,
+   true
+  ],
+  [
+   244,
+   0.38051877393312683,
+   0.6144183375552484,
+   true
+  ],
+  [
+   498,
+   0.29467597355309855,
+   0.3369504536462968,
+   true
+  ],
+  [
+   594,
+   0.4238138831104999,
+   0.34760703154865225,
+   true
+  ],
+  [
+   692,
+   0.2021625120497021,
+   0.405582045380169,
+   true
+  ],
+  [
+   1645,
+   0.22933671596846894,
+   0.4248336930787491,
+   true
+  ],
+  [
+   1712,
+   0.1604750915558006,
+   0.7785951114338309,
+   true
+  ],
+  [
+   1842,
+   0.42491101298931716,
+   0.4661615917214581,
+   true
+  ],
+  [
+   2046,
+   0.37442228407524847,
+   0.8444477116450848,
+   true
+  ]
+ ],
+ "environment": {
+  "python": "3.14.2",
+  "numpy": "2.4.2",
+  "mujoco": "3.13.0",
+  "platform": "Windows-11-10.0.26200-SP0"
+ },
+ "qpos_sha256": "2ed6497ac18458b7570df2fe2c910563c1d2875513e413cf8f73e5eabe080b26",
+ "launch": {
+  "wallet": "funded .env wallet (LIVE)",
+  "creator": "0x790c66fAEd9C5B6e78296a9743FbF423b390591a",
+  "description": "launched by a virtual rat: its trained brain steered the cursor and clicked every button. brain sha256 9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8",
+  "brain_commit": "9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8",
+  "checks_passed": true,
+  "failed_checks": [],
+  "response_to_page": {
+   "result": "0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207"
+  },
+  "page_showed": null,
+  "captured_tx": "captured_tx.json",
+  "mode": "live",
+  "token": "0x41e20894bE505f0bAE018B75E0E39534E49Aa456",
+  "curve": "0x540def0bF6f4Ba8a068C78C9613184f1f7604D91",
+  "tx": "0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207",
+  "status": 1,
+  "block": 71412612,
+  "explorer": "https://robinhoodchain.blockscout.com/tx/0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207",
+  "signed": true,
+  "broadcast": true,
+  "send_error": null
+ },
+ "rig": {
+  "spec": "live/SPEC_BRAIN.md",
+  "rig": "live/brainrig.py",
+  "mode": "LIVE",
+  "dev_oracle": false,
+  "pons_url": "https://www.ponsfamily.com/launchpad/create",
+  "viewport": [
+   1280,
+   900
+  ],
+  "wallet": "0x790c66fAEd9C5B6e78296a9743FbF423b390591a",
+  "wallet_kind": "funded .env wallet",
+  "dry_balance_override_eth": null,
+  "coin": {
+   "name": "RatTest",
+   "symbol": "RATTEST",
+   "x": "",
+   "website": "",
+   "tax_bps": 200
+  },
+  "description_typed": "launched by a virtual rat: its trained brain steered the cursor and clicked every button. brain sha256 9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8",
+  "image_pinned": "ipfs://bafybeiedfhkewsq4ljrjenvjpy4qn3jurctmlfzoaslhvco5i7jzqid46a",
+  "creator_tax_set": true,
+  "send_requests": 1,
+  "signature_requests": [],
+  "wallet_refusals": [],
+  "page_rejection": null,
+  "stages": {
+   "t01_terms_tou": "done",
+   "t02_terms_privacy": "done",
+   "t03_accept": "done",
+   "t04_image": "done",
+   "t05_name": "done",
+   "t06_ticker": "done",
+   "t07_description": "done",
+   "t08_advanced": "done",
+   "t09_tax": "done",
+   "t10_launch": "done",
+   "t11_confirm": "done"
+  },
+  "hits_forwarded": 11,
+  "misses_masked": 0,
+  "page_mousedowns": 11,
+  "stream": {
+   "shots": 1153,
+   "fps": 13.9,
+   "shots_dropped": 0,
+   "brain_frames": 1967,
+   "typing": {
+    "name": {
+     "chars": 7,
+     "seconds": 0.73,
+     "ms_per_char": 104.7,
+     "frames_streamed": 19,
+     "fps": 25.9,
+     "refilled": false,
+     "ok": true
+    },
+    "ticker": {
+     "chars": 7,
+     "seconds": 0.74,
+     "ms_per_char": 106.0,
+     "frames_streamed": 18,
+     "fps": 24.3,
+     "refilled": false,
+     "ok": true
+    },
+    "description": {
+     "chars": 167,
+     "seconds": 16.79,
+     "ms_per_char": 100.5,
+     "frames_streamed": 286,
+     "fps": 17.0,
+     "refilled": false,
+     "ok": true
+    },
+    "tax": {
+     "chars": 1,
+     "seconds": 0.1,
+     "ms_per_char": 95.9,
+     "frames_streamed": 8,
+     "fps": 83.4,
+     "refilled": false,
+     "ok": true
+    }
+   }
+  },
+  "dev_shots": [],
+  "steer_policy": "runs/final/steer.pt",
+  "steer_sha256": "3b9da3e23581ad96d1256e930d75a5c7c2119410fe4133dab4a20759e353d88e",
+  "press_policy": "runs/final/policy.pt",
+  "press_sha256": "3f55d8cea25de8bc026eb44b46ee35666c4e8c876a9d5f2d3055bcce37675bac",
+  "units": 2312,
+  "connections": 643072,
+  "presses_seen": 11,
+  "type_delay_ms": 90,
+  "honesty": "The rat's brain is two trained neural networks driving a simulated rat body (DeepMind rodent model in MuJoCo): a steering network turns its head, which moves the cursor, and decides when to press; a lever-press network then performs each press with the whole body, and the press clicks. They are artificial networks, not a biological brain. The rig lights up the next target (a cue, like a cue light in an operant chamber), scrolls the page, and types the text of a field after the rat clicks into it. Clicks outside the lit target are ignored. LIVE: pons builds the launch transaction; the rig decodes it, checks every field against the configured coin and the brain commit, and signs it ONCE (nonce 0) with the funded wallet. The key never enters the page.",
+  "started_utc": "2026-09-24T13:39:37Z",
+  "ended_utc": "2026-09-24T13:41:05Z",
+  "live": {
+   "address": "0x790c66fAEd9C5B6e78296a9743FbF423b390591a",
+   "balance_eth_at_startup": 0.005,
+   "preflight_gas_limit": 4808254,
+   "preflight_max_fee_gwei": 0.08254,
+   "preflight_sim_image": "ipfs://bafybeiedfhkewsq4ljrjenvjpy4qn3jurctmlfzoaslhvco5i7jzqid46a",
+   "config_pinned_at_startup": {
+    "name": "RatTest",
+    "symbol": "RATTEST",
+    "tax_bps": 200,
+    "image": "",
+    "x": "",
+    "website": "",
+    "live_env": true,
+    "key_address": "0x790c66fAEd9C5B6e78296a9743FbF423b390591a"
+   },
+   "tx": "0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207",
+   "result": {
+    "mode": "live",
+    "token": "0x41e20894bE505f0bAE018B75E0E39534E49Aa456",
+    "curve": "0x540def0bF6f4Ba8a068C78C9613184f1f7604D91",
+    "tx": "0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207",
+    "status": 1,
+    "block": 71412612,
+    "creator": "0x790c66fAEd9C5B6e78296a9743FbF423b390591a",
+    "explorer": "https://robinhoodchain.blockscout.com/tx/0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207",
+    "description": "launched by a virtual rat: its trained brain steered the cursor and clicked every button. brain sha256 9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8"
+   },
+   "receipt": "live_receipt.json",
+   "journal_copy": "launch_journal.json",
+   "pons_success_text": null,
+   "coin_page": "https://www.ponsfamily.com/launchpad/0x41e20894bE505f0bAE018B75E0E39534E49Aa456"
+  }
+ },
+ "end_reason": "stopped",
+ "end_info": {
+  "fell": false,
+  "hits": 11,
+  "misses": 0,
+  "timeouts": 0,
+  "program": 0,
+  "presses": 11
+ }
+}
