@@ -549,6 +549,113 @@ function onMetrics(rows, info) {
   size(); kick();
 })();
 
+/* ------------------------------------------------------------------ rat buybacks (buyback.js)
+   Reads the buyback engine's public status JSON. Every figure carries its mode: anything not executed on-chain is
+   labelled "Simulated" and never called a buy; a test stream is never called live; a stale status is shown as stale;
+   no address-like string is ever shown. */
+(function buybacks() {
+  const C = window.LABRAT_BUYBACK, wrap = $('#bb-wrap');
+  if (!wrap || !C || typeof C !== 'object' || C.enabled !== true || typeof C.statusUrl !== 'string' || !C.statusUrl) return;
+  let url;
+  try { url = new URL(C.statusUrl, location.href); } catch (e) { return; }
+  const localHost = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if (!(url.protocol === 'https:' || (url.protocol === 'http:' && localHost))) {
+    console.warn('labrat: LABRAT_BUYBACK.statusUrl must be https (or http on localhost)'); return;
+  }
+  const ADDR = /0x[0-9a-fA-F]{40}/;
+  const txt = s => (typeof s === 'string' && !ADDR.test(s)) ? s : null;
+  const dec = s => (typeof s === 'string' && /^\d{1,15}(\.\d{1,18})?$/.test(s)) ? s : null;
+  const int = v => (Number.isInteger(v) && v >= 0) ? v : null;
+  const fmtTok = s => { const d = dec(s); if (d === null) return '—'; const n = Number(d);
+    return n >= 100 ? Math.round(n).toLocaleString('en-US') : n.toLocaleString('en-US', { maximumFractionDigits: 2 }); };
+  const fmtEth = s => { const d = dec(s); return d === null ? '—' : d + ' ETH'; };
+  const E = { mode: $('#bb-mode'), test: $('#bb-test'), conn: $('#bb-conn'), per: $('#bb-per'), lever: $('#bb-lever'),
+              hits: $('#bb-hits'), pending: $('#bb-pending'), buysK: $('#bb-buys-k'), buys: $('#bb-buys'),
+              outK: $('#bb-out-k'), out: $('#bb-out'), split: $('#bb-split'), list: $('#bb-list'), note: $('#bb-note') };
+  const STALE_S = 90;          // the engine rewrites its status at least every 10 s; older than this = not running
+  const NOTE = /^[a-z][a-z ;.-]{0,59}$/;   // next_buy_note: a short fixed phrase from the engine
+  wrap.hidden = false;
+
+  function render(j) {
+    const live = j.mode === 'LIVE';
+    const DRY = 'Simulated';
+    E.mode.textContent = live ? 'LIVE' : DRY;
+    E.mode.classList.toggle('dry', !live);
+    const rl = j.relay || {}, src = j.source || {};
+    // a TEST stream, test streams accepted, another relay, or an engine too old to say: never shown as live hits
+    const test = src.test !== false || src.public_relay !== true || src.accept_test_streams === true ||
+      rl.test_stream === true;
+    E.test.hidden = !test;
+    const upd = typeof j.updated === 'string' ? Date.parse(j.updated) : NaN;
+    const age = Number.isFinite(upd) ? (Date.now() - upd) / 1000 : Infinity;
+    const stale = age > STALE_S;
+    const per = dec(j.per_hit_eth); E.per.textContent = per ? per + ' ETH' : 'a tiny amount of ETH';
+    E.lever.hidden = !(Array.isArray(j.tasks) && j.tasks.includes('lever'));
+    const h = j.hits || {}, p = j.pending || {}, b = j.buys || {};
+    E.hits.textContent = int(h.counted) !== null ? h.counted.toLocaleString('en-US') : '—';
+    const fmtN = v => v.toLocaleString('en-US');
+    E.split.textContent = [int(h.in_buys) !== null ? fmtN(h.in_buys) + ' hits in ' + (live ? '' : 'simulated ') + 'buys' : '',
+      int(h.pending) !== null ? fmtN(h.pending) + ' pending' : '',
+      int(h.over_caps) !== null ? fmtN(h.over_caps) + ' over the cap' : '']
+      .filter(Boolean).join(' · ');
+    E.pending.textContent = fmtEth(p.eth) + (int(p.hits) !== null ? ' · ' + p.hits + ' hits' : '');
+    const simulated = !live || b.simulated !== false;
+    E.buysK.textContent = simulated ? 'Simulated buys' : 'Buys';
+    E.outK.textContent = simulated ? 'LABRAT (simulated)' : 'LABRAT bought';
+    E.buys.textContent = int(b.count) !== null ? b.count + (dec(b.eth_in) ? ' · ' + b.eth_in + ' ETH' : '') : '—';
+    E.out.textContent = fmtTok(b.labrat_out);
+    const recent = Array.isArray(b.recent) ? b.recent.slice(0, 5) : [];
+    E.list.innerHTML = recent.map(r => {
+      if (!r || typeof r !== 'object') return '';
+      const sim = !live || r.simulated !== false;
+      const at = txt(r.at) && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(r.at) ? r.at.slice(11, 16) + ' UTC' : '';
+      const venue = r.venue === 'pool' ? 'pool' : r.venue === 'curve' ? 'curve' : '';
+      return '<li><span class="bb-t">' + esc(at) + '</span><span>' + (sim ? 'simulated buy' : 'buy') + ': ' +
+        esc(fmtEth(r.eth_in)) + ' &rarr; ' + esc(fmtTok(r.labrat_out)) + ' LABRAT' +
+        (int(r.hits_covered) !== null ? ' <em>(' + r.hits_covered + ' hits)</em>' : '') +
+        (venue ? ' <em>' + venue + '</em>' : '') + '</span></li>';
+    }).join('');
+    const stopped = txt(j.stopped);
+    const counting = rl.counting === true && !stale;
+    E.conn.textContent = stale ? 'status stale' : stopped ? 'buys stopped'
+      : counting ? (test ? 'counting a test stream' : 'counting live hits')
+      : rl.connected === true ? 'waiting for live training' : 'not connected';
+    E.conn.className = 'bb-conn' + (stale || stopped ? ' off' : counting && !test ? ' on' : '');
+    const next = int(j.next_buy_in_s);
+    const why = typeof j.next_buy_note === 'string' && NOTE.test(j.next_buy_note) ? j.next_buy_note : '';
+    const sim = simulated ? 'simulated ' : '';
+    let nextTxt = '';
+    if (!stopped && !stale) {
+      if (next === null) nextTxt = why && why !== 'waiting for hits' ? 'No ' + sim + 'buy for now: ' + why + '. ' : '';
+      else if (next === 0) nextTxt = 'Next ' + sim + 'buy due now. ';
+      else nextTxt = 'Next ' + sim + 'buy in about ' + Math.max(1, Math.round(next / 60)) + ' min' + (why && why !== 'due' ? ' (' + why + ')' : '') + '. ';
+    }
+    const updTxt = Number.isFinite(upd) ? new Date(upd).toISOString().slice(11, 16) + ' UTC' : 'an unknown time';
+    E.note.textContent = (stale ? 'This status has not updated since ' + updTxt + ': the counter may not be running. ' : '') +
+      (test ? 'These hits come from a test stream. ' : '') +
+      (stopped ? 'Buys stopped: ' + stopped + '. ' : '') +
+      (simulated ? 'Buybacks shown are simulated against the live chain. ' : '') + nextTxt +
+      'Hits are counted as each training attempt ends.';
+  }
+
+  let timer = 0;
+  async function poll() {
+    timer = 0;
+    try {
+      const r = await fetch(url.href, { cache: 'no-store', credentials: 'omit' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      if (!j || typeof j !== 'object') throw new Error('bad status');
+      render(j);
+    } catch (e) {
+      E.conn.textContent = 'status unavailable'; E.conn.className = 'bb-conn off';
+    }
+    if (!document.hidden) timer = setTimeout(poll, 15000);
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !timer) poll(); });
+  poll();
+})();
+
 /* ------------------------------------------------------------------ mount the 3D viewer (js/live.js) */
 setMode('connecting');
 recordedReady.then(() => renderHUD());

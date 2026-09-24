@@ -39,6 +39,7 @@
 <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" integrity="sha384-61S/Nu32S3E5+n+KpCOTb2eRYps6fVKm+9Gz1QBvSePFthb46f063Aa/qe/lykFZ" crossorigin="anonymous">
 <script src="config.js"></script>
 <script src="coin.js"></script>
+<script src="buyback.js"></script>
 <script>/* which coin state to show before site.js fills it in: "live" only with a real contract address in coin.js */
 (function () { var c = window.LABRAT_COIN;
   document.documentElement.setAttribute('data-coin', c && /^0x[0-9a-fA-F]{40}$/.test(String(c.address || '')) ? 'live' : 'soon'); })();</script>
@@ -167,6 +168,28 @@
           <p class="hud-note" id="hud-note">Training charts appear here while a training run is streaming.</p>
         </aside>
       </div>
+    </section>
+  </div>
+
+  <!-- rat buybacks panel (buyback.js, site.js) -->
+  <div class="wrap wide" id="bb-wrap" hidden>
+    <section class="bb" id="buybacks" aria-labelledby="bb-title">
+      <div class="bb-bar">
+        <h2 class="bb-title" id="bb-title">Rat buybacks</h2>
+        <span class="bb-mode" id="bb-mode">Simulated</span>
+        <span class="bb-mode dry" id="bb-test" hidden>Test stream</span>
+        <span class="bb-conn" id="bb-conn">loading</span>
+      </div>
+      <p class="bb-rule">Every target the rat hits during live training adds <b id="bb-per">a small amount of ETH</b> to the next $LABRAT buyback, funded by the coin's trading fees. Buybacks are batched and capped per hour and per day.<span id="bb-lever" hidden> In the lever task, each clean press counts as a hit.</span> The rule is fixed in code; the rat's hits trigger it.</p>
+      <dl class="bb-kv">
+        <div><dt>Hits counted</dt><dd id="bb-hits">&mdash;</dd></div>
+        <div><dt>Pending</dt><dd id="bb-pending">&mdash;</dd></div>
+        <div><dt id="bb-buys-k">Simulated buys</dt><dd id="bb-buys">&mdash;</dd></div>
+        <div><dt id="bb-out-k">LABRAT (simulated)</dt><dd id="bb-out">&mdash;</dd></div>
+      </dl>
+      <p class="bb-split" id="bb-split"></p>
+      <ol class="bb-list" id="bb-list" aria-label="Recent buybacks"></ol>
+      <p class="bb-note" id="bb-note"></p>
     </section>
   </div>
 
@@ -712,7 +735,7 @@
       <article class="panel watch reveal">
         <span class="badge legend replay-l"><b>REPLAY</b></span>
         <h3>When it says REPLAY: a recording of a launch session</h3>
-        <p>When nothing is training, you're watching a <b>replay of a recorded launch session</b>, named next to the badge: a <b>dry rehearsal</b> of the Labrat launch, where the rat does all 11 steps on the real pons page and the rig checks the transaction and then refuses to sign, so nothing is created. It is re-run from its saved log with the same brain, the same start and the same commands, so the lit targets and clicks are the real ones from that session.</p>
+        <p>When nothing is training, you're watching a <b>replay of a recorded launch session</b>, named next to the badge: <b>the Labrat launch</b>, where the rat did all 11 steps on the real pons page and the rig checked the transaction and signed it once. It is re-run from its saved log with the same brain, the same start and the same commands, so the lit targets and clicks are the real ones from that session.</p>
         <p>Between targets the rig puts the rat back in its standing start pose, so it jumps, and the long waits while the rig types play fast-forward. It is a recording, not live. The readout beside it shows the recorded training logs of the two networks it uses.</p>
       </article>
     </div>
