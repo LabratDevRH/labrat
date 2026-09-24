@@ -88,14 +88,19 @@ Pillow, imageio. torch is only needed for training.
 
 Live at **https://labrat-delta.vercel.app** (site on Vercel, relay on Railway at `labrat-relay-production.up.railway.app`).
 
-- `site/`: the static website (deployable to Vercel as is). Its 3D view plays a replay of the recorded RatTest
-  session (`site/replay/`, made by `python live/export_replay.py`, which refuses to write it unless the re-run
-  prints MATCH), and switches to **LIVE TRAINING** only while a training run is being streamed.
+- `site/`: the static website (deployable to Vercel as is). Its 3D view plays a replay of a recorded launch session,
+  a DRY rehearsal of the Labrat launch (`site/replay/session.bin` + `session.json`, made by
+  `python live/export_replay.py --run runs/<brainrig run> --label "<public label>"`, which refuses to write it
+  unless the re-run prints MATCH, and refuses a json with any address, fee or wallet in it), shows STANDBY while
+  there is no clip, and switches to **LIVE TRAINING** only while a training run is being streamed. The coin card
+  reads `site/coin.js`: `window.LABRAT_COIN = null` shows "Launching soon"; set it after the launch.
 - `relay/relay.py`: the relay (deployable to Railway; see `relay/README.md`, and set both `LABRAT_PUBLISH_TOKEN`
   and `LIVE_ORIGINS` there). One publisher in, many viewers out.
 - `live/publish_training.py`: runs next to training on the training PC. It plays the run's latest saved checkpoint
   in its own simulation at 25 fps and streams it, with every new `log.jsonl` row, to the relay. It says bye when
   `log.jsonl` has been silent for 90 s, and the site goes back to the replay.
+- `trainer/`: training and the publisher together in one container on Railway, so the PC is not needed. A job is
+  started and stopped by setting variables on the service; runs live on a Railway volume (see `trainer/README.md`).
 
 Local preview (PowerShell, two shells, the same token in both):
 
