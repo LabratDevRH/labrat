@@ -12,6 +12,8 @@ __pycache__/
 runs/*
 !runs/final/
 !runs/brainrig_20260924T133937Z_seed2026/
+# the recorded session of the Labrat launch (replay_session.py re-runs it)
+!runs/brainrig_20260924T211408Z_seed2026/
 # the two training logs behind the website's "Watching it learn" charts (site/assets/training.json), so the curves
 # can be checked against them; nothing else from those runs
 !runs/lever_v3/

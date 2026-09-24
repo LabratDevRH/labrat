@@ -1,0 +1,981 @@
+{
+ "dev_oracle": false,
+ "viewport": [
+  1280,
+  900
+ ],
+ "coords": "page CSS px (norm = /1280, /900)",
+ "targets": [
+  {
+   "n": 1,
+   "key": "t01_terms_tou",
+   "label": "terms checkbox: Terms of Use",
+   "kind": "terms",
+   "state": "done",
+   "detail": "ticked",
+   "lights": [
+    {
+     "at": 1790284460.8144746,
+     "box": [
+      513,
+      526.6,
+      164.9,
+      14
+     ],
+     "norm": [
+      0.465198,
+      0.592917,
+      0.064417,
+      0.007778
+     ],
+     "cmd": 0,
+     "step": 40
+    }
+   ],
+   "hit": {
+    "step": 90,
+    "x": 546.5,
+    "y": 540.1,
+    "at": 1790284461.8160036,
+    "seconds_since_first_lit": 1.0,
+    "misses_before": 0,
+    "box": [
+     513,
+     526.6,
+     164.9,
+     14
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {}
+  },
+  {
+   "n": 2,
+   "key": "t02_terms_privacy",
+   "label": "terms checkbox: Privacy Policy",
+   "kind": "terms",
+   "state": "done",
+   "detail": "ticked",
+   "lights": [
+    {
+     "at": 1790284462.359741,
+     "box": [
+      513,
+      584.1,
+      164.9,
+      14
+     ],
+     "norm": [
+      0.465198,
+      0.656806,
+      0.064417,
+      0.007778
+     ],
+     "cmd": 2,
+     "step": 117
+    }
+   ],
+   "hit": {
+    "step": 134,
+    "x": 551.1,
+    "y": 584.3,
+    "at": 1790284462.6968355,
+    "seconds_since_first_lit": 0.34,
+    "misses_before": 0,
+    "box": [
+     513,
+     584.1,
+     164.9,
+     14
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {}
+  },
+  {
+   "n": 3,
+   "key": "t03_accept",
+   "label": "Accept and continue",
+   "kind": "accept",
+   "state": "done",
+   "detail": "terms accepted, dialog closed",
+   "lights": [
+    {
+     "at": 1790284463.214001,
+     "box": [
+      477,
+      647.6,
+      164.9,
+      28
+     ],
+     "norm": [
+      0.437073,
+      0.735139,
+      0.064417,
+      0.015556
+     ],
+     "cmd": 4,
+     "step": 160
+    }
+   ],
+   "hit": {
+    "step": 193,
+    "x": 480.2,
+    "y": 657.9,
+    "at": 1790284463.8751423,
+    "seconds_since_first_lit": 0.66,
+    "misses_before": 0,
+    "box": [
+     477,
+     647.6,
+     164.9,
+     28
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {}
+  },
+  {
+   "n": 4,
+   "key": "t04_image",
+   "label": "Choose image",
+   "kind": "image",
+   "state": "done",
+   "detail": "coin.png \u00b7 Image ready",
+   "lights": [
+    {
+     "at": 1790284464.568204,
+     "box": [
+      193,
+      491.4,
+      483.2,
+      64
+     ],
+     "norm": [
+      0.339545,
+      0.581545,
+      0.188763,
+      0.035556
+     ],
+     "cmd": 6,
+     "step": 227
+    }
+   ],
+   "hit": {
+    "step": 246,
+    "x": 487.1,
+    "y": 553.0,
+    "at": 1790284464.9411597,
+    "seconds_since_first_lit": 0.37,
+    "misses_before": 0,
+    "box": [
+     193,
+     491.4,
+     483.2,
+     64
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {
+    "how": "file chooser",
+    "ipfs_status": 200,
+    "uri": "ipfs://bafybeig6tzcsg5vueqef4wp7z6stg7uujjcwe2rweln2xwflcqd5plfv5u"
+   }
+  },
+  {
+   "n": 5,
+   "key": "t05_name",
+   "label": "Name field",
+   "kind": "name",
+   "state": "done",
+   "detail": "Labrat",
+   "lights": [
+    {
+     "at": 1790284473.1731367,
+     "box": [
+      192,
+      280.4,
+      230.6,
+      36
+     ],
+     "norm": [
+      0.240082,
+      0.331545,
+      0.090082,
+      0.02
+     ],
+     "cmd": 8,
+     "step": 658
+    }
+   ],
+   "hit": {
+    "step": 681,
+    "x": 375.6,
+    "y": 302.3,
+    "at": 1790284473.6393976,
+    "seconds_since_first_lit": 0.47,
+    "misses_before": 0,
+    "box": [
+     192,
+     280.4,
+     230.6,
+     36
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {
+    "typed": "Labrat",
+    "reads": "Labrat",
+    "chars": 6,
+    "seconds": 0.6,
+    "ms_per_char": 99.4,
+    "frames_streamed": 16,
+    "fps": 26.8,
+    "refilled": false,
+    "ok": true
+   }
+  },
+  {
+   "n": 6,
+   "key": "t06_ticker",
+   "label": "Ticker field",
+   "kind": "ticker",
+   "state": "done",
+   "detail": "LABRAT",
+   "lights": [
+    {
+     "at": 1790284474.9353566,
+     "box": [
+      446.6,
+      280.4,
+      230.6,
+      36
+     ],
+     "norm": [
+      0.439001,
+      0.331545,
+      0.090088,
+      0.02
+     ],
+     "cmd": 10,
+     "step": 746
+    }
+   ],
+   "hit": {
+    "step": 771,
+    "x": 543.2,
+    "y": 313.0,
+    "at": 1790284475.4371507,
+    "seconds_since_first_lit": 0.5,
+    "misses_before": 0,
+    "box": [
+     446.6,
+     280.4,
+     230.6,
+     36
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {
+    "typed": "LABRAT",
+    "reads": "LABRAT",
+    "chars": 6,
+    "seconds": 0.6,
+    "ms_per_char": 99.8,
+    "frames_streamed": 16,
+    "fps": 26.7,
+    "refilled": false,
+    "ok": true
+   }
+  },
+  {
+   "n": 7,
+   "key": "t07_description",
+   "label": "Description field",
+   "kind": "description",
+   "state": "done",
+   "detail": "launched by a virtual rat: its trained b\u2026",
+   "lights": [
+    {
+     "at": 1790284476.734545,
+     "box": [
+      192,
+      364.4,
+      485.2,
+      78
+     ],
+     "norm": [
+      0.339545,
+      0.448212,
+      0.189545,
+      0.043333
+     ],
+     "cmd": 12,
+     "step": 836
+    }
+   ],
+   "hit": {
+    "step": 862,
+    "x": 258.6,
+    "y": 365.0,
+    "at": 1790284477.2550633,
+    "seconds_since_first_lit": 0.52,
+    "misses_before": 0,
+    "box": [
+     192,
+     364.4,
+     485.2,
+     78
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {
+    "typed": "launched by a virtual rat: its trained brain steered the cursor and clicked every button. brain sha256 9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8",
+    "reads": "launched by a virtual rat: its trained brain steered the cursor and clicked every button. brain sha256 9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8",
+    "chars": 167,
+    "seconds": 16.66,
+    "ms_per_char": 99.8,
+    "frames_streamed": 283,
+    "fps": 17.0,
+    "refilled": false,
+    "ok": true
+   }
+  },
+  {
+   "n": 8,
+   "key": "t08_advanced",
+   "label": "Advanced",
+   "kind": "advanced",
+   "state": "done",
+   "detail": "open",
+   "lights": [
+    {
+     "at": 1790284495.9561925,
+     "box": [
+      191,
+      377.8,
+      487.2,
+      54
+     ],
+     "norm": [
+      0.339545,
+      0.449757,
+      0.190326,
+      0.03
+     ],
+     "cmd": 14,
+     "step": 1797
+    }
+   ],
+   "hit": {
+    "step": 1809,
+    "x": 293.4,
+    "y": 382.4,
+    "at": 1790284496.1954331,
+    "seconds_since_first_lit": 0.24,
+    "misses_before": 0,
+    "box": [
+     191,
+     377.8,
+     487.2,
+     54
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {}
+  },
+  {
+   "n": 9,
+   "key": "t09_tax",
+   "label": "Creator tax field",
+   "kind": "tax",
+   "state": "done",
+   "detail": "2",
+   "lights": [
+    {
+     "at": 1790284497.028241,
+     "box": [
+      191,
+      685.5,
+      462.5,
+      39
+     ],
+     "norm": [
+      0.329871,
+      0.783281,
+      0.180652,
+      0.021667
+     ],
+     "cmd": 16,
+     "step": 1850
+    }
+   ],
+   "hit": {
+    "step": 1875,
+    "x": 205.4,
+    "y": 700.5,
+    "at": 1790284497.5149758,
+    "seconds_since_first_lit": 0.49,
+    "misses_before": 0,
+    "box": [
+     191,
+     685.5,
+     462.5,
+     39
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {
+    "typed": "2",
+    "reads": "2",
+    "chars": 1,
+    "seconds": 0.1,
+    "ms_per_char": 104.8,
+    "frames_streamed": 8,
+    "fps": 76.3,
+    "refilled": false,
+    "ok": true
+   }
+  },
+  {
+   "n": 10,
+   "key": "t10_launch",
+   "label": "Launch token",
+   "kind": "launch",
+   "state": "done",
+   "detail": "pons's review \"Launch LABRAT\" is open",
+   "lights": [
+    {
+     "at": 1790284499.6715653,
+     "box": [
+      194,
+      384.3,
+      481.2,
+      42
+     ],
+     "norm": [
+      0.339545,
+      0.450347,
+      0.187982,
+      0.023333
+     ],
+     "cmd": 18,
+     "step": 1983
+    }
+   ],
+   "hit": {
+    "step": 2006,
+    "x": 543.8,
+    "y": 419.5,
+    "at": 1790284500.137881,
+    "seconds_since_first_lit": 0.47,
+    "misses_before": 0,
+    "box": [
+     194,
+     384.3,
+     481.2,
+     42
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {}
+  },
+  {
+   "n": 11,
+   "key": "t11_confirm",
+   "label": "Confirm",
+   "kind": "confirm",
+   "state": "done",
+   "detail": "pons requested the launch transaction",
+   "lights": [
+    {
+     "at": 1790284503.248382,
+     "box": [
+      477,
+      736.2,
+      81.2,
+      28
+     ],
+     "norm": [
+      0.404382,
+      0.833611,
+      0.031726,
+      0.015556
+     ],
+     "cmd": 20,
+     "step": 2161
+    }
+   ],
+   "hit": {
+    "step": 2206,
+    "x": 479.2,
+    "y": 760.0,
+    "at": 1790284504.1386993,
+    "seconds_since_first_lit": 0.89,
+    "misses_before": 0,
+    "box": [
+     477,
+     736.2,
+     81.2,
+     28
+    ]
+   },
+   "misses": [],
+   "relights": 0,
+   "result": {}
+  }
+ ],
+ "clicks": [
+  {
+   "step": 90,
+   "x": 546.5,
+   "y": 540.1,
+   "norm": [
+    0.426976,
+    0.600056
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t01_terms_tou",
+   "at": 1790284461.8159714
+  },
+  {
+   "step": 134,
+   "x": 551.1,
+   "y": 584.3,
+   "norm": [
+    0.430514,
+    0.649257
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t02_terms_privacy",
+   "at": 1790284462.6968021
+  },
+  {
+   "step": 193,
+   "x": 480.2,
+   "y": 657.9,
+   "norm": [
+    0.37513,
+    0.730948
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t03_accept",
+   "at": 1790284463.8751037
+  },
+  {
+   "step": 246,
+   "x": 487.1,
+   "y": 553.0,
+   "norm": [
+    0.380524,
+    0.614421
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t04_image",
+   "at": 1790284464.941127
+  },
+  {
+   "step": 681,
+   "x": 375.6,
+   "y": 302.3,
+   "norm": [
+    0.293448,
+    0.335834
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t05_name",
+   "at": 1790284473.6393614
+  },
+  {
+   "step": 771,
+   "x": 543.2,
+   "y": 313.0,
+   "norm": [
+    0.424349,
+    0.34774
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t06_ticker",
+   "at": 1790284475.437103
+  },
+  {
+   "step": 862,
+   "x": 258.6,
+   "y": 365.0,
+   "norm": [
+    0.202038,
+    0.405591
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t07_description",
+   "at": 1790284477.255022
+  },
+  {
+   "step": 1809,
+   "x": 293.4,
+   "y": 382.4,
+   "norm": [
+    0.229249,
+    0.424843
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t08_advanced",
+   "at": 1790284496.1953983
+  },
+  {
+   "step": 1875,
+   "x": 205.4,
+   "y": 700.5,
+   "norm": [
+    0.160496,
+    0.778373
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t09_tax",
+   "at": 1790284497.514938
+  },
+  {
+   "step": 2006,
+   "x": 543.8,
+   "y": 419.5,
+   "norm": [
+    0.424882,
+    0.466104
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t10_launch",
+   "at": 1790284500.1378531
+  },
+  {
+   "step": 2206,
+   "x": 479.2,
+   "y": 760.0,
+   "norm": [
+    0.374364,
+    0.84445
+   ],
+   "env_hit": true,
+   "forwarded": true,
+   "target": "t11_confirm",
+   "at": 1790284504.1386588
+  }
+ ],
+ "hits_forwarded": 11,
+ "misses_masked": 0,
+ "page_mousedowns": [
+  [
+   546,
+   540,
+   1790284461822
+  ],
+  [
+   551,
+   584,
+   1790284462699
+  ],
+  [
+   480,
+   657,
+   1790284463877
+  ],
+  [
+   487,
+   552,
+   1790284464965
+  ],
+  [
+   375,
+   302,
+   1790284473640
+  ],
+  [
+   543,
+   312,
+   1790284475439
+  ],
+  [
+   258,
+   365,
+   1790284477256
+  ],
+  [
+   293,
+   382,
+   1790284496196
+  ],
+  [
+   205,
+   700,
+   1790284497516
+  ],
+  [
+   543,
+   419,
+   1790284500138
+  ],
+  [
+   479,
+   760,
+   1790284504140
+  ]
+ ],
+ "page_mousedowns_not_from_a_hit": [],
+ "commands": [
+  {
+   "cmd": [
+    "target",
+    0.46519775390625,
+    0.5929166666666666,
+    0.06441650390625,
+    0.0077777777777777776
+   ],
+   "target": "t01_terms_tou",
+   "at": 1790284460.81447
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t01_terms_tou",
+   "at": 1790284461.8117585
+  },
+  {
+   "cmd": [
+    "target",
+    0.46519775390625,
+    0.6568055555555555,
+    0.06441650390625,
+    0.0077777777777777776
+   ],
+   "target": "t02_terms_privacy",
+   "at": 1790284462.3597374
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t02_terms_privacy",
+   "at": 1790284462.6913826
+  },
+  {
+   "cmd": [
+    "target",
+    0.43707275390625,
+    0.7351388888888889,
+    0.06441650390625,
+    0.015555555555555555
+   ],
+   "target": "t03_accept",
+   "at": 1790284463.2139988
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t03_accept",
+   "at": 1790284463.8714042
+  },
+  {
+   "cmd": [
+    "target",
+    0.339544677734375,
+    0.5815451388888889,
+    0.188763427734375,
+    0.035555555555555556
+   ],
+   "target": "t04_image",
+   "at": 1790284464.568202
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t04_image",
+   "at": 1790284464.9316623
+  },
+  {
+   "cmd": [
+    "target",
+    0.240081787109375,
+    0.33154513888888887,
+    0.090081787109375,
+    0.02
+   ],
+   "target": "t05_name",
+   "at": 1790284473.1731343
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t05_name",
+   "at": 1790284473.6321945
+  },
+  {
+   "cmd": [
+    "target",
+    0.43900146484375,
+    0.33154513888888887,
+    0.090087890625,
+    0.02
+   ],
+   "target": "t06_ticker",
+   "at": 1790284474.9353526
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t06_ticker",
+   "at": 1790284475.43149
+  },
+  {
+   "cmd": [
+    "target",
+    0.339544677734375,
+    0.44821180555555556,
+    0.189544677734375,
+    0.043333333333333335
+   ],
+   "target": "t07_description",
+   "at": 1790284476.7345426
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t07_description",
+   "at": 1790284477.25172
+  },
+  {
+   "cmd": [
+    "target",
+    0.339544677734375,
+    0.4497569444444444,
+    0.190325927734375,
+    0.03
+   ],
+   "target": "t08_advanced",
+   "at": 1790284495.9561896
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t08_advanced",
+   "at": 1790284496.1911767
+  },
+  {
+   "cmd": [
+    "target",
+    0.32987060546875,
+    0.78328125,
+    0.18065185546875,
+    0.021666666666666667
+   ],
+   "target": "t09_tax",
+   "at": 1790284497.028238
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t09_tax",
+   "at": 1790284497.5115452
+  },
+  {
+   "cmd": [
+    "target",
+    0.339544677734375,
+    0.45034722222222223,
+    0.187982177734375,
+    0.023333333333333334
+   ],
+   "target": "t10_launch",
+   "at": 1790284499.671563
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t10_launch",
+   "at": 1790284500.1341453
+  },
+  {
+   "cmd": [
+    "target",
+    0.40438232421875,
+    0.8336111111111111,
+    0.03172607421875,
+    0.015555555555555555
+   ],
+   "target": "t11_confirm",
+   "at": 1790284503.2483783
+  },
+  {
+   "cmd": [
+    "hold"
+   ],
+   "target": "t11_confirm",
+   "at": 1790284504.1323636
+  }
+ ],
+ "typing": {
+  "name": {
+   "chars": 6,
+   "seconds": 0.6,
+   "ms_per_char": 99.4,
+   "frames_streamed": 16,
+   "fps": 26.8,
+   "refilled": false,
+   "ok": true
+  },
+  "ticker": {
+   "chars": 6,
+   "seconds": 0.6,
+   "ms_per_char": 99.8,
+   "frames_streamed": 16,
+   "fps": 26.7,
+   "refilled": false,
+   "ok": true
+  },
+  "description": {
+   "chars": 167,
+   "seconds": 16.66,
+   "ms_per_char": 99.8,
+   "frames_streamed": 283,
+   "fps": 17.0,
+   "refilled": false,
+   "ok": true
+  },
+  "tax": {
+   "chars": 1,
+   "seconds": 0.1,
+   "ms_per_char": 104.8,
+   "frames_streamed": 8,
+   "fps": 76.3,
+   "refilled": false,
+   "ok": true
+  }
+ }
+}
