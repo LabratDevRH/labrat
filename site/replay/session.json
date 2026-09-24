@@ -1,21 +1,21 @@
 {
  "format": "labrat-replay-1",
  "source": "replay",
- "label": "Replay: a dry rehearsal of the Labrat launch · nothing was signed",
- "session": "dry rehearsal",
+ "label": "Replay: the Labrat launch, recorded 2026-09-25",
+ "session": "launch",
  "task": "steer",
- "run": "brainrig_20260924T163338Z_seed2026",
- "recorded_utc": "2026-09-24T16:33:38Z",
+ "run": "brainrig_20260924T211408Z_seed2026",
+ "recorded_utc": "2026-09-24T21:14:08Z",
  "fps": 20,
- "n_frames": 909,
- "duration": 45.45,
- "sim_seconds": 45.4,
+ "n_frames": 1641,
+ "duration": 82.05,
+ "sim_seconds": 82.04,
  "brain_on_at": 2.0,
- "loop_end": 45.45,
+ "loop_end": 56.65,
  "loop_note": "after the last event the rat only stands while the rig finishes; a player may loop at loop_end",
  "file": "session.bin",
- "bytes": 1698012,
- "sha256": "5e650bd5544d417f3224811ad5b13b40b0cb6e7d8fc916f12f859aa01f97991c",
+ "bytes": 3065388,
+ "sha256": "2b2aa30494dec7a6d236528f4ebc7798a1389b0983bb6098558c04e8ef4a3b2b",
  "layout": {
   "dtype": "float32",
   "endianness": "little",
@@ -52,14 +52,14 @@
   3.8,
   4.68,
   5.86,
-  6.94,
-  14.38,
-  16.18,
-  18.0,
-  37.42,
-  38.76,
-  41.4,
-  42.46
+  6.92,
+  15.62,
+  17.42,
+  19.24,
+  38.18,
+  39.5,
+  42.12,
+  46.12
  ],
  "resets_note": "between targets the rig starts a new trial: the rat is put back in its standing start pose and rests while the rig types, scrolls or pons is busy (do not interpolate across)",
  "targets": [
@@ -160,8 +160,8 @@
    "n": 4,
    "label": "Choose image",
    "kind": "image",
-   "lit_at": 6.56,
-   "hit_at": 6.94,
+   "lit_at": 6.54,
+   "hit_at": 6.92,
    "seconds_to_hit": 0.38,
    "box_px": [
     193,
@@ -191,8 +191,8 @@
    "n": 5,
    "label": "Name field",
    "kind": "name",
-   "lit_at": 13.92,
-   "hit_at": 14.38,
+   "lit_at": 15.16,
+   "hit_at": 15.62,
    "seconds_to_hit": 0.46,
    "box_px": [
     192,
@@ -207,27 +207,27 @@
     0.02
    ],
    "click_px": [
-    376.1,
-    302.5
+    375.6,
+    302.3
    ],
    "click_norm": [
-    0.293828,
-    0.336111
+    0.293438,
+    0.335889
    ],
    "misses_before": 0,
    "lights": 1,
    "state": "done",
    "typed": "Labrat",
    "typing_seconds": 0.6,
-   "typed_from": 14.91,
-   "typed_until": 15.51
+   "typed_from": 16.16,
+   "typed_until": 16.76
   },
   {
    "n": 6,
    "label": "Ticker field",
    "kind": "ticker",
-   "lit_at": 15.68,
-   "hit_at": 16.18,
+   "lit_at": 16.92,
+   "hit_at": 17.42,
    "seconds_to_hit": 0.5,
    "box_px": [
     446.6,
@@ -242,27 +242,27 @@
     0.02
    ],
    "click_px": [
-    543.0,
-    312.9
+    543.2,
+    313.0
    ],
    "click_norm": [
-    0.424219,
-    0.347667
+    0.424375,
+    0.347778
    ],
    "misses_before": 0,
    "lights": 1,
    "state": "done",
    "typed": "LABRAT",
-   "typing_seconds": 0.62,
-   "typed_from": 16.71,
-   "typed_until": 17.33
+   "typing_seconds": 0.6,
+   "typed_from": 17.96,
+   "typed_until": 18.56
   },
   {
    "n": 7,
    "label": "Description field",
    "kind": "description",
-   "lit_at": 17.48,
-   "hit_at": 18.0,
+   "lit_at": 18.72,
+   "hit_at": 19.24,
    "seconds_to_hit": 0.52,
    "box_px": [
     192,
@@ -277,26 +277,26 @@
     0.043333
    ],
    "click_px": [
-    258.7,
+    258.6,
     365.0
    ],
    "click_norm": [
-    0.202109,
+    0.202031,
     0.405556
    ],
    "misses_before": 0,
    "lights": 1,
    "state": "done",
-   "typing_seconds": 17.13,
-   "typed_from": 18.53,
-   "typed_until": 35.66
+   "typing_seconds": 16.66,
+   "typed_from": 19.76,
+   "typed_until": 36.42
   },
   {
    "n": 8,
    "label": "Advanced",
    "kind": "advanced",
-   "lit_at": 37.18,
-   "hit_at": 37.42,
+   "lit_at": 37.94,
+   "hit_at": 38.18,
    "seconds_to_hit": 0.24,
    "box_px": [
     191,
@@ -311,11 +311,11 @@
     0.03
    ],
    "click_px": [
-    293.5,
+    293.4,
     382.4
    ],
    "click_norm": [
-    0.229297,
+    0.229219,
     0.424889
    ],
    "misses_before": 0,
@@ -326,8 +326,8 @@
    "n": 9,
    "label": "Settings field",
    "kind": "setting",
-   "lit_at": 38.26,
-   "hit_at": 38.76,
+   "lit_at": 39.0,
+   "hit_at": 39.5,
    "seconds_to_hit": 0.5,
    "box_px": [
     191,
@@ -342,26 +342,26 @@
     0.021667
    ],
    "click_px": [
-    205.2,
+    205.4,
     700.5
    ],
    "click_norm": [
-    0.160312,
+    0.160469,
     0.778333
    ],
    "misses_before": 0,
    "lights": 1,
    "state": "done",
-   "typing_seconds": 0.11,
-   "typed_from": 39.28,
-   "typed_until": 39.39
+   "typing_seconds": 0.1,
+   "typed_from": 40.03,
+   "typed_until": 40.13
   },
   {
    "n": 10,
    "label": "Launch token",
    "kind": "launch",
-   "lit_at": 40.94,
-   "hit_at": 41.4,
+   "lit_at": 41.66,
+   "hit_at": 42.12,
    "seconds_to_hit": 0.46,
    "box_px": [
     194,
@@ -376,11 +376,11 @@
     0.023333
    ],
    "click_px": [
-    544.0,
+    543.8,
     419.5
    ],
    "click_norm": [
-    0.425,
+    0.424844,
     0.466111
    ],
    "misses_before": 0,
@@ -391,31 +391,31 @@
    "n": 11,
    "label": "Confirm",
    "kind": "confirm",
-   "lit_at": 41.58,
-   "hit_at": 42.46,
-   "seconds_to_hit": 0.88,
+   "lit_at": 45.22,
+   "hit_at": 46.12,
+   "seconds_to_hit": 0.9,
    "box_px": [
-    482.1,
-    743.8,
-    78.3,
-    26.7
+    477,
+    736.2,
+    81.2,
+    28
    ],
    "norm": [
-    0.407222,
-    0.841294,
-    0.030598,
-    0.01483
+    0.404382,
+    0.833611,
+    0.031726,
+    0.015556
    ],
    "click_px": [
-    485.0,
-    761.5
+    479.2,
+    760.0
    ],
    "click_norm": [
-    0.378906,
-    0.846111
+    0.374375,
+    0.844444
    ],
    "misses_before": 0,
-   "lights": 2,
+   "lights": 1,
    "state": "done"
   }
  ],
@@ -474,184 +474,196 @@
    "text": "The rat clicks it (lever press) after 0.66 s"
   },
   {
-   "t": 6.56,
+   "t": 6.54,
    "kind": "lit",
    "target": 4,
    "exact": true,
    "text": "Target 4 of 11 lights up: Choose image"
   },
   {
-   "t": 6.94,
+   "t": 6.92,
    "kind": "click",
    "target": 4,
    "exact": true,
    "text": "The rat clicks it (lever press) after 0.38 s"
   },
   {
-   "t": 13.76,
+   "t": 15.0,
    "kind": "image",
    "exact": false,
    "text": "The click opened the image picker; the rig chose the coin picture"
   },
   {
-   "t": 13.92,
+   "t": 15.16,
    "kind": "lit",
    "target": 5,
    "exact": true,
    "text": "Target 5 of 11 lights up: Name field"
   },
   {
-   "t": 14.38,
+   "t": 15.62,
    "kind": "click",
    "target": 5,
    "exact": true,
    "text": "The rat clicks it (lever press) after 0.46 s"
   },
   {
-   "t": 14.91,
+   "t": 16.16,
    "kind": "typing",
    "target": 5,
    "exact": false,
-   "until": 15.51,
+   "until": 16.76,
    "text": "The rig types \"Labrat\" into the field the rat clicked"
   },
   {
-   "t": 15.68,
+   "t": 16.92,
    "kind": "lit",
    "target": 6,
    "exact": true,
    "text": "Target 6 of 11 lights up: Ticker field"
   },
   {
-   "t": 16.18,
+   "t": 17.42,
    "kind": "click",
    "target": 6,
    "exact": true,
    "text": "The rat clicks it (lever press) after 0.50 s"
   },
   {
-   "t": 16.71,
+   "t": 17.96,
    "kind": "typing",
    "target": 6,
    "exact": false,
-   "until": 17.33,
+   "until": 18.56,
    "text": "The rig types \"LABRAT\" into the field the rat clicked"
   },
   {
-   "t": 17.48,
+   "t": 18.72,
    "kind": "lit",
    "target": 7,
    "exact": true,
    "text": "Target 7 of 11 lights up: Description field"
   },
   {
-   "t": 18.0,
+   "t": 19.24,
    "kind": "click",
    "target": 7,
    "exact": true,
    "text": "The rat clicks it (lever press) after 0.52 s"
   },
   {
-   "t": 18.53,
+   "t": 19.76,
    "kind": "typing",
    "target": 7,
    "exact": false,
-   "until": 35.66,
+   "until": 36.42,
    "text": "The rig types the description, with the brain fingerprint, into the field the rat clicked"
   },
   {
-   "t": 35.67,
+   "t": 36.42,
    "kind": "scroll",
    "exact": false,
    "text": "The rig scrolls the page to the next target; the rat waits"
   },
   {
-   "t": 37.18,
+   "t": 37.94,
    "kind": "lit",
    "target": 8,
    "exact": true,
    "text": "Target 8 of 11 lights up: Advanced"
   },
   {
-   "t": 37.42,
+   "t": 38.18,
    "kind": "click",
    "target": 8,
    "exact": true,
    "text": "The rat clicks it (lever press) after 0.24 s"
   },
   {
-   "t": 38.26,
+   "t": 39.0,
    "kind": "lit",
    "target": 9,
    "exact": true,
    "text": "Target 9 of 11 lights up: Settings field"
   },
   {
-   "t": 38.76,
+   "t": 39.5,
    "kind": "click",
    "target": 9,
    "exact": true,
    "text": "The rat clicks it (lever press) after 0.50 s"
   },
   {
-   "t": 39.28,
+   "t": 40.03,
    "kind": "typing",
    "target": 9,
    "exact": false,
-   "until": 39.39,
+   "until": 40.13,
    "text": "The rig types our setting into the field the rat clicked"
   },
   {
-   "t": 39.39,
+   "t": 40.14,
    "kind": "scroll",
    "exact": false,
    "text": "The rig scrolls the page to the next target; the rat waits"
   },
   {
-   "t": 40.94,
+   "t": 41.66,
    "kind": "lit",
    "target": 10,
    "exact": true,
    "text": "Target 10 of 11 lights up: Launch token"
   },
   {
-   "t": 41.4,
+   "t": 42.12,
    "kind": "click",
    "target": 10,
    "exact": true,
    "text": "The rat clicks it (lever press) after 0.46 s"
   },
   {
-   "t": 41.58,
+   "t": 45.22,
    "kind": "lit",
    "target": 11,
    "exact": true,
    "text": "Target 11 of 11 lights up: Confirm"
   },
   {
-   "t": 42.46,
+   "t": 46.12,
    "kind": "click",
    "target": 11,
    "exact": true,
-   "text": "The rat clicks it (lever press) after 0.88 s"
+   "text": "The rat clicks it (lever press) after 0.90 s"
   },
   {
-   "t": 43.41,
+   "t": 46.72,
    "kind": "tx_requested",
    "exact": false,
    "text": "pons asks for the launch transaction"
   },
   {
-   "t": 44.76,
+   "t": 46.72,
    "kind": "tx_checked",
    "exact": false,
    "text": "The rig decodes it and checks it field by field: all 17 checks pass"
   },
   {
-   "t": 45.4,
-   "kind": "tx_refused",
+   "t": 49.84,
+   "kind": "tx_signed",
    "exact": false,
-   "text": "Dry rehearsal: the rig refuses to sign, so nothing is signed and no coin is created"
+   "text": "Signed once"
+  },
+  {
+   "t": 50.46,
+   "kind": "tx_sent",
+   "exact": false,
+   "text": "Sent to Robinhood Chain"
+  },
+  {
+   "t": 52.65,
+   "kind": "tx_mined",
+   "exact": false,
+   "text": "Mined on Robinhood Chain: the coin exists"
   }
  ],
  "timeline_note": "brain_on, lit and click times are exact (from the command log); typing, image, scroll and transaction times come from the rig's wall clock mapped onto the replay (within about 0.01 s)",
@@ -670,7 +682,7 @@
     "units": 794,
     "connections": 137728,
     "sha256": "3b9da3e23581ad96d1256e930d75a5c7c2119410fe4133dab4a20759e353d88e",
-    "file": "runs/brainrig_20260924T163338Z_seed2026/steer.pt"
+    "file": "runs/brainrig_20260924T211408Z_seed2026/steer.pt"
    },
    {
     "name": "lever-press network",
@@ -685,7 +697,7 @@
     "units": 1518,
     "connections": 505344,
     "sha256": "3f55d8cea25de8bc026eb44b46ee35666c4e8c876a9d5f2d3055bcce37675bac",
-    "file": "runs/brainrig_20260924T163338Z_seed2026/press.pt"
+    "file": "runs/brainrig_20260924T211408Z_seed2026/press.pt"
    }
   ],
   "units": 2312,
@@ -705,11 +717,11 @@
   "brain_commit_ok": true,
   "frames_identical": true,
   "clicks_identical": true,
-  "session_proof": "272793500d05af28b8715cca79541cf29ecdab1fa346e2daf2748432e6707ab5",
-  "replayed_proof": "272793500d05af28b8715cca79541cf29ecdab1fa346e2daf2748432e6707ab5",
-  "physics_frames": 22712,
-  "control_steps": 2170,
-  "check_it": "python replay_session.py runs/brainrig_20260924T163338Z_seed2026",
+  "session_proof": "82ece83d9f3f79d815564af44c11072a6975a9d9cca5879d5909aa2245cebaa7",
+  "replayed_proof": "82ece83d9f3f79d815564af44c11072a6975a9d9cca5879d5909aa2245cebaa7",
+  "physics_frames": 41032,
+  "control_steps": 4002,
+  "check_it": "python replay_session.py runs/brainrig_20260924T211408Z_seed2026",
   "recorded_with": {
    "python": "3.14.2",
    "numpy": "2.4.2",
@@ -722,7 +734,7 @@
    "mujoco": "3.13.0"
   }
  },
- "honesty": "A replay, not live. This clip re-simulates a recorded dry rehearsal of the launch (the rig checked the launch transaction and refused to sign it, so nothing was signed and no coin was created) from its saved brain and command log, and reproduces the recording bit for bit. The brain is two trained artificial neural networks driving a simulated rat body (DeepMind's open-source rodent model in MuJoCo), not a biological brain. The rig lit each target, forwarded only on-target clicks and typed a field's text after the rat clicked into it; the rat did every click, not the typing.",
+ "honesty": "A replay, not live. This clip re-simulates a recorded launch session from its saved brain and command log, and reproduces the recording bit for bit. The brain is two trained artificial neural networks driving a simulated rat body (DeepMind's open-source rodent model in MuJoCo), not a biological brain. The rig lit each target, forwarded only on-target clicks and typed a field's text after the rat clicked into it; the rat did every click, not the typing.",
  "credits": {
   "body": "DeepMind rodent model (dm_control, Apache-2.0), the rat from Aldarondo et al., Nature 2024",
   "physics": "MuJoCo"

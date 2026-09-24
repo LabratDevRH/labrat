@@ -18,4 +18,13 @@
  *     launched: 'YYYY-MM-DD'
  *   };
  */
-window.LABRAT_COIN = null;
+window.LABRAT_COIN = {
+  name: 'Labrat',
+  symbol: 'LABRAT',
+  address: '0xaCa07FE3BC5fF3e7501cA1dCCFCd937fD710680d',
+  tx: '0x0f618ed9fa31c8ba5d224a620f514d3ff03504c7943a9e3ec937e316ea021d26',
+  block: 71684103,
+  pons: 'https://www.ponsfamily.com/launchpad/0xaCa07FE3BC5fF3e7501cA1dCCFCd937fD710680d',
+  explorer: 'https://robinhoodchain.blockscout.com/token/0xaCa07FE3BC5fF3e7501cA1dCCFCd937fD710680d',
+  launched: '2026-09-25'
+};
