@@ -234,9 +234,9 @@ LAUNCH_FEE_ETH = launcher.LAUNCH_FEE_WEI / 1e18                      # 0.0005
 PIN_KEYS = ('name', 'symbol', 'tax_bps', 'image', 'x', 'website', 'live_env')   # rig.py's: must not change after startup
 # launcher.preflight() simulates launcher.calldata(cfg), which carries cfg['image']. In the brain rig pons pins coin.png
 # itself and the calldata's image is checked against pons's pin, so .env's RATBRAIN_IMAGE only feeds that simulation.
-# When it is empty the simulation uses coin.png as pons pinned it: the CID pons returned for live/assets/coin.png in
-# every DRY brain run (2026-09-24). Content-addressed, so the same file pins to the same URI.
-SIM_IMAGE = 'ipfs://bafybeiedfhkewsq4ljrjenvjpy4qn3jurctmlfzoaslhvco5i7jzqid46a'
+# When it is empty the simulation uses coin.png as pons pinned it: the CID pons returned for live/assets/coin.png (the
+# Labrat logo) in the DRY rehearsal of 2026-09-24. Content-addressed, so the same file pins to the same URI.
+SIM_IMAGE = 'ipfs://bafybeig6tzcsg5vueqef4wp7z6stg7uujjcwe2rweln2xwflcqd5plfv5u'
 PONS_COIN_URL = 'https://www.ponsfamily.com/launchpad/{}'   # flybrain's rhlive.py ends on the coin's pons page too
 SUCCESS_RE = (r'(token launched|launched successfully|launch successful|successfully launched|launch complete|'
               r'view (your )?(token|coin)|transaction (submitted|sent|confirmed))')
