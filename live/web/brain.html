@@ -1,0 +1,956 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RATBRAIN · Operant Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap">
+<style>
+  :root{
+    /* the owner's logo palette: a nebula ramp, deep blue -> electric yellow, on black */
+    --black:#000000; --yellow:#FFF40F; --goldy:#FCF010; --gold:#F5AC29; --orange:#E86E3D;
+    --coral:#EA3560; --magenta:#D60C94; --violet:#8808B5; --purple:#4B04C4; --blue:#1308AE;
+    /* derived: alpha and tint variants only */
+    --glass:rgba(10,4,24,.84); --glass-hi:rgba(16,6,38,.9);
+    --line:rgba(136,8,181,.46); --line-soft:rgba(136,8,181,.24);
+    --ink:#f4f0fb;            /* electric purple, 94% tint */
+    --dim:#d2c0f0;            /* 75% tint */
+    --muted:#ae8ee4;          /* 55% tint: 7.2:1 on the glass */
+    --faint:#9c75df;          /* 45% tint: 5.6:1 on the glass */
+    --mag-t:#e255b4;          /* hot magenta, 30% tint (text) */
+    --pink:#f59aaf;           /* coral pink, 50% tint */
+    --ramp:linear-gradient(90deg,var(--purple),var(--violet) 20%,var(--magenta) 42%,var(--coral) 60%,var(--orange) 74%,var(--gold) 87%,var(--goldy));
+    --hair:linear-gradient(90deg,var(--purple),var(--magenta) 50%,var(--gold));
+    /* [subject] [stimulus screen] [network readout]; .foot uses the same tracks so its columns line up */
+    /* 1920x1080: ~328 / ~1064 / ~480 px; the stimulus column is sized so pons's 1280x900 frame fills the pane */
+    --cols:minmax(0,.328fr) minmax(0,1.064fr) minmax(0,.48fr);
+  }
+  *{box-sizing:border-box}
+  [hidden]{display:none!important}
+  html,body{height:100%}
+  body{margin:0;color:var(--ink);overflow:hidden;
+    font-family:"Space Grotesk",system-ui,sans-serif;font-size:15px;
+    /* static backdrop: a faint star speckle over a soft nebula (low alpha, behind every panel) */
+    background-color:#000;
+    background-image:
+      radial-gradient(circle at 37px 53px, rgba(244,240,251,.55) 0 .7px, transparent 1.4px),
+      radial-gradient(circle at 151px 19px, rgba(252,240,16,.45) 0 .6px, transparent 1.3px),
+      radial-gradient(circle at 89px 131px, rgba(244,240,251,.38) 0 .6px, transparent 1.3px),
+      radial-gradient(circle at 211px 97px, rgba(226,85,180,.5) 0 .7px, transparent 1.4px),
+      radial-gradient(circle at 12px 188px, rgba(210,192,240,.42) 0 .8px, transparent 1.5px),
+      radial-gradient(58% 60% at 4% 6%, rgba(19,8,174,.58), transparent 72%),
+      radial-gradient(52% 62% at 70% 14%, rgba(75,4,196,.40), transparent 72%),
+      radial-gradient(48% 52% at 28% 104%, rgba(136,8,181,.44), transparent 72%),
+      radial-gradient(40% 46% at 99% 94%, rgba(214,12,148,.38), transparent 72%),
+      radial-gradient(30% 34% at 101% -2%, rgba(245,172,41,.2), rgba(234,53,96,.12) 45%, transparent 76%);
+    background-size:229px 211px,263px 241px,181px 167px,307px 283px,233px 229px,
+      100% 100%,100% 100%,100% 100%,100% 100%,100% 100%;
+    background-repeat:repeat,repeat,repeat,repeat,repeat,no-repeat,no-repeat,no-repeat,no-repeat,no-repeat}
+  .mono{font-family:"JetBrains Mono",ui-monospace,monospace}
+
+  /* every track is minmax(0,..): no child's min-content (the long disclosure line) can widen the page */
+  .app{height:100vh;display:grid;grid-template-columns:minmax(0,1fr);
+    grid-template-rows:auto minmax(0,1fr) auto;gap:10px;padding:10px 14px 12px}
+  .app>*{min-width:0}
+
+  /* ---------------------------------------------------------------- header */
+  .top{display:flex;flex-direction:column;gap:8px;min-width:0}
+  .bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-width:0}
+  .brand{display:flex;align-items:center;gap:12px;min-width:0}
+  .mark{width:44px;height:27px;flex:0 0 auto;display:block}
+  .brand h1{margin:0;display:flex;align-items:baseline;gap:9px;line-height:1;white-space:nowrap}
+  .brand h1 b{font-size:26px;font-weight:700;letter-spacing:.07em;color:var(--ink)}
+  .brand h1 em{font-style:normal;font-size:17px;font-weight:600;letter-spacing:.02em;
+    background:linear-gradient(90deg,var(--coral),var(--orange) 45%,var(--gold));
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .brand .tag{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.13em;text-transform:uppercase;
+    color:var(--muted);padding-left:12px;border-left:1px solid var(--line);white-space:nowrap}
+  .grow{flex:1}
+  .chip{font-family:"JetBrains Mono",monospace;font-size:12.5px;padding:6px 11px;line-height:1.25;
+    border:1px solid var(--line);border-radius:3px;color:var(--dim);background:var(--glass);white-space:nowrap}
+  .chip b{color:var(--ink);font-weight:600}
+  .chip i{font-style:normal;color:var(--muted)}
+  /* DRY: electric yellow with a caution hatch, unmistakable */
+  .chip.dry{color:#000;font-weight:700;letter-spacing:.14em;border-color:var(--yellow);padding-left:24px;
+    background:repeating-linear-gradient(-45deg,#000 0 3px,transparent 3px 6px) 7px 50%/11px 13px no-repeat,var(--yellow);
+    box-shadow:0 0 18px -2px rgba(255,244,15,.45)}
+  /* DEV (scripted cursor) / LIVE: red, never mistakable for the rat's run */
+  .chip.live{color:#fff;font-weight:700;letter-spacing:.06em;border-color:#ff3b3b;background:#b3121c;
+    box-shadow:0 0 18px -2px rgba(255,59,59,.6)}
+
+  button{font-family:"Space Grotesk",system-ui,sans-serif;font-size:14.5px;font-weight:700;letter-spacing:.16em;
+    color:#000;border:0;padding:11px 26px;border-radius:3px;cursor:pointer;white-space:nowrap;
+    background:linear-gradient(90deg,var(--magenta),var(--coral) 40%,var(--orange) 66%,var(--gold));
+    box-shadow:inset 0 0 0 1px rgba(255,244,15,.35),0 8px 24px -8px rgba(214,12,148,.75)}
+  /* while a session runs the button reads as a status, not as a broken control */
+  button:disabled{cursor:not-allowed;color:var(--gold);background:rgba(214,12,148,.14);
+    box-shadow:inset 0 0 0 1px var(--magenta)}
+  button:focus-visible{outline:2px solid var(--goldy);outline-offset:2px}
+  input{font-family:"JetBrains Mono",monospace;font-size:13px;background:var(--glass-hi);
+    border:1px solid var(--line);color:var(--ink);padding:9px 11px;border-radius:3px}
+  input:focus-visible{outline:1px solid var(--magenta)}
+  #name{width:130px} #ticker{width:110px} #desc{width:340px}
+
+  /* protocol phases: numbered, a magenta ring on the active one, golden when done */
+  .steps{display:flex;align-items:center;counter-reset:ph}
+  .st{display:flex;align-items:center;gap:7px}
+  .st::before{counter-increment:ph;content:counter(ph,decimal-leading-zero);
+    font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--faint)}
+  .st:not(:last-child)::after{content:"";width:16px;height:1px;margin:0 10px;background:var(--line)}
+  .st .dot{width:9px;height:9px;border-radius:50%;border:1px solid var(--violet);background:rgba(136,8,181,.18);
+    transition:background .25s, box-shadow .25s, border-color .25s}
+  .st .lbl{font-family:"JetBrains Mono",monospace;font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--muted)}
+  .st.on .dot{background:var(--magenta);border-color:var(--magenta);
+    box-shadow:0 0 0 3px rgba(214,12,148,.28),0 0 12px var(--magenta)}
+  .st.on .lbl{color:var(--ink)}
+  .st.done .dot{background:var(--goldy);border-color:var(--goldy);box-shadow:0 0 8px rgba(252,240,16,.5)}
+  .st.done .lbl{color:var(--dim)}
+
+  /* the instrument status strip */
+  .strip{display:flex;align-items:center;height:25px;padding:0 4px 0 0;min-width:0;overflow:hidden;
+    border:1px solid var(--line-soft);border-radius:3px;white-space:nowrap;
+    font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.06em;color:var(--dim);
+    background:linear-gradient(90deg,rgba(19,8,174,.34),rgba(75,4,196,.2) 38%,rgba(214,12,148,.14) 72%,rgba(245,172,41,.12)),
+      rgba(0,0,0,.55)}
+  .strip .f{padding:0 12px;border-right:1px solid var(--line-soft);flex:0 0 auto}
+  .strip .f:first-child{padding-left:10px}
+  .strip .f i{font-style:normal;color:var(--muted);margin-right:7px;text-transform:uppercase}
+  .strip .f b{font-weight:600;color:var(--ink)}
+  .strip .f.ch{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}   /* shrinks first */
+  .strip .f.clock{border-right:0;border-left:1px solid var(--line-soft)}
+  .strip .f.clock b{color:var(--goldy);font-variant-numeric:tabular-nums}
+  .strip .mode{flex:0 0 auto;font-weight:700;letter-spacing:.14em;color:#000;background:var(--yellow);
+    padding:2px 8px;border-radius:2px}
+  .strip .devf{display:none;flex:0 0 auto;font-weight:700;color:#fff;background:#b3121c;padding:2px 8px;
+    border-radius:2px;margin-right:6px}
+  body.dev .strip .devf{display:block}
+  body.live .strip .mode{background:#b3121c;color:#fff}
+
+  /* ---------------------------------------------------------------- panes */
+  .main{display:grid;grid-template-columns:var(--cols);gap:10px;min-height:0;min-width:0}
+  .pane{position:relative;background:var(--glass);border:1px solid var(--line);border-radius:4px;
+    display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;
+    box-shadow:0 0 26px -10px rgba(214,12,148,.45),0 20px 44px -24px rgba(75,4,196,.8)}
+  .hd{position:relative;display:flex;align-items:center;gap:9px;padding:8px 12px 8px 10px;flex:0 0 auto}
+  .hd::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:var(--hair);opacity:.8}
+  .px{flex:0 0 auto;width:19px;height:19px;display:grid;place-items:center;border:1px solid var(--magenta);
+    border-radius:2px;color:var(--mag-t);font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:700}
+  .hd .t{font-size:14px;font-weight:600;letter-spacing:.02em;color:var(--ink);white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .hd .t .s{font-family:"JetBrains Mono",monospace;font-size:11.5px;font-weight:400;letter-spacing:.02em;
+    color:var(--muted)}
+  .hd .r{margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--goldy);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:70%;flex:0 1 auto}
+  .rec{flex:0 0 auto;width:8px;height:8px;border-radius:50%;background:rgba(136,8,181,.45)}
+  .rec.on{background:var(--coral);box-shadow:0 0 10px var(--coral);animation:pulse 1.6s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+  /* A: the subject. The rotating rat is a display model of the simulated body (rat3d.js), not a live view. */
+  #ratpane{container-type:inline-size}
+  #ratpane .hd .t{flex:0 0 auto}
+  #ratpane .hd .r{color:var(--muted);font-size:11px;max-width:none}
+  #rat3d{position:relative;flex:1;min-height:0;overflow:hidden;
+    background:
+      linear-gradient(var(--gold),var(--gold)) left 8px top 8px/12px 1px no-repeat,
+      linear-gradient(var(--gold),var(--gold)) left 8px top 8px/1px 12px no-repeat,
+      linear-gradient(var(--gold),var(--gold)) right 8px top 8px/12px 1px no-repeat,
+      linear-gradient(var(--gold),var(--gold)) right 8px top 8px/1px 12px no-repeat,
+      linear-gradient(var(--gold),var(--gold)) left 8px bottom 8px/12px 1px no-repeat,
+      linear-gradient(var(--gold),var(--gold)) left 8px bottom 8px/1px 12px no-repeat,
+      linear-gradient(var(--gold),var(--gold)) right 8px bottom 8px/12px 1px no-repeat,
+      linear-gradient(var(--gold),var(--gold)) right 8px bottom 8px/1px 12px no-repeat,
+      radial-gradient(34% 12% at 72% 62%, rgba(245,172,41,.14), transparent 80%),
+      radial-gradient(70% 30% at 50% 56%, rgba(214,12,148,.34), rgba(136,8,181,.2) 45%, transparent 80%),
+      radial-gradient(90% 60% at 50% 52%, rgba(75,4,196,.34), rgba(19,8,174,.18) 55%, transparent 85%),
+      repeating-linear-gradient(0deg, rgba(136,8,181,.11) 0 1px, transparent 1px 24px),
+      repeating-linear-gradient(90deg, rgba(136,8,181,.11) 0 1px, transparent 1px 24px),
+      rgba(0,0,0,.45)}
+  .ratcap{flex:0 0 auto;padding:8px 12px 9px;border-top:1px solid var(--line-soft);
+    font-family:"JetBrains Mono",monospace;font-size:10.5px;line-height:1.6;color:var(--muted)}
+  .ratcap .alt{display:none}
+  .spec{margin:0;flex:0 0 auto;padding:8px 12px 10px;border-top:1px solid var(--line-soft);
+    display:flex;flex-direction:column;gap:3px;
+    background:linear-gradient(180deg,rgba(75,4,196,.12),rgba(19,8,174,.04))}
+  .spec>div{display:flex;align-items:baseline;gap:12px;min-width:0}
+  .spec dt{flex:0 0 58px;font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--faint);line-height:1.5}
+  .spec dd{margin:0;font-size:12px;line-height:1.35;color:var(--dim);min-width:0;flex:1;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .spec dd b{color:var(--goldy);font-weight:600}
+  /* a narrow subject column: the header's right label moves into the caption, the caption and the record get
+     tighter, and the record keeps the rows the status strip does not already carry */
+  @container (max-width:321.5px){
+    #ratpane .hd .r{display:none}
+    .ratcap .alt{display:block}
+    .ratcap{font-family:"Space Grotesk",system-ui,sans-serif;font-size:10.5px;line-height:1.4;padding:7px 10px 8px}
+    .spec{padding:6px 10px 8px;gap:2px}
+    .spec>div{gap:8px}
+    .spec dt{flex-basis:54px;font-size:9.5px;letter-spacing:.06em}
+    .spec dd{font-size:11px;white-space:normal}
+    .spec .opt{display:none}
+  }
+
+  /* B: the stimulus screen (pons, streamed) */
+  #view{position:relative;flex:1;min-height:0;background:#000;overflow:hidden}
+  #view::after{content:"";position:absolute;inset:6px;pointer-events:none;opacity:.7;
+    background:
+      linear-gradient(var(--gold),var(--gold)) left top/14px 1px no-repeat,
+      linear-gradient(var(--gold),var(--gold)) left top/1px 14px no-repeat,
+      linear-gradient(var(--gold),var(--gold)) right top/14px 1px no-repeat,
+      linear-gradient(var(--gold),var(--gold)) right top/1px 14px no-repeat,
+      linear-gradient(var(--gold),var(--gold)) left bottom/14px 1px no-repeat,
+      linear-gradient(var(--gold),var(--gold)) left bottom/1px 14px no-repeat,
+      linear-gradient(var(--gold),var(--gold)) right bottom/14px 1px no-repeat,
+      linear-gradient(var(--gold),var(--gold)) right bottom/1px 14px no-repeat}
+  #shot{width:100%;height:100%;object-fit:contain;display:block}
+  #idle{position:absolute;inset:0;display:flex;flex-direction:column;gap:8px;align-items:center;justify-content:center;
+    color:var(--muted);font-family:"JetBrains Mono",monospace;font-size:12px;letter-spacing:.04em;text-align:center;
+    background:radial-gradient(40% 36% at 50% 50%, rgba(75,4,196,.22), transparent 80%)}
+  #idle b{color:var(--dim);font-weight:500;letter-spacing:.2em;text-transform:uppercase;font-size:11px}
+
+  /* C: the network readout (artificial units) */
+  .brainwrap{position:relative;flex:1;min-height:0;
+    background:
+      radial-gradient(45% 22% at 50% 30%, rgba(245,172,41,.07), transparent 80%),
+      radial-gradient(60% 30% at 50% 66%, rgba(214,12,148,.1), transparent 80%),
+      radial-gradient(75% 60% at 50% 48%, rgba(75,4,196,.26), rgba(19,8,174,.12) 55%, transparent 82%)}
+  #brain{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .readout{position:absolute;left:13px;top:10px;pointer-events:none;padding:2px 14px 8px 2px;
+    background:radial-gradient(130px 80px at 30% 40%, rgba(0,0,0,.88), rgba(0,0,0,0))}
+  .readout .n{font-family:"JetBrains Mono",monospace;font-size:54px;font-weight:600;
+    line-height:1;letter-spacing:-.03em;font-variant-numeric:tabular-nums;
+    color:var(--yellow);text-shadow:0 0 26px rgba(245,172,41,.55)}
+  .readout .u{font-family:"JetBrains Mono",monospace;font-size:12px;
+    letter-spacing:.16em;text-transform:uppercase;color:var(--dim);margin-top:5px}
+  .netlbl{position:absolute;right:13px;font-family:"JetBrains Mono",monospace;font-size:11px;line-height:1.5;
+    letter-spacing:.1em;text-transform:uppercase;color:var(--dim);pointer-events:none;text-align:right;
+    text-shadow:0 0 6px #000,0 0 3px #000}
+  .netlbl .sz{color:var(--faint);letter-spacing:.06em}
+  .sw{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:1px}
+  .sw.s{background:var(--goldy);box-shadow:0 0 8px var(--gold)}
+  .sw.p{background:var(--magenta);box-shadow:0 0 8px var(--magenta)}
+  .npane{container-type:inline-size}
+  /* a narrow readout column: keep a 5-digit count clear of the steering network's label */
+  @container (max-width:419px){
+    .readout .n{font-size:40px}
+    .netlbl{font-size:10px;letter-spacing:.06em}
+    .npane .hd .r{display:none}      /* the readout's own label says idle / live */
+  }
+  .dns{padding:9px 14px 12px;display:flex;flex-direction:column;gap:7px;
+    border-top:1px solid var(--line-soft);flex:0 0 auto;container-type:inline-size}
+  .dns::before{content:"steering outputs \2192  motor commands";font-family:"JetBrains Mono",monospace;
+    font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+  .dn{display:grid;grid-template-columns:112px minmax(0,1fr) 42px;align-items:center;gap:10px;
+    font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--dim)}
+  .track{height:7px;background:rgba(75,4,196,.26);border-radius:4px;overflow:hidden}
+  /* the fill reveals a ramp fixed to the track (100cqw = the .dns content box): higher = warmer */
+  .track i{display:block;height:100%;width:0;border-radius:4px;
+    background:var(--ramp);background-size:calc(100cqw - 174px) 100%;background-repeat:no-repeat;
+    transition:width .12s linear}
+  .track i.hi{box-shadow:0 0 10px rgba(255,244,15,.75)}
+  .dn .v{text-align:right;font-variant-numeric:tabular-nums;color:var(--ink)}
+
+  /* ---------------------------------------------------------------- footer */
+  .foot{display:grid;grid-template-columns:var(--cols);gap:10px;min-height:0;min-width:0}
+  .telecol{grid-column:1 / span 2;min-width:0}
+  .foot .logwrap{grid-column:3;min-width:0}
+  .tele{display:grid;grid-template-columns:minmax(0,.78fr) minmax(0,1.15fr) minmax(0,1.75fr) minmax(0,1.15fr) minmax(0,.85fr) minmax(0,.95fr);
+    background:var(--glass);border:1px solid var(--line);border-radius:4px;overflow:hidden;position:relative}
+  .tele::before{content:"";position:absolute;left:0;right:0;top:0;height:1px;background:var(--hair);opacity:.7}
+  .cell{padding:10px 14px;min-width:0;border-left:1px solid var(--line-soft)}
+  .cell:first-child{border-left:0}
+  .cell .k{font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cell .v{font-family:"JetBrains Mono",monospace;font-size:23px;margin-top:4px;color:var(--ink);
+    font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cell .v small{font-size:13px;color:var(--muted)}
+  .cell .v.go{color:var(--goldy)} .cell .v.warn{color:var(--gold)} .cell .v.off{color:var(--orange)}
+  #t-target{font-size:16px;color:var(--gold)}
+  #t-out{font-size:13px}
+  .note{font-size:11px;line-height:1.45;color:var(--muted);margin-top:6px}
+  .note b{color:var(--dim);font-weight:600}
+  .logwrap{display:flex;flex-direction:column;background:var(--glass);border:1px solid var(--line);
+    border-radius:4px;height:118px;overflow:hidden;position:relative}
+  .logwrap::before{content:"";position:absolute;left:0;right:0;top:0;height:1px;background:var(--hair);opacity:.7}
+  .loghd{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:5px 12px 3px;
+    font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint)}
+  .loghd b{color:var(--dim);font-weight:600}
+  #log{flex:1;min-height:0;min-width:0;padding:0 12px 6px;overflow-y:auto;
+    -webkit-mask-image:linear-gradient(180deg,transparent 0,#000 12px);mask-image:linear-gradient(180deg,transparent 0,#000 12px);
+    font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--dim);line-height:1.62;
+    scrollbar-width:thin;scrollbar-color:rgba(136,8,181,.6) transparent}
+  #log div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #log .ts{color:var(--faint);margin-right:8px;font-variant-numeric:tabular-nums}
+  #log .code{font-weight:700;letter-spacing:.05em;margin-right:8px}
+  #log b{color:var(--ink);font-weight:600}
+  #log a{color:var(--goldy)}
+  #log .c-cue{color:var(--gold)} #log .c-hit{color:var(--goldy)} #log .c-off{color:var(--orange)}
+  #log .c-tx{color:var(--mag-t)} #log .c-end{color:var(--goldy)} #log .c-rig{color:var(--muted)}
+  #log .c-sys{color:var(--faint)} #log .c-fail{color:var(--coral)}
+  #log .m-hit{color:var(--ink)} #log .m-tx{color:var(--ink)}
+
+  /* narrower screens (1280x720 recording): keep the header compact and give the columns new proportions */
+  @media (max-width:1599px){
+    :root{--cols:minmax(0,.33fr) minmax(0,1fr) minmax(0,.53fr)}
+    .brand{gap:10px}
+    .brand h1 b{font-size:23px}
+    .brand h1 em{font-size:15px}
+    .brand .tag{font-size:10.5px;letter-spacing:.08em;padding-left:10px}
+    .chip{font-size:11.5px;padding:5px 9px}
+    .chip.dry{padding-left:22px}
+    button{padding-left:20px;padding-right:20px;letter-spacing:.12em}
+    input{font-size:12.5px}
+    #name{width:112px} #ticker{width:100px} #desc{width:236px}
+    .st{margin-right:13px}
+    .st:last-child{margin-right:0}
+    .st::before,.st:not(:last-child)::after{display:none}
+    .st .lbl{font-size:11px;letter-spacing:.1em}
+    .strip{font-size:10.5px;letter-spacing:.03em}
+    .strip .f{padding:0 9px}
+    .strip .wide{display:none}
+    body.dev .brand .tag{display:none}     /* room for the long red DEV chip */
+    .cell{padding:9px 11px}
+    .cell .k{font-size:10px;letter-spacing:.07em}
+    .dn{grid-template-columns:100px minmax(0,1fr) 40px}
+    .track i{background-size:calc(100cqw - 160px) 100%}
+  }
+  /* short screens: a slimmer header and footer leave more height to the stimulus screen */
+  @media (max-height:819px){
+    .top{gap:6px}
+    .mark{width:38px;height:23px}
+    button{padding:8px 24px;font-size:13.5px}
+    input{padding:7px 10px}
+    .strip{height:22px}
+    .hd{padding-top:7px;padding-bottom:7px}
+    .cell{padding:7px 11px}
+    .cell .v{font-size:19px;margin-top:2px}
+    #t-target{font-size:14px}
+    .logwrap{height:98px}
+    #log{line-height:1.5;font-size:11.5px}
+    .loghd{padding-top:4px}
+    .note{margin-top:5px;font-size:10.5px;line-height:1.4}
+    .readout .n{font-size:40px}
+    .dns{gap:5px;padding-top:7px;padding-bottom:9px}
+    .spec{padding-top:6px;padding-bottom:8px}
+  }
+  /* ---------------------------------------------------------------- LIVE */
+  a.lk{color:var(--goldy);text-decoration:none;border-bottom:1px dotted rgba(252,240,16,.55)}
+  a.lk:hover{border-bottom-style:solid}
+  .cell .v a.lk{border-bottom:0}
+  body.live #start:not(:disabled){background:linear-gradient(90deg,#b3121c,#e0283c 40%,var(--coral) 70%,var(--orange));
+    color:#fff;box-shadow:inset 0 0 0 1px rgba(255,180,180,.45),0 8px 24px -8px rgba(255,59,59,.8)}
+  /* the LIVE confirm dialog: the only way a live session starts */
+  .modal{position:fixed;inset:0;z-index:40;display:grid;place-items:center;padding:16px;
+    background:radial-gradient(70% 70% at 50% 42%, rgba(75,4,196,.4), rgba(0,0,0,.86) 72%);
+    -webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);animation:fadein .18s ease-out}
+  @keyframes fadein{from{opacity:0}to{opacity:1}}
+  .dlg{position:relative;width:min(660px,100%);max-height:calc(100vh - 32px);overflow:auto;
+    background:linear-gradient(180deg,rgba(26,8,56,.97),rgba(10,4,24,.97));border:1px solid var(--line);border-radius:6px;
+    box-shadow:0 0 0 1px rgba(255,59,59,.3),0 0 48px -8px rgba(214,12,148,.6),0 40px 90px -30px #000;
+    animation:pop .22s cubic-bezier(.2,.9,.3,1.15)}
+  @keyframes pop{from{transform:translateY(8px) scale(.98);opacity:0}to{transform:none;opacity:1}}
+  .dlg::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:var(--ramp)}
+  .dlg .dh{display:flex;align-items:center;gap:14px;padding:24px 26px 2px}
+  .dlg .live-tag{flex:0 0 auto;font-family:"JetBrains Mono",monospace;font-size:11.5px;font-weight:700;letter-spacing:.16em;
+    color:#fff;background:#b3121c;border:1px solid #ff3b3b;border-radius:3px;padding:5px 10px;
+    box-shadow:0 0 16px -2px rgba(255,59,59,.6)}
+  .dlg h2{margin:0;font-size:25px;font-weight:700;letter-spacing:.01em;color:var(--ink);line-height:1.2}
+  .dlg h2 .sym{color:var(--goldy)}
+  .dlg .lead{margin:14px 26px 0;font-size:16.5px;line-height:1.55;color:var(--dim)}
+  .dlg .lead b{color:#fff;font-weight:700;letter-spacing:.06em}
+  .dlg .lead .sym{color:var(--goldy);font-weight:700}
+  .dlg .lead .addr{font-family:"JetBrains Mono",monospace;font-size:13.5px;color:var(--ink);overflow-wrap:anywhere}
+  .dlg dl{margin:18px 26px 0;padding:12px 16px;display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px 20px;
+    border:1px solid var(--line-soft);border-radius:4px;background:rgba(0,0,0,.38)}
+  .dlg dt{font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--faint);padding-top:2px;white-space:nowrap}
+  .dlg dd{margin:0;font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.45;color:var(--dim);min-width:0;
+    overflow-wrap:anywhere}
+  .dlg dd b{color:var(--goldy);font-weight:600}
+  .dlg .warn{margin:16px 26px 0;padding:10px 13px;border:1px solid rgba(255,59,59,.6);border-radius:4px;
+    background:rgba(179,18,28,.2);color:#ffc2c2;font-size:13.5px;line-height:1.45}
+  .dlg .acts{display:flex;justify-content:flex-end;align-items:center;gap:12px;padding:22px 26px 24px}
+  .dlg .acts .hint{margin-right:auto;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--faint);
+    letter-spacing:.04em}
+  button.ghost{color:var(--dim);background:transparent;box-shadow:inset 0 0 0 1px var(--line);letter-spacing:.14em}
+  button.ghost:hover{color:var(--ink);box-shadow:inset 0 0 0 1px var(--magenta)}
+  button.go-live{color:#fff;background:linear-gradient(90deg,#b3121c,#e0283c 45%,var(--coral) 75%,var(--orange));
+    box-shadow:inset 0 0 0 1px rgba(255,180,180,.45),0 8px 26px -8px rgba(255,59,59,.8)}
+  button.go-live:disabled{color:#ffb3b3;background:rgba(179,18,28,.2);box-shadow:inset 0 0 0 1px rgba(255,59,59,.5)}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+}, "integrity": {
+  "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js": "sha384-61S/Nu32S3E5+n+KpCOTb2eRYps6fVKm+9Gz1QBvSePFthb46f063Aa/qe/lykFZ"
+} }
+</script>
+</head>
+<body>
+<div class="app">
+
+  <header class="top">
+    <div class="bar">
+      <div class="brand">
+        <svg class="mark" viewBox="0 0 44 27" aria-hidden="true">
+          <defs><linearGradient id="mk" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#8808B5"/><stop offset=".35" stop-color="#D60C94"/>
+            <stop offset=".65" stop-color="#EA3560"/><stop offset="1" stop-color="#F5AC29"/></linearGradient></defs>
+          <g transform="translate(42 11) scale(-1 1)" stroke-linejoin="round" stroke-linecap="round">
+            <path d="M31 1.6C37.5 3 40.5 8.6 36.6 11.8C33.4 14.4 29.4 12.2 31 9.6" fill="none" stroke="url(#mk)" stroke-width="1.8"/>
+            <path d="M0 0C2-1.6 5-3.4 8.5-4.6C11-7.2 16-9.2 22-8.6C28-8 32.5-5 32.5-.6C32.5 2.6 30 4.4 26.5 4.6C20 5.6 13 5.4 9 4C6 3.2 2.5 1.8 0 0Z" fill="url(#mk)"/>
+            <circle cx="11.6" cy="-6.4" r="2.9" fill="#f59aaf"/>
+            <circle cx="6.1" cy="-1.5" r=".95" fill="#000"/>
+            <circle cx=".4" cy="0" r="1.1" fill="#FFF40F"/>
+          </g>
+        </svg>
+        <h1><b>RATBRAIN</b><em>Operant Lab</em></h1>
+        <span class="tag">Subject R-01 &middot; virtual rat &middot; DeepMind rodent model</span>
+      </div>
+      <span class="grow"></span>
+      <span class="chip" id="units"><b>2,312</b> units &nbsp;&middot;&nbsp; <b>643,072</b> connections</span>
+      <span class="chip" id="wallet">wallet&hellip;</span>
+      <span class="chip dry" id="mode">&hellip;</span>
+    </div>
+    <div class="bar">
+      <button id="start">BEGIN SESSION</button>
+      <button class="ghost" id="stop" type="button" hidden title="Stops the LIVE run; works until the launch transaction reaches the signer">STOP</button>
+      <input id="name" value="ratbrain" placeholder="name" readonly aria-label="coin name">
+      <input id="ticker" value="RATBRAIN" placeholder="ticker" readonly aria-label="coin ticker">
+      <input id="desc" value="launched by a virtual rat" placeholder="description" readonly aria-label="coin description">
+      <span class="grow"></span>
+      <div class="steps" id="steps" aria-label="protocol phases"></div>
+    </div>
+    <div class="strip" id="strip" aria-label="session status">
+      <span class="f"><i>session</i><b id="s-seed">&hellip;</b></span>
+      <span class="f"><i>subject</i><b>R-01</b></span>
+      <span class="f"><i>protocol</i><b>PONS-11</b></span>
+      <span class="f"><i>schedule</i><b>FR1</b></span>
+      <span class="f"><i>ITI</i><b>rig hold</b></span>
+      <span class="f ch"><i>chamber</i><b>operant box + lever L1 + screen cue</b></span>
+      <span class="f wide"><i>venue</i><b id="s-venue">ponsfamily.com</b></span>
+      <span class="grow"></span>
+      <span class="devf">DEV &middot; SCRIPTED CURSOR, NOT THE RAT</span>
+      <span class="f clock"><i>clock</i><b id="s-clock">T+000.0</b></span>
+      <span class="mode" id="s-mode">&hellip;</span>
+    </div>
+  </header>
+
+  <div class="main">
+    <section class="pane" id="ratpane">
+      <div class="hd"><span class="px">A</span><span class="t">Subject R-01</span>
+        <span class="r">DeepMind rodent &middot; MuJoCo</span></div>
+      <div id="rat3d"></div>
+      <div class="ratcap"><div class="alt">DeepMind rodent &middot; MuJoCo</div>
+        <div>display model of the simulated body</div>
+        <div>head steers the cursor &middot; lever press clicks</div></div>
+      <dl class="spec">
+        <div><dt>type</dt><dd>virtual rat &middot; simulated</dd></div>
+        <div><dt>brain</dt><dd>2 trained artificial networks</dd></div>
+        <div><dt>schedule</dt><dd><b>FR1</b> &middot; 1 press = 1 click</dd></div>
+        <div class="opt"><dt>cue</dt><dd>the rig lights the target</dd></div>
+        <div class="opt"><dt>ITI</dt><dd>the rig holds, the rat rests</dd></div>
+      </dl>
+    </section>
+
+    <section class="pane">
+      <div class="hd"><span class="px">B</span><span class="rec" id="rec"></span>
+        <span class="t">Stimulus screen <span class="s">&middot; ponsfamily.com/launchpad</span></span>
+        <span class="r" id="phase">chamber idle</span></div>
+      <div id="view">
+        <img id="shot" alt="" hidden>
+        <div id="idle"><b>stimulus screen idle</b><span>press BEGIN SESSION and R-01 takes the cursor</span></div>
+      </div>
+    </section>
+
+    <section class="pane npane">
+      <div class="hd"><span class="px">C</span><span class="t">Network readout <span class="s">(artificial units)</span></span>
+        <span class="r" id="ncount">&hellip;</span></div>
+      <div class="brainwrap">
+        <canvas id="brain"></canvas>
+        <div class="readout"><div class="n" id="firing" style="opacity:.55">0</div>
+          <div class="u">idle · not live data</div></div>
+        <div class="netlbl" style="top:12px"><span class="sw s"></span>steering network<br><span class="sz">21 · 256 · 256 · 256 · 5</span></div>
+        <div class="netlbl" style="bottom:10px"><span class="sw p"></span>lever-press network<br><span class="sz">200 · 512 · 512 · 256 · 38</span></div>
+      </div>
+      <div class="dns" id="dns"></div>
+    </section>
+  </div>
+
+  <div class="foot">
+    <div class="telecol">
+      <div class="tele">
+        <div class="cell"><div class="k">Trial</div><div class="v" id="t-step">&mdash;</div></div>
+        <div class="cell"><div class="k">Correct responses</div><div class="v" id="t-fields">0 <small>/ 11</small></div></div>
+        <div class="cell"><div class="k">Cue</div><div class="v" id="t-target">&mdash;</div></div>
+        <div class="cell"><div class="k">Off-target presses</div><div class="v" id="t-spikes">0</div></div>
+        <div class="cell"><div class="k">Latency</div><div class="v" id="t-lat">&mdash;</div></div>
+        <div class="cell"><div class="k">Outcome</div><div class="v" id="t-out">idle</div></div>
+      </div>
+      <div class="note" id="honesty"><b>Subject R-01 is a simulated rat</b> (DeepMind rodent model in MuJoCo) driven by two trained artificial neural networks, not a biological brain. Its head direction moves the cursor; a lever press clicks. The rig lights the next cue, scrolls, and types a field's text after the rat clicks into it. Off-target presses are ignored. <b>DRY RUN:</b> pons builds the launch transaction, the rig refuses to sign.</div>
+    </div>
+    <div class="logwrap">
+      <div class="loghd"><b>Event log</b><span>session clock &middot; event &middot; detail</span></div>
+      <div id="log"></div>
+    </div>
+  </div>
+</div>
+
+<!-- LIVE only: BEGIN SESSION opens this; only its Start sends the start message -->
+<div class="modal" id="confirm" hidden role="dialog" aria-modal="true" aria-labelledby="cf-title" aria-describedby="cf-lead">
+  <div class="dlg">
+    <div class="dh"><span class="live-tag">LIVE</span>
+      <h2 id="cf-title">Launch <span class="sym" id="cf-sym">$&hellip;</span> for real?</h2></div>
+    <p class="lead" id="cf-lead"></p>
+    <dl id="cf-facts"></dl>
+    <div class="warn" id="cf-warn" hidden></div>
+    <div class="acts"><span class="hint">Esc cancels</span>
+      <button class="ghost" id="cf-cancel" type="button">CANCEL</button>
+      <button class="go-live" id="cf-start" type="button">START</button></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const Q = new URLSearchParams(location.search);
+let STATUS=null, N=0, heat=null, px=null, py=null, pz=null, theta=.45, idleMode=true, RAT=null;
+let STEER=794, PRESS_OFF=794, OUT_OFF=789;
+// LIVE: the per-process token the rig printed (http://localhost:<port>/?token=...). It is kept for this tab only and
+// taken out of the address bar, so a screen recording shows a clean URL. A LIVE start without it is refused.
+let LIVE=false, liveLocked=false, TOKEN=null;
+try { if (Q.get('token')) sessionStorage.setItem('ratrigToken', Q.get('token'));
+      TOKEN = Q.get('token') || sessionStorage.getItem('ratrigToken'); } catch (e) { TOKEN = Q.get('token'); }
+if (Q.get('token')) { try { const u = new URL(location.href); u.searchParams.delete('token');
+  history.replaceState(null, '', u.pathname + u.search + u.hash); } catch (e) {} }
+
+// protocol phases: the 11 pons targets grouped into what you see happening
+const STAGES=[['wallet','wallet'],['terms','terms'],['image','image'],['form','form'],['launch','launch'],['confirm','confirm']];
+const GROUP=k=>/^t0[123]/.test(k)?'terms':/^t04/.test(k)?'image':/^t0[5-9]/.test(k)?'form':/^t10/.test(k)?'launch':/^t11/.test(k)?'confirm':null;
+STAGES.forEach(([k,l])=>{const d=document.createElement('div');d.className='st';d.id='st-'+k;
+  d.innerHTML='<div class="dot"></div><div class="lbl">'+l+'</div>';$('steps').appendChild(d);});
+function stage(k,state){const e=$('st-'+k);if(!e)return;
+  if(e.classList.contains('done')&&state==='on')return;
+  e.classList.remove('on','done');if(state)e.classList.add(state);}
+function stageDone(k){stage(k,'done');}
+
+// the steering network's outputs are the rat's motor commands for the page
+const DNS=[['neck extend','0'],['neck bend','1'],['neck twist','2'],['atlas','3'],['PRESS','4']];
+const dnEl={};
+DNS.forEach(function(p){const lbl=p[0],k=p[1];
+  const d=document.createElement('div');d.className='dn';
+  d.innerHTML='<div>'+lbl+'</div><div class="track"><i></i></div><div class="v">0</div>';
+  $('dns').appendChild(d);dnEl[k]={i:d.querySelector('i'),v:d.querySelector('.v')};});
+
+/* the session clock: T+ seconds since BEGIN SESSION (the wall-clock time of each event is kept in its tooltip) */
+let T0=null, clockTimer=0;
+function clock(){ if(T0===null) return 'T+000.0';
+  const s=Math.max(0,(performance.now()-T0)/1000); return 'T+'+(s<1000?s.toFixed(1).padStart(5,'0'):s.toFixed(0)); }
+function clockRun(on){ clearInterval(clockTimer); clockTimer=0;
+  if(on) clockTimer=setInterval(()=>{$('s-clock').textContent=clock();},100);
+  $('s-clock').textContent=clock(); }
+
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+/* one event line: session clock, a lab event code, the message. code classes: cue hit off tx end rig sys fail */
+function log(m,cls,code,kind){const d=document.createElement('div');
+  d.title=new Date().toLocaleTimeString([],{hour12:false});
+  d.innerHTML='<span class="ts">'+clock()+'</span>'+(code?'<span class="code c-'+(kind||'rig')+'">'+code+'</span>':'')
+    +(cls?'<span class="'+cls+'">':'')+m+(cls?'</span>':'');
+  $('log').appendChild(d);$('log').scrollTop=$('log').scrollHeight;}
+
+const HEX64=/^0x[0-9a-fA-F]{64}$/, ADDR=/^0x[0-9a-fA-F]{40}$/;
+function shortHex(h){ h=String(h||''); return h.length>16 ? h.slice(0,8)+'…'+h.slice(-6) : h; }
+function explorer(){ const e=STATUS&&STATUS.explorer; return /^https:\/\/[\w.-]+$/.test(e||'') ? e : 'https://robinhoodchain.blockscout.com'; }
+function escA(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function lnk(href,text,title){ return '<a class="lk" href="'+escA(href)+'" target="_blank" rel="noopener" title="'+escA(title||href)+'">'+esc(text)+'</a>'; }
+function txLink(h){ return HEX64.test(h||'') ? lnk(explorer()+'/tx/'+h, shortHex(h), h) : esc(h||'?'); }
+function tokLink(t,text){ return ADDR.test(t||'') ? lnk(explorer()+'/token/'+t, text||shortHex(t), t) : esc(t||'?'); }
+function ponsLink(t,text){ return ADDR.test(t||'') ? lnk('https://www.ponsfamily.com/launchpad/'+t, text||'pons', 'the coin on pons: '+t) : ''; }
+function eth(v){ return (typeof v==='number'&&isFinite(v)) ? v.toFixed(v<0.01?6:4) : '?'; }
+function lockLive(label){ liveLocked=true; $('start').disabled=true; $('start').textContent=label; }
+
+fetch('/status').then(r=>r.json()).then(s=>{
+  STATUS=s;
+  LIVE = s.mode==='LIVE';
+  if(LIVE && ADDR.test(s.address||'')){
+    $('wallet').innerHTML='<i>wallet</i> <b>'+esc(s.address.slice(0,6)+'…'+s.address.slice(-4))+'</b> · '+eth(s.balance_eth_at_startup)+' ETH';
+    $('wallet').title=s.address+' · balance at rig startup · the page gets the address only; the key never enters it';
+  } else
+  $('wallet').innerHTML='<i>wallet</i> <b>throwaway</b> · DRY';
+  if(s.units&&s.connections) $('units').innerHTML='<b>'+s.units.toLocaleString()+'</b> units &nbsp;&middot;&nbsp; <b>'+s.connections.toLocaleString()+'</b> connections';
+  if(s.name) $('name').value=s.name;
+  if(s.symbol) $('ticker').value=s.symbol;
+  if(s.description) $('desc').value=s.description;
+  if(s.venue||s.chain) $('s-venue').textContent=[s.venue,s.chain].filter(Boolean).join(' · ');
+  $('s-seed').textContent=String(Q.get('seed')||s.seed||'—');
+  // the rig's own full disclosure stays one hover away; the footer shows the same facts in lab wording
+  if(s.honesty) $('honesty').title=typeof s.honesty==='string'?s.honesty:JSON.stringify(s.honesty);
+  const m=$('mode');
+  m.textContent = s.dev_oracle ? 'DEV: SCRIPTED CURSOR — NOT THE RAT' : (LIVE ? 'LIVE · rat launch · signs once' : 'DRY RUN');
+  m.className = 'chip ' + (LIVE||s.dev_oracle ? 'live' : 'dry');
+  $('s-mode').textContent = LIVE ? 'LIVE · SIGNS ONCE' : 'DRY · NO SIGNING';
+  document.body.classList.toggle('dev', !!s.dev_oracle);
+  document.body.classList.toggle('live', LIVE);
+  if(LIVE){
+    $('honesty').innerHTML='<b>Subject R-01 is a simulated rat</b> (DeepMind rodent model in MuJoCo) driven by two trained artificial neural networks, not a biological brain. Its head direction moves the cursor; a lever press clicks. The rig lights the next cue, scrolls, and types a field\'s text after the rat clicks into it. Off-target presses are ignored. <b>LIVE:</b> pons builds the launch transaction; the rig checks every field and signs it once (nonce 0) with the funded wallet.';
+    $('idle').innerHTML='<b>stimulus screen idle</b><span>LIVE · click BEGIN SESSION, then Start: R-01 launches $'+esc(s.symbol||'')+' on pons</span>';
+    if(!TOKEN) log('this page was opened without the rig\'s token: open the URL the rig printed (…/?token=…)','','NO TOKEN','fail');
+    if(s.live_used||s.journal_exists) lockLive(s.live_used ? 'LAUNCH USED' : 'JOURNAL EXISTS');
+  }
+  if(s.networks){STEER=s.networks[0].units; PRESS_OFF=STEER;
+    const z=s.networks[0].sizes; OUT_OFF=z.slice(0,4).reduce((a,b)=>a+b,0);}
+  buildBrain();
+  if(Q.get('autostart')==='1'){
+    // LIVE: only the owner's own click (BEGIN SESSION, then Start in the dialog) begins a live session
+    if(LIVE) log('?autostart=1 is ignored in LIVE: only your click on BEGIN SESSION, then Start, begins a live session','','AUTOSTART OFF','fail');
+    else setTimeout(()=>$('start').click(),600);
+  }
+});
+
+/* ---------------------------------------------------------------------------
+   The idle shape is a rat.
+
+   The live view draws every unit of the two networks, laid out by layer (these
+   are artificial network units, not anatomy - the panel says so). The IDLE
+   animation is not data: it is a random flicker to keep the panel alive while
+   pons opens, so the idle state gets a rat built from the same dots, and the
+   moment real activations arrive it cuts to the networks.
+--------------------------------------------------------------------------- */
+function buildRat(n){
+  const P=new Float32Array(n*3); const R=()=>Math.random();
+  const gauss=()=>{let u=0,v=0;while(!u)u=R();while(!v)v=R();
+    return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);};
+  let i=0;
+  const put=(x,y,z)=>{if(i>=n)return;P[i*3]=x;P[i*3+1]=y;P[i*3+2]=z;i++;};
+  const ell=(cx,cy,cz,rx,ry,rz,k,shell)=>{for(let j=0;j<k;j++){
+    let x=gauss(),y=gauss(),z=gauss();
+    const d=Math.hypot(x,y,z)||1; x/=d;y/=d;z/=d;
+    const r=shell? 0.86+0.14*R() : Math.cbrt(R());
+    put(cx+x*rx*r, cy+y*ry*r, cz+z*rz*r);}};
+  ell(-0.05,0.02,0,  0.46,0.24,0.24, Math.floor(n*0.34), true);   // body
+  ell( 0.44,0.07,0,  0.18,0.14,0.14, Math.floor(n*0.12), true);   // head
+  ell( 0.64,0.03,0,  0.10,0.06,0.07, Math.floor(n*0.05), true);   // snout
+  ell( 0.40,0.24, 0.10, 0.06,0.07,0.03, Math.floor(n*0.03), false); // ear
+  ell( 0.40,0.24,-0.10, 0.06,0.07,0.03, Math.floor(n*0.03), false); // ear
+  { const k=Math.floor(n*0.16);                                   // tail
+    for(let j=0;j<k;j++){const t=R();
+      put(-0.50-t*0.85, -0.05-Math.sin(t*2.6)*0.16+0.02*gauss(), 0.25*Math.sin(t*1.7)+0.015*gauss());} }
+  for (let L=0; L<4; L++) {                                        // legs
+    const sgn=L%2?1:-1, fore=L<2, bx=fore?0.28:-0.30, k=Math.floor(n*0.03);
+    for(let j=0;j<k;j++){const t=R();
+      put(bx+(fore?0.05:-0.02)*t, -0.18-t*0.24, sgn*(0.12+0.02*gauss()));}
+  }
+  for(let j=0;j<30;j++) put(0.72+0.18*R(), 0.03+(R()-0.5)*0.12, (R()-0.5)*0.35);   // whiskers
+  while(i<n) put(gauss()*0.45, gauss()*0.2, gauss()*0.2);
+  return P;
+}
+
+/* the live layout: each network a row of layers along x, each layer a disc of its units */
+function buildBrain(){
+  const nets=(STATUS&&STATUS.networks)||[{sizes:[21,256,256,256,5]},{sizes:[200,512,512,256,38]}];
+  N=nets.reduce((a,nt)=>a+nt.sizes.reduce((x,y)=>x+y,0),0);
+  heat=new Float32Array(N);px=new Float32Array(N);py=new Float32Array(N);pz=new Float32Array(N);
+  SX=new Float32Array(N);SY=new Float32Array(N);BK=new Int16Array(N);
+  let i=0;
+  nets.forEach((nt,ni)=>{
+    const L=nt.sizes.length, yOff = ni===0? 0.52 : -0.34, scale = ni===0? 0.26 : 0.40;
+    nt.sizes.forEach((n,li)=>{
+      const x=-0.95+li*(1.9/(L-1)), R=scale*Math.sqrt(n/512)+0.03;
+      for(let u=0;u<n;u++){
+        const a=u*2.39996, r=R*Math.sqrt((u+0.5)/n);      // golden-angle disc
+        px[i]=x; py[i]=yOff+r*Math.cos(a)*0.85; pz[i]=r*Math.sin(a); i++;
+      }
+    });
+  });
+  RAT=buildRat(N);
+  $('ncount').textContent=N.toLocaleString()+' units · idle';
+  fit();
+}
+
+const bc=$('brain'),bx=bc.getContext('2d');
+function fit(){const r=bc.parentElement.getBoundingClientRect();
+  const d=window.devicePixelRatio||1;
+  bc.width=Math.max(2,Math.floor(r.width*d));bc.height=Math.max(2,Math.floor(r.height*d));}
+addEventListener('resize',fit);
+// also refit when the column itself changes size (web fonts settling the header height, layout changes)
+if(window.ResizeObserver) new ResizeObserver(fit).observe(bc.parentElement);
+
+/* colour = activation along the logo's nebula ramp: deep blue (rest) -> purple -> violet -> magenta -> coral ->
+   orange -> gold -> electric yellow (peak). The steering network lives at the warm end (coral -> yellow), the
+   lever-press network at the cool end (deep blue -> violet -> magenta -> coral), so the two read apart. While idle
+   (a decorative flicker, not data) both stay in violet / purple tones. */
+const RAMP=[[19,8,174],[75,4,196],[136,8,181],[214,12,148],[234,53,96],[232,110,61],[245,172,41],[252,240,16],[255,244,15]];
+function rampAt(t){t=Math.max(0,Math.min(1,t))*(RAMP.length-1);const k=Math.min(RAMP.length-2,Math.floor(t)),f=t-k,a=RAMP[k],b=RAMP[k+1];
+  return [0,1,2].map(j=>Math.round(a[j]+(b[j]-a[j])*f));}
+const NB=16;
+const PAL={live:[[],[]],idle:[[],[]]};          // [network][bucket] -> {css, sprite}
+function sprite(c){const s=document.createElement('canvas');s.width=s.height=32;const g=s.getContext('2d');
+  const r=g.createRadialGradient(16,16,0,16,16,16);
+  r.addColorStop(0,'rgba('+c+',.85)');r.addColorStop(.35,'rgba('+c+',.32)');r.addColorStop(1,'rgba('+c+',0)');
+  g.fillStyle=r;g.fillRect(0,0,32,32);return s;}
+for(let k=0;k<NB;k++){const h=(k+.5)/NB;
+  [['live',0,.52,.48],['live',1,.04,.5],['idle',0,.26,.28],['idle',1,.12,.26]].forEach(([m,net,t0,dt])=>{
+    const c=rampAt(t0+dt*h).join(',');PAL[m][net].push({css:'rgb('+c+')',sprite:sprite(c)});});}
+let SX=null,SY=null,BK=null;
+
+function draw(){
+  if(N){
+    const W=bc.width,H=bc.height,d=window.devicePixelRatio||1;
+    bx.clearRect(0,0,W,H);
+    const ct=Math.cos(theta),st=Math.sin(theta),S=Math.min(W,H)*.47;
+    const useRat = idleMode && RAT;
+    for(let i=0;i<N;i++){
+      let ax,ay,az;
+      if(useRat){ ax=RAT[i*3]; ay=RAT[i*3+2]; az=-RAT[i*3+1]; }
+      else      { ax=px[i]; ay=pz[i]; az=-py[i]; }
+      SX[i]=W/2+(ax*ct-ay*st*(useRat?1:0.35))*S*(useRat?1.15:1.0);
+      SY[i]=H/2+(az+(useRat?0:ay*st*0.12))*S*(useRat?1.15:1.0);
+      const h=heat[i], net=i<STEER?0:1;
+      BK[i]= h>.03 ? net*NB+Math.min(NB-1,Math.floor(h*NB)) : -1-net;
+    }
+    // resting units: violet (steering) and electric purple (lever-press)
+    const r1=1.15*d;
+    bx.globalAlpha=.6;bx.fillStyle='#8808B5';
+    for(let i=0;i<N;i++) if(BK[i]===-1) bx.fillRect(SX[i],SY[i],r1,r1);
+    bx.globalAlpha=.7;bx.fillStyle='#4B04C4';
+    for(let i=0;i<N;i++) if(BK[i]===-2) bx.fillRect(SX[i],SY[i],r1,r1);
+    // active units: a soft additive glow under the strong ones, then every dot on top
+    const pal=PAL[useRat?'idle':'live'];
+    bx.globalCompositeOperation='lighter';
+    for(let b=0;b<2*NB;b++){
+      const k=b%NB, h=(k+.5)/NB; if(h<=.5) continue;
+      const c=pal[b<NB?0:1][k], R=(3+5*h)*d; bx.globalAlpha=.08+.2*h;
+      for(let i=0;i<N;i++) if(BK[i]===b) bx.drawImage(c.sprite,SX[i]-R,SY[i]-R,2*R,2*R);
+    }
+    bx.globalCompositeOperation='source-over';
+    for(let b=0;b<2*NB;b++){
+      const k=b%NB, h=(k+.5)/NB, c=pal[b<NB?0:1][k];
+      bx.globalAlpha=Math.min(1,.5+.6*h); bx.fillStyle=c.css;
+      const s2=(h>.6?2.6:2.0)*d;
+      for(let i=0;i<N;i++) if(BK[i]===b) bx.fillRect(SX[i]-s2/2,SY[i]-s2/2,s2,s2);
+    }
+    bx.globalAlpha=1;
+  }
+  requestAnimationFrame(draw);
+}
+draw();
+
+/* Idle only: a low random flicker keeps the panel alive (decoration, not data; the labels say so). */
+setInterval(function(){
+  if(!N)return;
+  for(let i=0;i<N;i++)heat[i]*=0.9;
+  if(idleMode){for(let k=0;k<22;k++)heat[(Math.random()*N)|0]=Math.random()*0.55;}
+  theta+=idleMode?0.0045:0.0018;
+},60);
+
+function baseline(on){
+  idleMode = on;
+  const u = document.querySelector('.readout .u');
+  if(on){ u.textContent='idle · not live data'; $('firing').style.opacity='.55';
+          $('ncount').textContent='idle · display flicker'; }
+  else  { u.textContent='units active';       $('firing').style.opacity='1';
+          $('ncount').textContent='live · '+N.toLocaleString()+' units'; }
+}
+
+function paint(b64){$('shot').hidden=false;$('idle').style.display='none';
+  $('shot').src='data:image/jpeg;base64,'+b64;}
+
+let ws=null, hits=0, misses=0, cueOn={}, lats=[];
+function startLabel(running){ $('start').textContent = running ? 'SESSION RUNNING' : 'BEGIN SESSION'; }
+$('start').onclick=function(){
+  if(LIVE){ openConfirm(); return; }       // LIVE: nothing starts without the confirm dialog's Start
+  begin(false);
+};
+
+/* LIVE confirm dialog: BEGIN SESSION opens it; only Start sends the start message (with the token) */
+function openConfirm(){
+  if(liveLocked) return;
+  const s=STATUS||{}, sym='$'+(s.symbol||'?'), fee=(typeof s.launch_fee_eth==='number'?s.launch_fee_eth:0.0005);
+  $('cf-sym').textContent=sym;
+  $('cf-lead').innerHTML='<b>LIVE:</b> the rat will launch <span class="sym">'+esc(sym)+'</span> on pons from '
+    +'<span class="addr">'+esc(s.address||'?')+'</span>; signs once; costs the '+fee+' ETH launch fee + gas. Start?';
+  const rows=[['coin', esc(s.name||'?')+' &middot; <b>'+esc(sym)+'</b> &middot; creator tax '+((s.tax_bps||0)/100)+'%'],
+    ['wallet', esc(s.address||'?')+' &middot; '+eth(s.balance_eth_at_startup)+' ETH at startup'],
+    ['chain', esc(s.chain||'Robinhood Chain 4663')+' &middot; pons launchpad'],
+    ['signs', '<b>once</b> &middot; nonce 0 &middot; all fields checked &middot; journal first'],
+    ['brain', 'brain sha256 '+esc(String(s.brain_commit||'').slice(0,16))+'&hellip; in the description']];
+  $('cf-facts').innerHTML=rows.map(r=>'<dt>'+r[0]+'</dt><dd>'+r[1]+'</dd>').join('');
+  const warn = !TOKEN ? 'This page was opened without the rig\'s token, so the rig would refuse to start. Open the URL the rig printed (http://localhost:'+location.port+'/?token=…).'
+             : (s.live_used ? 'This rig process already used its one launch.' : '');
+  $('cf-warn').hidden=!warn; $('cf-warn').textContent=warn;
+  $('cf-start').disabled=!!warn;
+  $('confirm').hidden=false;
+  $('cf-cancel').focus();
+}
+function closeConfirm(){ $('confirm').hidden=true; }
+$('cf-cancel').onclick=function(){ closeConfirm(); log('cancelled: nothing was started','','CANCELLED','sys'); $('start').focus(); };
+$('cf-start').onclick=function(){ if($('cf-start').disabled||$('confirm').hidden) return; closeConfirm(); begin(true); };
+$('confirm').addEventListener('mousedown',function(e){ if(e.target===$('confirm')) $('cf-cancel').click(); });
+document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&!$('confirm').hidden){ e.preventDefault(); $('cf-cancel').click(); } });
+
+function stopBtn(on){ const b=$('stop'); if(!b) return; b.hidden=!on; b.disabled=!on; }
+$('stop').onclick=function(){
+  if(!ws||ws.readyState!==1||$('stop').disabled) return;
+  ws.send(JSON.stringify({type:'stop'})); $('stop').disabled=true;
+  log('STOP pressed: the rig ends the run unless the launch transaction already reached the signer','','STOP','sys');
+};
+function begin(live){
+  $('start').disabled=true;startLabel(true);$('rec').classList.add('on');
+  stopBtn(!!live);
+  // the stimulus screen's idle card stays up (paint() removes it) until pons's first frame arrives
+  $('idle').innerHTML='<b>stimulus screen</b><span>opening ponsfamily.com &middot; waiting for the first frame</span>';
+  $('t-out').textContent='running';$('t-out').className='v';
+  hits=0;misses=0;cueOn={};lats=[];window.__rigDone=false;window.__rigDoneMsg=null;
+  T0=performance.now();clockRun(true);
+  stage('wallet','on');
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/run');
+  ws.binaryType='arraybuffer';
+  ws.onopen=function(){log('connected','','LINK UP','sys');
+    const seed=+(Q.get('seed')||(STATUS&&STATUS.seed)||2026);
+    $('s-seed').textContent=String(seed);
+    ws.send(JSON.stringify(live ? {type:'start',seed:seed,token:TOKEN,confirm:STATUS&&STATUS.symbol}
+                                : {type:'start',seed:seed}));};
+  ws.onmessage=function(e){ if(typeof e.data==='string') handle(JSON.parse(e.data)); else frame(e.data); };
+  ws.onclose=function(){stopBtn(false);if(!liveLocked){$('start').disabled=false;startLabel(false);}$('rec').classList.remove('on');
+    baseline(true);clockRun(false);log('closed','','LINK DOWN','sys');};
+}
+
+/* the binary brain frame: 18 float32 header, then u8 activations of the steering and the press network */
+function frame(buf){
+  const hdr=new Float32Array(buf,0,18), act=new Uint8Array(buf,72);
+  if(hdr[0]!==3) return;
+  const brainOn=hdr[2]>0.5;
+  if(!brainOn){ return; }
+  if(idleMode) baseline(false);
+  let firing=0;
+  for(let i=0;i<N&&i<act.length;i++){const v=act[i]/255; if(v>heat[i])heat[i]=v; if(v>0.35)firing++;}
+  $('firing').textContent=firing.toLocaleString();
+  for(let k=0;k<5;k++){const v=act[OUT_OFF+k]||0, el=dnEl[String(k)];
+    el.i.style.width=(v/255*100).toFixed(0)+'%'; el.i.classList.toggle('hi', v>150);
+    el.v.textContent=(v/255).toFixed(2);}
+  const pressing=hdr[16]>0.5, holding=hdr[9]>0.5;
+  $('phase').textContent = pressing ? 'lever press · the rat is pressing' : (holding ? 'ITI hold · rig typing / scrolling' : 'steering · head moves the cursor');
+}
+
+function handle(m){
+  if(m.type==='shot'){paint(m.jpg);return;}
+  if(m.type==='stage'){
+    const g=GROUP(m.stage||''), nn=String(m.n).padStart(2,'0');
+    if(m.state==='active'){ stageDone('wallet'); if(g) stage(g,'on');
+      $('t-step').innerHTML=nn+'<small> / 11</small>';
+      $('t-target').textContent=m.label||m.stage;
+      // cue-on: the rig lit the target (the first light starts the latency clock)
+      if(/^lit /.test(m.detail||'')){ if(!(m.stage in cueOn)) cueOn[m.stage]=performance.now();
+        log('#'+nn+' <b>'+esc(m.label||m.stage)+'</b> — '+esc(m.detail),'','CUE ON','cue'); } }
+    if(m.state==='hit'){ hits++; $('t-fields').innerHTML=hits+' <small>/ 11</small>';
+      if(m.stage in cueOn){ const s=(performance.now()-cueOn[m.stage])/1000; lats.push(s);
+        $('t-lat').innerHTML=s.toFixed(1)+'<small> s</small>';
+        $('t-lat').title='cue-on to hit, this trial · session mean '+(lats.reduce((a,b)=>a+b,0)/lats.length).toFixed(1)+' s'; }
+      log('the rat clicked <b>'+esc(m.label)+'</b> — '+esc(m.detail||''),'m-hit','RESPONSE HIT','hit'); }
+    if(m.state==='done' && g && /t03|t04|t09|t10|t11/.test(m.stage)) stageDone(g);
+    if(m.state==='failed'){ log(esc(m.label)+' — '+esc(m.detail||''),'','STEP FAILED','fail'); }
+    return;}
+  if(m.type==='click'){
+    if(!m.hit){ misses++; $('t-spikes').textContent=misses; $('t-spikes').className='v off';
+      const why=m.why||'outside the lit target', off=/outside/.test(why);
+      log('press at ('+Math.round(m.x)+', '+Math.round(m.y)+') — '+esc(why)+', not sent to the page','',off?'OFF-TARGET':'MASKED','off'); }
+    return;}
+  if(m.type==='commit'){ if(m.description) $('desc').value=m.description;
+    log('brain commit '+esc((m.commit||'').slice(0,16))+'… (both networks + code), typed into the description','','COMMIT','rig');
+    return;}
+  if(m.type==='refused'){          // LIVE only: the server refused this start (token, confirm, client, used)
+    log(esc(m.msg||'refused'),'','START REFUSED','fail');
+    $('t-out').textContent='start refused'; $('t-out').className='v off';
+    try{ ws.close(); }catch(e){}
+    return;}
+  if(m.type==='tx' && m.mode==='LIVE'){ liveTx(m); return; }
+  if(m.type==='tx'){
+    const ch=m.checks||{}, ks=Object.keys(ch), ok=ks.filter(k=>(ch[k]===true)||(ch[k]&&ch[k].ok)).length;
+    log('pons built the launch transaction — '+ok+'/'+ks.length+' checks passed','m-tx','TX BUILT (DRY)','tx');
+    log(m.verdict==='dry_captured' ? 'DRY RUN — the rig refused to sign. No coin was created.' : esc(m.verdict||''),'m-tx','NOT SIGNED','tx');
+    stageDone('confirm');
+    return;}
+  if(m.type==='log'){ log(esc(m.msg||''),'','RIG','rig'); return; }
+  if(m.type==='done'){
+    $('start').disabled=false;startLabel(false);$('rec').classList.remove('on');baseline(true);clockRun(false);
+    const o=$('t-out');
+    if(/dry/.test(m.outcome||'')){o.textContent='dry run';o.className='v warn';}
+    else if(m.mode==='LIVE'){ liveOutcome(m,o); }
+    else{o.textContent=m.outcome||'done';o.className='v warn';}
+    const mean=lats.length?' · mean latency '+(lats.reduce((a,b)=>a+b,0)/lats.length).toFixed(1)+' s':'';
+    log(hits+'/11 correct · '+misses+' off-target'+mean+' · run recorded: '+esc(m.run_dir||''),'','SESSION END','end');
+    if(m.mode==='LIVE'){
+      if(m.tx) log((m.token?'token '+tokLink(m.token)+' · '+ponsLink(m.token,'pons')+' · ':'')+'tx '+txLink(m.tx)
+                   +' · signed '+esc(String(m.signed))+' · broadcast '+esc(String(m.broadcast)),'m-tx','LIVE RECORD','end');
+      else log('nothing was signed or broadcast','','LIVE RECORD','end');
+      if(m.live_used) lockLive(m.token ? 'LAUNCHED' : 'LAUNCH USED');
+    }
+    window.__rigDoneMsg=m; window.__rigDone=true;
+  }
+}
+
+/* LIVE tx phases: checked -> signed -> sent -> mined (or refused / reverted / unconfirmed) */
+function liveTx(m){
+  const o=$('t-out'), sym='$'+((STATUS&&STATUS.symbol)||'');
+  const ch=m.checks||{}, ks=Object.keys(ch), ok=ks.filter(k=>ch[k]&&ch[k].ok).length;
+  if(m.phase==='checked'){
+    stopBtn(false);
+    log('pons built the launch transaction — '+ok+'/'+ks.length+' checks passed · re-simulating, then signing once','m-tx','TX CHECKED','tx');
+    o.textContent='checked · signing'; o.className='v warn';
+  } else if(m.phase==='refused'){
+    log('the rig refused to sign — '+esc(m.error||m.verdict||'')+' · nothing signed, nothing sent','','NOT SIGNED','fail');
+    o.textContent='refused · not signed'; o.className='v off'; stageDone('confirm');
+  } else if(m.phase==='signed'){
+    log('signed once · nonce 0 · '+txLink(m.hash)+' · journalled before broadcast','m-tx','TX SIGNED','tx');
+    o.innerHTML='signed · '+txLink(m.hash); o.className='v warn';
+  } else if(m.phase==='sent' && m.broadcast===false){
+    log('every RPC rejected the signed transaction '+txLink(m.hash)+' · '+esc(m.send_error||'')+' · not on chain','','TX REJECTED','fail');
+    o.textContent='rejected by every RPC · not on chain'; o.className='v off'; stopBtn(false);
+  } else if(m.phase==='sent'){
+    const known=m.broadcast===true;
+    log((known?'broadcast':'broadcast unknown (an RPC timed out)')+' · '+txLink(m.hash)+' · waiting for the block','m-tx',known?'TX SENT':'TX SENT?','tx');
+    o.innerHTML=(known?'sent · ':'sent? · ')+txLink(m.hash); o.className='v warn'; stageDone('confirm'); stopBtn(false);
+  } else if(m.phase==='mined' && ADDR.test(m.token||'')){
+    log(esc(sym)+' token '+tokLink(m.token)+' · '+ponsLink(m.token,'pons')+' · block '+esc(String(m.block)),'m-tx','TX MINED','end');
+    o.innerHTML=ponsLink(m.token,'LAUNCHED '+sym)||('LAUNCHED '+esc(sym)); o.className='v go'; stageDone('confirm');
+  } else if(m.phase==='mined'){
+    log('mined in block '+esc(String(m.block))+' but no TokenLaunched event names our wallet — check '+txLink(m.hash),'','TX MINED','fail');
+    o.innerHTML='mined · '+txLink(m.hash); o.className='v warn';
+  } else if(m.phase==='reverted'){
+    log('the transaction REVERTED in block '+esc(String(m.block))+' · '+txLink(m.hash)+' · no coin','','TX REVERTED','fail');
+    o.textContent='reverted · no coin'; o.className='v off';
+  } else {
+    log('no receipt yet for '+txLink(m.hash)+' · python launcher.py --resolve finishes it','','TX PENDING','fail');
+    o.innerHTML='pending · '+txLink(m.hash); o.className='v warn';
+  }
+}
+function liveOutcome(m,o){
+  const sym='$'+((STATUS&&STATUS.symbol)||'');
+  if(m.outcome==='live' && ADDR.test(m.token||'')){ o.innerHTML=ponsLink(m.token,'LAUNCHED '+sym); o.className='v go'; }
+  else if(m.tx && m.outcome==='live_unverified'){ o.innerHTML='mined · '+txLink(m.tx); o.className='v warn'; }
+  else if(m.tx && m.outcome==='reverted'){ o.textContent='reverted · no coin'; o.className='v off'; }
+  else if(m.tx){ o.innerHTML=esc(m.outcome||'sent')+' · '+txLink(m.tx); o.className='v warn'; }
+  else { o.textContent=(m.outcome||'ended')+' · not signed'; o.className='v off'; }
+}
+</script>
+<script type="module">
+// the rotating rat: a display model of the simulated body (DeepMind rodent, MuJoCo), not a live view of its pose.
+// Separate module so a failure here (CDN, WebGL, missing file) can never break the rig script above.
+// If the module itself cannot load (404, network), the pane shows the same quiet line rat3d.js uses for its own failures.
+import('/rat3d.js').then(m => m.mountRat(document.getElementById('rat3d'))).catch(e => {
+  console.warn('rat3d: 3D model unavailable -', e && e.message ? e.message : e);
+  const c = document.getElementById('rat3d');
+  if (!c || c.querySelector('.rat3d-fallback')) return;
+  const d = document.createElement('div');
+  d.className = 'rat3d-fallback';
+  d.textContent = '3D model unavailable';
+  d.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;' +
+    'color:#ae8ee4;font:11px/1.4 "JetBrains Mono",ui-monospace,monospace;letter-spacing:.06em;pointer-events:none';
+  c.appendChild(d);
+});
+</script>
+</body>
+</html>
