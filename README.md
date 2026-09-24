@@ -111,6 +111,8 @@ python train.py --task steer --name <new run> --curriculum ...        # any trai
 
 During real training: `python live/publish_training.py --watch runs --relay
 wss://labrat-relay-production.up.railway.app/publish` (token from `LABRAT_PUBLISH_TOKEN`), then train as usual.
+`live/start_live_feed.ps1 [-Python <path to python.exe>]` does the same in the background, reading the token from
+`.env` and logging to `runs/publisher.log`; it idles until a run's `log.jsonl` is being written.
 
 ## Also in here
 
