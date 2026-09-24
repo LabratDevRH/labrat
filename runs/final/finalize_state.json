@@ -1,0 +1,9 @@
+{
+ "run": "runs/film_2026",
+ "frames": 146,
+ "slow": [
+  32,
+  117
+ ],
+ "press": 58
+}

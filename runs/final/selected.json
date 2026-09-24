@@ -1,0 +1,49 @@
+{
+ "selected": "policy_032.51M.pt",
+ "eval": {
+  "launch": {
+   "n": 200,
+   "press_rate": 1.0,
+   "clean_rate": 1.0,
+   "fell_before_press": 0,
+   "fell_after_press": 0,
+   "no_press_timeout": 0,
+   "press_t_mean": 0.134,
+   "press_t_max": 0.16,
+   "failed_seeds": []
+  },
+  "wide": {
+   "n": 200,
+   "press_rate": 1.0,
+   "clean_rate": 1.0,
+   "fell_before_press": 0,
+   "fell_after_press": 0,
+   "no_press_timeout": 0,
+   "press_t_mean": 0.15,
+   "press_t_max": 0.64,
+   "failed_seeds": []
+  },
+  "pushes": {
+   "n": 200,
+   "press_rate": 1.0,
+   "clean_rate": 1.0,
+   "fell_before_press": 0,
+   "fell_after_press": 0,
+   "no_press_timeout": 0,
+   "press_t_mean": 0.134,
+   "press_t_max": 0.16,
+   "failed_seeds": []
+  },
+  "noisy": {
+   "n": 200,
+   "press_rate": 1.0,
+   "clean_rate": 1.0,
+   "fell_before_press": 0,
+   "fell_after_press": 0,
+   "no_press_timeout": 0,
+   "press_t_mean": 0.135,
+   "press_t_max": 0.18,
+   "failed_seeds": []
+  }
+ }
+}
