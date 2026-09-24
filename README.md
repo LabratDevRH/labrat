@@ -5,15 +5,16 @@ steers the mouse cursor and its lever press is the click, for all 11 steps of th
 
 **It is not a real rat brain.** It is two trained artificial neural networks driving a simulated rat body.
 
-## The first launch
+## $LABRAT
 
-On 2026-09-24 the rat launched **RatTest ($RATTEST)** on pons:
+On 2026-09-25 the rat launched **Labrat ($LABRAT)** on pons:
 
-- contract `0x41e20894bE505f0bAE018B75E0E39534E49Aa456`
-- tx [`0xe7c6f1a0…f207`](https://robinhoodchain.blockscout.com/tx/0xe7c6f1a0a55347ed2515c08937fe0bcb0456e32240ea4ced24ea85fdfd2df207), block 71412612
+- contract [`0xaCa07FE3BC5fF3e7501cA1dCCFCd937fD710680d`](https://robinhoodchain.blockscout.com/token/0xaCa07FE3BC5fF3e7501cA1dCCFCd937fD710680d)
+  · [on pons](https://www.ponsfamily.com/launchpad/0xaCa07FE3BC5fF3e7501cA1dCCFCd937fD710680d)
+- tx [`0x0f618ed9…1d26`](https://robinhoodchain.blockscout.com/tx/0x0f618ed9fa31c8ba5d224a620f514d3ff03504c7943a9e3ec937e316ea021d26), block 71684103
 - 11 of 11 targets clicked by the rat, 0 misses; the transaction passed 17 of 17 checks before it was signed once
-- 2% creator fee to the launch wallet `0x790c66fAEd9C5B6e78296a9743FbF423b390591a`
-- the recorded session is in `runs/brainrig_20260924T133937Z_seed2026/`
+- the recorded session is in `runs/brainrig_20260924T211408Z_seed2026/`
+- website: **https://lab-rat.net**
 
 ## The subject
 
@@ -63,7 +64,7 @@ the signer. `python launcher.py --resolve` finishes an interrupted launch by re-
 ## The proof
 
 Before the run, a sha256 **brain commit** over `scene.xml`, both networks and the code files (`env.py`,
-`cursor_env.py`, `steer_env.py`, `session.py`, `ptload.py`) is typed into the coin's description. The RatTest
+`cursor_env.py`, `steer_env.py`, `session.py`, `ptload.py`) is typed into the coin's description. The Labrat
 description ends in `brain sha256 9778ea092a293940497dc94e98b62328b6e11fad8d0bf634a04124329a8dcec8`.
 
 Every session saves its command log, actions and every physics frame. `python replay_session.py <run dir>`
@@ -78,7 +79,7 @@ numpy 2.4.2, MuJoCo 3.13.0, Windows 11).
 ```
 python live/brainrig.py                                  # DRY, then open http://localhost:4665
 python live/record.py --dry --hq --port 4665             # record a DRY run to build/recordings/
-python replay_session.py runs/brainrig_20260924T133937Z_seed2026
+python replay_session.py runs/brainrig_20260924T211408Z_seed2026
 ```
 
 Needs: mujoco, numpy, fastapi, uvicorn, websockets, playwright (Chromium), eth-account, eth-abi, requests,
@@ -86,7 +87,7 @@ Pillow, imageio. torch is only needed for training.
 
 ## The website and its live view
 
-Live at **https://labrat-delta.vercel.app** (site on Vercel, relay on Railway at `labrat-relay-production.up.railway.app`).
+Live at **https://lab-rat.net** (site on Vercel, relay on Railway at `labrat-relay-production.up.railway.app`).
 
 - `site/`: the static website (deployable to Vercel as is). Its 3D view plays a replay of a recorded launch session,
   a DRY rehearsal of the Labrat launch (`site/replay/session.bin` + `session.json`, made by
