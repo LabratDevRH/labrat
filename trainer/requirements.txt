@@ -1,0 +1,26 @@
+# The trainer image's Python packages, all pinned (Linux x86_64, CPython 3.13). torch is the CPU build from
+# PyTorch's own index ("+cpu" exists only there); everything else comes from PyPI.
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
+--only-binary=:all:
+
+torch==2.14.0+cpu
+numpy==2.4.2
+mujoco==3.13.0
+websockets==15.0.1
+
+# what those need (the versions on the owner's PC, where training and the publisher run today)
+absl-py==2.5.0
+etils[epath]==1.14.0
+glfw==2.10.2
+pyopengl==3.1.10
+fsspec==2026.7.0
+typing_extensions==4.15.0
+zipp==4.1.0
+filelock==3.32.3
+sympy==1.14.0
+mpmath==1.3.0
+networkx==3.6.1
+jinja2==3.1.6
+markupsafe==3.0.3
+setuptools==82.0.0

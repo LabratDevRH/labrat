@@ -1,0 +1,38 @@
+# `railway up` from the repo root (the labrat-trainer service) uploads ONLY what trainer/Dockerfile needs.
+# gitignore syntax: the last matching line wins, and a file in an ignored directory only comes back after its
+# directory is re-included. The relay deploys from relay/ (relay/README.md), not from this upload.
+/*
+!/.dockerignore
+!/train.py
+!/policy.py
+!/env.py
+!/cursor_env.py
+!/steer_env.py
+!/ptload.py
+!/assets/
+!/runs/
+/runs/*
+!/runs/final/
+/runs/final/*
+!/runs/final/policy.pt
+!/runs/final/steer.pt
+!/live/
+/live/*
+!/live/publish_training.py
+!/live/labrat_frame.py
+!/live/assets/
+/live/assets/*
+!/live/assets/rat.json
+!/trainer/
+
+# never uploaded, whatever the lines above say
+__pycache__/
+*.pyc
+.env
+.env.*
+launch_journal.json
+*.mp4
+/build/
+/shots/
+/site/
+/relay/

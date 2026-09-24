@@ -1,0 +1,24 @@
+# Build context of the trainer image (trainer/Dockerfile): ONLY the files below. Everything else stays out,
+# including .env, .env.*, launch_journal.json, old runs, site/, relay/, build/, shots/ and videos.
+*
+!train.py
+!policy.py
+!env.py
+!cursor_env.py
+!steer_env.py
+!ptload.py
+!assets/
+!runs/final/policy.pt
+!runs/final/steer.pt
+!live/publish_training.py
+!live/labrat_frame.py
+!live/assets/rat.json
+!trainer/
+
+# never, even inside a whitelisted directory
+**/__pycache__
+**/*.pyc
+**/.env
+**/.env.*
+**/launch_journal.json
+**/*.mp4
