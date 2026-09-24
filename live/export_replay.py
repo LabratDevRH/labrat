@@ -1,29 +1,38 @@
-"""Export the RatTest launch session as the website's replay clip: site/replay/ratest.bin + ratest.json.
+"""Export a recorded brain-rig session as the website's replay clip: site/replay/session.bin + session.json.
 
-    python live/export_replay.py [--run runs/brainrig_20260924T133937Z_seed2026] [--out site/replay] [--fps 20]
+    python live/export_replay.py --run runs/<brainrig run dir> --label "<public label>" [--out site/replay] [--fps 20]
+
+The home page's 3D view plays this clip whenever no training run is streaming. The intended clip is a DRY
+rehearsal of the Labrat launch: the rat does all 11 steps on the real pons page, the rig decodes and checks the
+launch transaction and refuses to sign it, so nothing is signed and no coin is created. --label is the line the
+page shows next to the REPLAY badge, e.g. "Replay: a dry rehearsal of the Labrat launch, recorded 2026-09-25".
 
 It RE-RUNS the recorded session through session.py's replay path, the way session.replay() and
 replay_session.py do: the same two networks (the run's steer.pt + press.pt copies), seed, pre-roll, start
 cursor and command log. It then checks that the re-run reproduces the recording (brain commit, every physics
 frame bit for bit against qpos.npy, the 11 clicks, the session proof) and writes the clip only if it does
-(--allow-mismatch writes it anyway, marked "verified": false). Read-only use of session.py; this script never
-reads .env or the launch journal and signs or sends nothing.
+(--allow-mismatch writes it anyway, marked "match": false). A dev-oracle run (a scripted cursor, not the rat)
+is refused. Read-only use of session.py; this script never reads .env or the launch journal and signs or sends
+nothing.
 
-ratest.bin   the frames, back to back, in live/labrat_frame.py's layout (1,868 bytes each, --fps per second,
-             one episode: index 0). Frame j shows the physics state at t = j / fps s after the reset (the
-             first 2 s are the brain-off pre-roll), the cursor and lit target after the last completed 50 Hz
-             control step, and click = 1 when a click registered in (t - 1/fps, t]. A click frame shows the
-             state at the click instant instead (lever down; [1] = that time, at most 1/fps earlier), because
-             the rig starts a new trial the moment a click lands: the rat is put back in its start pose
-             (ratest.json "resets"; do not interpolate across those).
-ratest.json  fps, n_frames, duration, layout, the 11 targets (labels, page boxes, lit / hit times from
-             targets.json + the command log), the rig's typing, an event timeline, the coin facts, the brain,
-             the verification, source "replay" and the label.
+session.bin   the frames, back to back, in live/labrat_frame.py's layout (1,868 bytes each, --fps per second,
+              one episode: index 0). Frame j shows the physics state at t = j / fps s after the reset (the
+              first 2 s are the brain-off pre-roll), the cursor and lit target after the last completed 50 Hz
+              control step, and click = 1 when a click registered in (t - 1/fps, t]. A click frame shows the
+              state at the click instant instead (lever down; [1] = that time, at most 1/fps earlier), because
+              the rig starts a new trial the moment a click lands: the rat is put back in its start pose
+              (session.json "resets"; do not interpolate across those).
+session.json  fps, n_frames, duration, layout, the 11 targets (public labels, page boxes, lit / hit times from
+              targets.json + the command log), an event timeline, the brain's shape, the verification, source
+              "replay" and the label. It carries NO coin facts: no contract or token address, no transaction or
+              block, no wallet or creator, no fee or tax and no typed setting values. A last check refuses to
+              write a json that contains an 0x address / hash or any of those words.
 """
 import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -48,8 +57,25 @@ from session import Session, CODE_FILES  # noqa: E402
 import ptload  # noqa: E402
 import labrat_frame as lf  # noqa: E402
 
-DEFAULT_RUN = os.path.join('runs', 'brainrig_20260924T133937Z_seed2026')
-LABEL = 'Replay: the RatTest launch session, recorded 2026-09-24'
+NAME = 'session'                # site/js/live.js loads replay/session.json + replay/session.bin
+
+# the label the page may show for each target kind (None: keep the rig's own label, e.g. "terms checkbox: Terms of
+# Use"). A kind that is not listed here is shown as a plain settings field, with no typed value.
+PUBLIC_LABEL = {
+    'terms': None, 'accept': 'Accept and continue', 'image': 'Choose image', 'name': 'Name field',
+    'ticker': 'Ticker field', 'description': 'Description field', 'advanced': 'Advanced',
+    'launch': 'Launch token', 'confirm': 'Confirm',
+}
+OTHER_LABEL = 'Settings field'
+SHOW_TYPED = ('name', 'ticker')     # the only typed text the json repeats; the description and settings are not
+
+# the json is public: none of these may appear in it
+FORBIDDEN = [
+    (re.compile(r'0x[0-9a-fA-F]{40}'), 'an 0x address or transaction hash'),
+    (re.compile(r'\b(creator|wallet|fees?|tax|taxes|bps|nonce|signer|private|seed phrase)\b', re.I),
+     'a wallet / fee word'),
+    (re.compile(r'\bblock\s*#?\s*[0-9]', re.I), 'a block number'),
+]
 
 
 def rel(p):
@@ -101,7 +127,7 @@ class Recorder:
 
 
 def rerun(run_dir):
-    """session.replay(), with an on_step recorder. Returns (session, recorder, proof, checks)."""
+    """session.replay(), with an on_step recorder. Returns (meta, session, recorder, proof, checks)."""
     meta = json.load(open(os.path.join(run_dir, 'session.json')))
     s = Session(os.path.join(ROOT, meta['policy']), meta['seed'], meta['preroll_s'], tuple(meta['cursor0']),
                 os.path.join(ROOT, meta.get('press_policy', 'runs/final/policy.pt')))
@@ -176,11 +202,28 @@ def clip_time(step, timestep, preroll_steps, per):
     return round((preroll_steps + per * step) * timestep, 3)
 
 
-def build_json(meta, rec, checks, proof, targets_json, events, receipt, n_frames, fps, timestep, run_dir,
+def public_label(t):
+    kind = t.get('kind')
+    if kind in PUBLIC_LABEL:
+        return PUBLIC_LABEL[kind] or str(t.get('label') or f"target {t['n']}")
+    return OTHER_LABEL
+
+
+def typing_text(kind, typed):
+    if kind in SHOW_TYPED and typed:
+        text = typed if len(typed) <= 40 else typed[:37] + '...'
+        return f'The rig types "{text}" into the field the rat clicked'
+    if kind == 'description':
+        return 'The rig types the description, with the brain fingerprint, into the field the rat clicked'
+    return 'The rig types our setting into the field the rat clicked'
+
+
+def build_json(meta, rec, checks, proof, targets_json, events, n_frames, fps, timestep, run_dir, label, mode,
                bin_bytes, bin_sha):
     per = rec.per
     pre = int(round(meta['preroll_s'] / timestep))
     viewport = targets_json.get('viewport', [1280, 900])
+    dry = mode != 'LIVE'
 
     # ---- the rig's wall clock -> clip time (only for the non-brain events: typing, pons, the transaction)
     offs = [c['at'] - clip_time(c['step'], timestep, pre, per) for c in targets_json['clicks']]
@@ -195,6 +238,7 @@ def build_json(meta, rec, checks, proof, targets_json, events, receipt, n_frames
         if e.get('type') == 'stage' and e.get('state') == 'done':
             stage_done[e['stage']] = e['ts']
 
+    n_targets = len(targets_json['targets'])
     tlist, timeline = [], [{'t': round(meta['preroll_s'], 3), 'kind': 'brain_on', 'exact': True,
                             'text': 'Brain on: the steering network starts turning the head, which moves the cursor'}]
     for t in targets_json['targets']:
@@ -202,20 +246,22 @@ def build_json(meta, rec, checks, proof, targets_json, events, receipt, n_frames
         hit = t.get('hit') or {}
         lit_at = clip_time(light['step'], timestep, pre, per)
         hit_at = clip_time(hit['step'], timestep, pre, per) if hit else None
-        box = light['box']
+        kind = t.get('kind')
+        lbl = public_label(t)
         item = {
-            'n': t['n'], 'key': t['key'], 'label': t['label'], 'kind': t['kind'],
+            'n': t['n'], 'label': lbl, 'kind': kind if kind in PUBLIC_LABEL else 'setting',
             'lit_at': lit_at, 'hit_at': hit_at,
             'seconds_to_hit': round(hit_at - lit_at, 3) if hit else None,
-            'box_px': box, 'norm': light['norm'],
+            'box_px': light['box'], 'norm': light['norm'],
             'click_px': [hit['x'], hit['y']] if hit else None,
             'click_norm': [round(hit['x'] / viewport[0], 6), round(hit['y'] / viewport[1], 6)] if hit else None,
             'misses_before': hit.get('misses_before', 0) if hit else None,
-            'lights': len(t['lights']), 'state': t['state'], 'detail': t.get('detail'),
+            'lights': len(t['lights']), 'state': t['state'],
         }
         res = t.get('result') or {}
         if 'typed' in res:
-            item['typed'] = res['typed']
+            if kind in SHOW_TYPED:
+                item['typed'] = res['typed']
             item['typing_seconds'] = res.get('seconds')
             if t['key'] in stage_done:
                 end = wall(stage_done[t['key']])
@@ -223,73 +269,67 @@ def build_json(meta, rec, checks, proof, targets_json, events, receipt, n_frames
                 item['typed_until'] = end
         tlist.append(item)
         timeline.append({'t': lit_at, 'kind': 'lit', 'target': t['n'], 'exact': True,
-                         'text': f"Target {t['n']} of 11 lights up: {t['label']}"})
+                         'text': f"Target {t['n']} of {n_targets} lights up: {lbl}"})
         if hit:
             timeline.append({'t': hit_at, 'kind': 'click', 'target': t['n'], 'exact': True,
                              'text': f"The rat clicks it (lever press) after {item['seconds_to_hit']:.2f} s"})
         if 'typed_from' in item:
-            text = item['typed'] if len(item['typed']) <= 40 else item['typed'][:37] + '...'
             timeline.append({'t': item['typed_from'], 'kind': 'typing', 'target': t['n'], 'exact': False,
-                             'until': item['typed_until'],
-                             'text': f'The rig types "{text}" into the field the rat clicked'})
+                             'until': item['typed_until'], 'text': typing_text(kind, res.get('typed'))})
 
-    tx = {}
+    seen = set()
     for e in events:
         typ, msg = e.get('type'), e.get('msg', '')
-        if typ == 'log' and 'image picker' in msg and 'pinned' in msg:
+        if typ == 'log' and 'image picker' in msg and 'pinned' in msg and 'image' not in seen:
+            seen.add('image')
             timeline.append({'t': wall(e['ts']), 'kind': 'image', 'exact': False,
                              'text': 'The click opened the image picker; the rig chose the coin picture'})
         elif typ == 'log' and msg.startswith('scrolling '):
             timeline.append({'t': wall(e['ts']), 'kind': 'scroll', 'exact': False,
                              'text': 'The rig scrolls the page to the next target; the rat waits'})
-        elif typ == 'log' and 'eth_sendTransaction' in msg:
+        elif typ == 'log' and 'eth_sendTransaction' in msg and 'tx_requested' not in seen:
+            seen.add('tx_requested')
             timeline.append({'t': wall(e['ts']), 'kind': 'tx_requested', 'exact': False,
-                             'text': 'pons asks the wallet to send the launch transaction'})
+                             'text': 'pons asks for the launch transaction'})
         elif typ == 'tx':
-            tx[e['phase']] = e
-            if e['phase'] == 'checked':
-                n_ok = sum(1 for c in e['checks'].values() if c.get('ok'))
-                timeline.append({'t': wall(e['ts']), 'kind': 'tx_checked', 'exact': False,
-                                 'text': f"The rig decodes it: {n_ok}/{len(e['checks'])} checks pass"})
-            elif e['phase'] == 'signed':
-                timeline.append({'t': wall(e['ts']), 'kind': 'tx_signed', 'exact': False,
-                                 'text': f"Signed once (nonce {e.get('nonce')})"})
-            elif e['phase'] == 'sent':
+            phase = e.get('phase')
+            cks = e.get('checks')
+            if isinstance(cks, dict) and cks and phase in (None, 'checked') and 'tx_checked' not in seen:
+                seen.add('tx_checked')
+                n_ok = sum(1 for c in cks.values() if isinstance(c, dict) and c.get('ok'))
+                text = (f'The rig decodes it and checks it field by field: all {len(cks)} checks pass'
+                        if n_ok == len(cks) else
+                        f'The rig decodes it and checks it field by field: {n_ok} of {len(cks)} pass, so it is '
+                        'not signed')
+                timeline.append({'t': wall(e['ts']), 'kind': 'tx_checked', 'exact': False, 'text': text})
+            if phase is None and (e.get('mode') == 'DRY' or str(e.get('verdict', '')).startswith('dry_')) \
+                    and 'tx_refused' not in seen:
+                seen.add('tx_refused')
+                # shown when the rig logs the outcome (a moment after the checks), else just after the checks
+                done = next((x['ts'] for x in events if x.get('type') == 'log' and x['ts'] >= e['ts']
+                             and str(x.get('msg', '')).startswith('DRY RUN: ')), e['ts'] + 0.3)
+                timeline.append({'t': wall(done), 'kind': 'tx_refused', 'exact': False,
+                                 'text': 'Dry rehearsal: the rig refuses to sign, so nothing is signed and no '
+                                         'coin is created'})
+            elif phase == 'signed':
+                timeline.append({'t': wall(e['ts']), 'kind': 'tx_signed', 'exact': False, 'text': 'Signed once'})
+            elif phase == 'sent':
                 timeline.append({'t': wall(e['ts']), 'kind': 'tx_sent', 'exact': False,
-                                 'text': 'Broadcast to Robinhood Chain'})
-            elif e['phase'] == 'mined':
+                                 'text': 'Sent to Robinhood Chain'})
+            elif phase == 'mined':
                 timeline.append({'t': wall(e['ts']), 'kind': 'tx_mined', 'exact': False,
-                                 'text': f"Mined in block {e.get('block')}: RatTest ($RATTEST) exists"})
+                                 'text': 'Mined on Robinhood Chain: the coin exists'})
     timeline.sort(key=lambda x: (x['t'], 0 if x.get('exact') else 1))
-    mined_t = next((x['t'] for x in timeline if x['kind'] == 'tx_mined'), None)
 
-    launch = meta['launch']
-    rig = meta['rig']
-    checked = tx.get('checked', {})
-    n_checks = len(checked.get('checks', {}))
-    n_ok = sum(1 for c in checked.get('checks', {}).values() if c.get('ok'))
-    token = launch['token']
-    assert receipt.get('tx', launch['tx']) == launch['tx'] and receipt.get('token', token) == token
-    coin = {
-        'name': rig['coin']['name'], 'symbol': rig['coin']['symbol'],
-        'chain': 'Robinhood Chain', 'launchpad': 'pons',
-        'contract': token, 'tx': launch['tx'], 'block': launch['block'], 'status': launch.get('status'),
-        'explorer_tx': receipt.get('explorer_tx', launch['explorer']),
-        'explorer_token': receipt.get('explorer_token'),
-        'pons_page': receipt.get('pons_coin'),
-        'creator': launch['creator'], 'creator_fee_bps': rig['coin']['tax_bps'],
-        'creator_fee': f"{rig['coin']['tax_bps'] / 100:g}%",
-        'description': launch['description'], 'brain_sha256': launch['brain_commit'],
-        'image': rig.get('image_pinned'),
-        'targets': len(targets_json['targets']),
-        'clicks_by_the_rat': targets_json['hits_forwarded'], 'misses': targets_json['misses_masked'],
-        'checks_passed': n_ok, 'checks_total': n_checks,
-        'signed': f"once (nonce {receipt.get('nonce', tx.get('signed', {}).get('nonce'))})"
-        if receipt.get('signed') or 'signed' in tx else None,
-        'send_requests': rig.get('send_requests'),
-        'receipt_seen_utc': datetime.fromtimestamp(tx['mined']['ts'], timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-        if 'mined' in tx else None,
-    }
+    # the loop ends a few seconds after the last thing that matters (mined / refused / checked / the last click)
+    dur = n_frames / fps
+    end_t = None
+    for kind in ('tx_mined', 'tx_refused', 'tx_checked', 'click'):
+        ts = [x['t'] for x in timeline if x['kind'] == kind]
+        if ts:
+            end_t = max(ts)
+            break
+    loop_end = round(min(end_t + 4.0, dur), 2) if end_t is not None else None
 
     def net(path, name, role):
         ck = ptload.load(path)
@@ -300,29 +340,29 @@ def build_json(meta, rec, checks, proof, targets_json, events, receipt, n_frames
                 'sha256': sha256_file(path), 'file': rel(path)}
     nets = [net(os.path.join(ROOT, meta['policy']), 'steering network',
                 'turns the head (4 neck actuators), which moves the cursor, and decides when to press'),
-            net(os.path.join(ROOT, meta['press_policy']), 'lever-press network',
+            net(os.path.join(ROOT, meta.get('press_policy', 'runs/final/policy.pt')), 'lever-press network',
                 'performs each press with the whole body (38 actuators) and stays standing')]
     brain = {'networks': nets, 'units': sum(n['units'] for n in nets),
-             'connections': sum(n['connections'] for n in nets), 'commit': meta['brain_commit'],
-             'commit_covers': ['assets/scene.xml', 'both networks'] + list(CODE_FILES)}
+             'connections': sum(n['connections'] for n in nets),
+             'fingerprint_covers': ['assets/scene.xml', 'both networks'] + list(CODE_FILES)}
 
     stamp = datetime.fromtimestamp(events[0]['ts'], timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ') if events else None
     return {
         'format': 'labrat-replay-1',
         'source': 'replay',
-        'label': LABEL,
+        'label': label,
+        'session': 'dry rehearsal' if dry else 'launch',
         'task': 'steer',
         'run': os.path.basename(os.path.normpath(run_dir)),
         'recorded_utc': stamp,
         'fps': fps,
         'n_frames': n_frames,
-        'duration': round(n_frames / fps, 3),
+        'duration': round(dur, 3),
         'sim_seconds': round(rec.ti * timestep, 3),
         'brain_on_at': meta['preroll_s'],
-        'loop_end': round(min(mined_t + 4.0, n_frames / fps), 2) if mined_t is not None else None,
-        'loop_note': 'after the coin was mined the rat only stands while the rig finishes; a player may loop '
-                     'at loop_end',
-        'file': 'ratest.bin', 'bytes': bin_bytes, 'sha256': bin_sha,
+        'loop_end': loop_end,
+        'loop_note': 'after the last event the rat only stands while the rig finishes; a player may loop at loop_end',
+        'file': NAME + '.bin', 'bytes': bin_bytes, 'sha256': bin_sha,
         'layout': {
             'dtype': 'float32', 'endianness': 'little', 'frame_floats': lf.FRAME_FLOATS,
             'frame_bytes': lf.FRAME_BYTES, 'header_floats': lf.HEADER, 'header': lf.FIELDS, 'magic': lf.MAGIC,
@@ -338,11 +378,12 @@ def build_json(meta, rec, checks, proof, targets_json, events, receipt, n_frames
         'resets_note': 'between targets the rig starts a new trial: the rat is put back in its standing start '
                        'pose and rests while the rig types, scrolls or pons is busy (do not interpolate across)',
         'targets': tlist,
+        'clicks': {'targets': n_targets, 'clicked_by_the_rat': targets_json.get('hits_forwarded'),
+                   'off_target_ignored': targets_json.get('misses_masked')},
         'timeline': timeline,
         'timeline_note': 'brain_on, lit and click times are exact (from the command log); typing, image, scroll '
                          f'and transaction times come from the rig\'s wall clock mapped onto the replay '
                          f'(within about {max(wall_err, 0.01):.2f} s)',
-        'coin': coin,
         'brain': brain,
         'verification': {
             'match': checks['match'], 'brain_commit_ok': checks['brain_commit_ok'],
@@ -354,30 +395,61 @@ def build_json(meta, rec, checks, proof, targets_json, events, receipt, n_frames
             'exported_with': {'python': sys.version.split()[0], 'numpy': np.__version__,
                               'mujoco': mujoco.__version__},
         },
-        'honesty': 'A replay, not live. This clip re-simulates the recorded RatTest launch session from its saved '
-                   'brain, seed and command log, and reproduces the recording bit for bit. The brain is two '
-                   'trained artificial neural networks driving a simulated rat body (DeepMind\'s open-source '
-                   'rodent model in MuJoCo), not a biological brain. The rig lit each target, forwarded only '
-                   'on-target clicks and typed a field\'s text after the rat clicked into it; the rat did every '
-                   'click, not the typing.',
+        'honesty': ('A replay, not live. This clip re-simulates a recorded ' +
+                    ('dry rehearsal of the launch (the rig checked the launch transaction and refused to sign it, '
+                     'so nothing was signed and no coin was created)' if dry else 'launch session') +
+                    ' from its saved brain and command log, and reproduces the recording bit for bit. The brain is '
+                    'two trained artificial neural networks driving a simulated rat body (DeepMind\'s open-source '
+                    'rodent model in MuJoCo), not a biological brain. The rig lit each target, forwarded only '
+                    'on-target clicks and typed a field\'s text after the rat clicked into it; the rat did every '
+                    'click, not the typing.'),
         'credits': {'body': 'DeepMind rodent model (dm_control, Apache-2.0), the rat from Aldarondo et al., '
                             'Nature 2024', 'physics': 'MuJoCo'},
     }
 
 
+def public_problems(doc):
+    """What in the json must not be public (see FORBIDDEN). Empty = OK."""
+    text = json.dumps(doc, ensure_ascii=False)
+    out = []
+    for rx, what in FORBIDDEN:
+        for m in rx.finditer(text):
+            out.append(f'{what}: ...{text[max(0, m.start() - 30):m.end() + 30]}...')
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('--run', default=DEFAULT_RUN)
+    ap.add_argument('--run', required=True, help='the brainrig run directory, e.g. runs/brainrig_<utc>_seed2026')
+    ap.add_argument('--label', required=True,
+                    help='the public label, e.g. "Replay: a dry rehearsal of the Labrat launch, recorded 2026-09-25"')
     ap.add_argument('--out', default=os.path.join('site', 'replay'))
     ap.add_argument('--fps', type=int, default=20)
-    ap.add_argument('--name', default='ratest')
     ap.add_argument('--allow-mismatch', action='store_true', help='write the clip even if the re-run differs')
     a = ap.parse_args()
     run_dir = a.run if os.path.isabs(a.run) else os.path.join(ROOT, a.run)
     out_dir = a.out if os.path.isabs(a.out) else os.path.join(ROOT, a.out)
+    label = ' '.join(a.label.split())
+    if not label:
+        print('--label is empty')
+        return 2
+
+    oracle = 'this is a dev-oracle run (a scripted cursor, not the rat): refusing to export it as the rat\'s session'
+    if 'DEVORACLE' in os.path.basename(os.path.normpath(run_dir)).upper():
+        print(oracle)
+        return 1
+    if not os.path.isfile(os.path.join(run_dir, 'session.json')):
+        print(f'{rel(run_dir)} has no session.json (a run that did not finish?): nothing to export')
+        return 1
+    meta0 = json.load(open(os.path.join(run_dir, 'session.json')))
+    rig = meta0.get('rig') or {}
+    if rig.get('dev_oracle'):
+        print(oracle)
+        return 1
+    mode = str(rig.get('mode') or 'DRY').upper()
 
     t0 = time.time()
-    print(f're-running {rel(run_dir)} through session.py (same brain, seed and command log)...', flush=True)
+    print(f're-running {rel(run_dir)} ({mode}) through session.py (same brain, seed and command log)...', flush=True)
     with ThreadPoolExecutor(1, thread_name_prefix='replay-sim') as ex:
         meta, s, rec, proof, checks = ex.submit(rerun, run_dir).result()
     print(f'  {meta["steps"]} control steps, {len(rec.times)} physics frames in {time.time() - t0:.1f} s')
@@ -431,16 +503,19 @@ def main():
         print('PROBLEMS:\n  ' + '\n  '.join(problems[:20]))
         return 1
 
+    doc = build_json(meta, rec, checks, proof, targets_json, events, len(frames), a.fps, timestep, run_dir, label,
+                     mode, len(blob), hashlib.sha256(blob).hexdigest())
+    leaks = public_problems(doc)
+    if leaks:
+        print('the json would carry something that must not be public: no clip written\n  ' + '\n  '.join(leaks[:20]))
+        return 1
+
     os.makedirs(out_dir, exist_ok=True)
-    bin_path = os.path.join(out_dir, a.name + '.bin')
-    json_path = os.path.join(out_dir, a.name + '.json')
+    bin_path = os.path.join(out_dir, NAME + '.bin')
+    json_path = os.path.join(out_dir, NAME + '.json')
     with open(bin_path + '.tmp', 'wb') as f:
         f.write(blob)
     os.replace(bin_path + '.tmp', bin_path)
-    rpath = os.path.join(run_dir, 'live_receipt.json')
-    receipt = json.load(open(rpath)) if os.path.exists(rpath) else {}
-    doc = build_json(meta, rec, checks, proof, targets_json, events, receipt, len(frames), a.fps, timestep,
-                     run_dir, len(blob), hashlib.sha256(blob).hexdigest())
     with open(json_path + '.tmp', 'w', encoding='utf-8', newline='\n') as f:
         json.dump(doc, f, indent=1, ensure_ascii=False)
         f.write('\n')

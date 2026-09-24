@@ -1,5 +1,5 @@
 """The website's binary frame (site/js/live.js reads it), shared by live/publish_training.py (live training
-frames, sent through the relay) and live/export_replay.py (the recorded RatTest replay clip).
+frames, sent through the relay) and live/export_replay.py (the website's recorded replay clip, site/replay/session.*).
 
 Little-endian Float32Array, 467 floats = 1,868 bytes per frame:
   [0]   magic 7.0
@@ -20,7 +20,7 @@ Little-endian Float32Array, 467 floats = 1,868 bytes per frame:
 On a frame whose [4] is 1, [7..10] hold the target that was lit when the click registered (the env moves on to
 the next target, or to a hold, in the same control step); the next frame shows the new state. In the replay
 clip a click frame also shows the pose AT the click instant ([1] = that time, at most one frame earlier),
-because the rig puts the rat back in its start pose right after each click (see ratest.json "resets").
+because the rig puts the rat back in its start pose right after each click (see session.json "resets").
 """
 import json
 import os
