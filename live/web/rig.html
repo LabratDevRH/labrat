@@ -1,0 +1,1240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ratbrain Rig</title>
+<style>
+  :root{
+    --bg:#07070a; --panel:#0c0c10; --panel2:#101015; --line:#1c1c24; --line2:#26262f;
+    --ink:#ececf1; --dim:#a3a3af; --muted:#686874; --faint:#2c2c36;
+    --pink:#ff3c82; --pinkbg:#2a0e19;
+    --head:"Bahnschrift","Segoe UI",system-ui,sans-serif;
+    --mono:Consolas,"Cascadia Mono","SFMono-Regular",ui-monospace,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);overflow:hidden}
+  body{font-family:var(--head);-webkit-font-smoothing:antialiased}
+  #app{position:absolute;left:0;top:0;width:1920px;height:1080px;transform-origin:0 0;
+    display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:54px 1fr 62px 148px 18px;gap:8px;padding:10px 14px 9px}
+
+  /* ---------------------------------------------------------------- top bar */
+  .top{display:flex;align-items:center;gap:10px;min-width:0}
+  .brand{font:700 27px/1 var(--head);letter-spacing:.06em;white-space:nowrap}
+  .brand i{font-style:normal;color:var(--pink);padding:0 .18em}
+  .brand small{font:400 13px/1 var(--mono);letter-spacing:.14em;color:var(--muted);margin-left:14px;text-transform:uppercase}
+  .grow{flex:1}
+  .chip{font:13px/1 var(--mono);padding:8px 11px;border:1px solid var(--line2);border-radius:3px;color:var(--dim);
+    background:var(--panel);white-space:nowrap}
+  .chip b{color:var(--ink);font-weight:600}
+  /* the mode pill is the first thing after the name: DRY RUN (grey) or LIVE (pink), never ambiguous */
+  .pill{font:700 17px/1 var(--mono);letter-spacing:.16em;padding:10px 18px;border-radius:999px;background:#3a3a44;
+    color:#f2f2f6;white-space:nowrap;margin-left:6px}
+  .pill.live{background:var(--pink);color:#07070a}
+  .chip.dev{border-style:dashed;color:#b9b9c4}
+  .rec{display:flex;align-items:center;gap:7px;font:600 12px/1 var(--mono);letter-spacing:.16em;color:var(--muted)}
+  .rec i{width:9px;height:9px;border-radius:50%;background:var(--faint)}
+  .rec.on{color:var(--ink)} .rec.on i{background:var(--pink);animation:blink 1.4s infinite}
+  button#start{font:700 15px/1 var(--head);letter-spacing:.16em;color:#07070a;background:var(--pink);border:0;
+    padding:12px 30px;border-radius:3px;cursor:pointer}
+  button#start:disabled{opacity:.35;cursor:default}
+  button#start:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+
+  /* ---------------------------------------------------------------- main
+     Until pons's transaction arrives: the rat on the left, the pons stream over a small tx panel on the right.
+     When it arrives (.txon) the rat keeps the full height of the stage: the tx panel becomes a translucent
+     drawer over the lower part of the rat view (.tx.drawer, moved into the sim pane) and the camera reframes
+     the rat into the part it leaves free; the pons stream takes the whole right side, wider, so pons's own
+     rejection toast stays readable. Tracks are fr so they animate and always fill. */
+  .main{display:grid;grid-template-columns:minmax(0,58fr) minmax(0,42fr);grid-template-rows:minmax(0,590fr) minmax(0,149fr);
+    grid-template-areas:"sim pons" "sim tx";column-gap:8px;row-gap:8px;min-height:0;min-width:0;
+    transition:grid-template-columns .9s cubic-bezier(.4,0,.2,1),grid-template-rows .9s cubic-bezier(.4,0,.2,1),
+      row-gap .9s cubic-bezier(.4,0,.2,1)}
+  .main.txon{grid-template-columns:minmax(0,50fr) minmax(0,50fr);grid-template-rows:minmax(0,739fr) minmax(0,0fr);row-gap:0}
+  .main > .sim{grid-area:sim} .main > .pons{grid-area:pons} .main > .tx{grid-area:tx}
+  .pane{background:var(--panel);border:1px solid var(--line);border-radius:3px;min-width:0;min-height:0;
+    position:relative;overflow:hidden}
+  .hd{display:flex;align-items:center;gap:10px;height:30px;padding:0 12px;border-bottom:1px solid var(--line);
+    font:12px/1 var(--mono);color:var(--muted);white-space:nowrap}
+  .hd .t{letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+  .hd .r{margin-left:auto}
+  .hd b{color:var(--ink);font-weight:600}
+
+  .sim{background:#050507}
+  #gl{position:absolute;inset:0;width:100%;height:100%;display:block;outline:none;object-fit:cover}
+  .hud{position:absolute;pointer-events:none;text-shadow:0 1px 2px rgba(0,0,0,.85),0 0 1px rgba(0,0,0,.9)}
+  .hud.tl{left:18px;top:16px}
+  .brain{display:flex;align-items:center;gap:10px;font:700 25px/1 var(--head);letter-spacing:.1em;color:#9d9daa}
+  .brain i{width:13px;height:13px;border-radius:50%;background:#3a3a44;border:2px solid #55555f}
+  .brain.on{color:var(--ink)} .brain.on i{background:var(--pink);border-color:var(--pink)}
+  .tline{font:19px/1 var(--mono);color:var(--dim);margin-top:10px;font-variant-numeric:tabular-nums}
+  .tline b{color:var(--ink);font-weight:400}
+  .hud.tr{right:16px;top:16px;text-align:right;font:12px/1.55 var(--mono);color:var(--muted)}
+  .hud.tr b{color:var(--dim);font-weight:400}
+  .hud.bl{left:18px;bottom:calc(var(--cover, 0px) + 16px);right:18px;transition:bottom .65s cubic-bezier(.2,.75,.25,1);
+    display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+  .hud.bl .pf{min-width:0}
+  .hud .k{font:600 11px/1 var(--mono);letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
+  .hud .proof{font:15.5px/1.2 var(--mono);color:var(--ink);margin-top:7px;letter-spacing:.02em;white-space:nowrap;min-height:19px}
+  .hud .proof .caret{display:inline-block;width:.6em;height:1em;background:var(--pink);vertical-align:-2px;margin-left:1px;
+    animation:blink .9s steps(1) infinite}
+  .hud .proof .caret.off{display:none}
+  /* the PRESS stamp is a brief moment in the top-left corner, above the rat's back (Web Animations, wall-clock
+     timed: it fades even when rendering is throttled or paused); then the small PRESSED chip stays in the bottom-right
+     corner, on the proof line's band, which the drawer framing always keeps clear of the rat */
+  #flash{position:absolute;left:16px;top:84px;display:flex;flex-direction:column;align-items:flex-start;
+    pointer-events:none;opacity:0;z-index:6;transform-origin:0 0}
+  #flash .big{font:700 104px/.9 var(--head);letter-spacing:.1em;color:var(--pink);text-shadow:0 2px 6px rgba(0,0,0,.6)}
+  #flash .sub{font:19px/1 var(--mono);color:var(--ink);margin-top:10px;background:rgba(7,7,10,.78);padding:7px 12px}
+  .pchip{flex:none;font:600 13px/1 var(--mono);letter-spacing:.08em;color:var(--pink);
+    background:rgba(7,7,10,.66);border:1px solid rgba(255,60,130,.6);border-radius:2px;padding:6px 9px;white-space:nowrap;
+    text-shadow:none;opacity:0;transition:opacity .3s ease}
+  .pchip b{color:var(--ink);font-weight:400}
+  .pchip.on{opacity:1;transition:opacity .5s ease .95s}
+  #frame{position:absolute;inset:0;border:3px solid var(--pink);opacity:0;pointer-events:none;z-index:5}
+  #loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:14px var(--mono);
+    color:var(--muted);pointer-events:none}
+
+  .view{position:absolute;left:0;right:0;top:30px;bottom:0;background:#000;overflow:hidden}
+  #shot{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
+  #shot[hidden]{display:none}
+  #idle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;
+    font:13px/1.6 var(--mono);color:var(--muted);padding:0 40px}
+  #cur{position:absolute;left:0;top:0;width:26px;height:26px;pointer-events:none;display:none;
+    filter:drop-shadow(0 1px 1px rgba(0,0,0,.9))}
+  #ring{position:absolute;width:56px;height:56px;margin:-28px 0 0 -28px;border:2.5px solid var(--pink);border-radius:50%;
+    opacity:0;pointer-events:none}
+
+  .tx .body{position:absolute;left:0;right:0;top:30px;bottom:0;padding:10px 14px 8px;overflow:hidden}
+  .verdict{font:700 20px/1.25 var(--head);letter-spacing:.01em;color:var(--ink);margin:0 0 9px}
+  .verdict:empty{display:none}
+  .verdict em{font-style:normal;color:var(--pink)}
+  .verdict.bad{color:var(--pink)}
+  .txwait{font:12.5px/1.65 var(--mono);color:var(--muted)}
+  .txnote{font:11.5px/1.45 var(--mono);color:var(--dim);margin:-3px 0 8px}
+  .txnote:empty{display:none}
+  .txgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:18px;row-gap:1px}
+  .txgrid{--fs:12.5px}
+  .f{display:grid;grid-template-columns:104px 1fr 16px;gap:8px;align-items:baseline;min-width:0;
+    font:var(--fs)/calc(var(--fs) * 1.5) var(--mono);border-bottom:1px solid #15151c}
+  .f.wide{grid-column:1 / -1}
+  .f .k{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .f .v{color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .f.wide .v{white-space:normal;word-break:break-all;line-height:calc(var(--fs) * 1.35);padding:1px 0}
+  .f .c{text-align:right;color:var(--dim)} .f .c.bad{color:var(--pink)}
+  .txsum{font:12px/1 var(--mono);color:var(--muted)}
+  .txsum b{color:var(--ink);font-weight:400}
+  /* the drawer: the same tx panel, docked over the lower part of the rat view once pons's tx is in. Its height is
+     its content (fitTx keeps it under DRAWER_MAX of the pane); the 3D canvas behind it keeps the pane's full size. */
+  .tx.drawer{position:absolute;left:0;right:0;bottom:0;z-index:4;border:0;border-top:1px solid #2a2a34;border-radius:0;
+    background:rgba(8,8,11,.74);-webkit-backdrop-filter:blur(9px);backdrop-filter:blur(9px)}
+  .tx.drawer .hd{background:rgba(12,12,16,.55)}
+  .tx.drawer .body{position:relative;top:auto;bottom:auto;padding:11px 16px 10px}
+  .tx.drawer .txgrid{grid-template-columns:repeat(3,minmax(0,1fr));column-gap:20px}
+  .tx.drawer .f{grid-template-columns:calc(var(--fs) * 8) minmax(0,1fr) 14px;border-bottom-color:rgba(255,255,255,.055)}
+
+  /* ---------------------------------------------------------------- stepper */
+  .steps{display:flex;gap:18px;background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:6px 14px 0;
+    min-width:0;overflow:hidden}
+  .grp{display:flex;flex-direction:column;min-width:0}
+  .grp .gl{font:600 10.5px/1 var(--mono);letter-spacing:.17em;text-transform:uppercase;color:var(--muted);
+    padding-bottom:6px;border-bottom:1px solid var(--line2);margin-bottom:6px;white-space:nowrap}
+  .grp.rat .gl{color:var(--ink);border-bottom-color:var(--pink)}
+  .grp .row{display:flex;gap:6px}
+  .st{flex:1 1 0;min-width:0;display:flex;gap:7px}
+  .st .d{width:10px;height:10px;border-radius:50%;border:1.5px solid #3a3a45;margin-top:1px;flex:0 0 auto}
+  .st .tx2{min-width:0}
+  .st .lb{font:600 12px/1.1 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);white-space:nowrap}
+  .st .dt{font:11px/1.35 var(--mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    margin-top:2px}
+  .st.active .d{background:var(--pink);border-color:var(--pink);animation:blink 1s infinite}
+  .st.active .lb{color:var(--ink)}
+  .st.done .d{background:#d4d4dc;border-color:#d4d4dc}
+  .st.done .lb{color:#c6c6cf} .st.done .dt{color:var(--dim)}
+  .st.failed .d{border-color:var(--pink)} .st.failed .lb,.st.failed .dt{color:var(--pink)}
+
+  /* ---------------------------------------------------------------- bottom */
+  .bottom{display:grid;grid-template-columns:minmax(0,58fr) minmax(0,42fr);gap:8px;min-height:0;min-width:0}
+  .tele{display:grid;grid-template-columns:1fr 1.45fr 1fr 1fr;gap:1px;background:var(--line);border:1px solid var(--line);
+    border-radius:3px;overflow:hidden}
+  .cell{background:var(--panel);padding:11px 16px;min-width:0;position:relative}
+  .cell .k{font:600 11px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+  .cell .v{font:34px/1 var(--mono);margin-top:10px;font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--ink)}
+  .cell .v small{font-size:15px;color:var(--muted);margin-left:5px}
+  .cell .v.hot{color:var(--pink)}
+  .cell .sub{font:12px/1.4 var(--mono);color:var(--muted);margin-top:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cell .sub b{color:var(--dim);font-weight:400}
+  #spark{display:block;width:100%;height:34px;margin-top:8px}
+  .bar{position:relative;height:10px;background:#16161d;margin-top:14px;border-radius:1px}
+  .bar i{position:absolute;left:0;top:0;bottom:0;width:0;background:#8d8d99}
+  .bar i.hot{background:var(--pink)}
+  .bar s{position:absolute;top:-5px;bottom:-5px;width:2px;background:var(--ink);text-decoration:none}
+  .bar em{position:absolute;top:15px;font:11px/1 var(--mono);font-style:normal;color:var(--dim);transform:translateX(-50%);white-space:nowrap}
+  .bar .tk{position:absolute;top:15px;font:11px/1 var(--mono);color:var(--muted)}
+  #log{background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:8px 12px;overflow:hidden;
+    font:12.5px/17.5px var(--mono);color:var(--dim);display:flex;flex-direction:column;justify-content:flex-end}
+  #log div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 0 auto}
+  #log span{color:#454550;margin-right:8px}
+  #log .hi{color:var(--ink)} #log .pk{color:var(--pink)}
+  .honest{font:12.5px/18px var(--head);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:2px}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="app">
+
+  <header class="top">
+    <div class="brand">RATBRAIN<i>·</i>RIG<small>virtual rat → pons launchpad</small></div>
+    <span class="pill" id="mode" title="mode, from the rig's /status">MODE …</span>
+    <span class="grow"></span>
+    <span class="chip" id="sym">…</span>
+    <span class="chip" id="pol">policy …</span>
+    <span class="chip" id="seed">seed …</span>
+    <span class="chip dev" id="dev" hidden>DEV REPLAY</span>
+    <span class="rec" id="rec"><i></i>REC</span>
+    <button id="start" disabled>START</button>
+  </header>
+
+  <main class="main" id="main">
+    <section class="pane sim" id="simPane">
+      <canvas id="gl" tabindex="-1"></canvas>
+      <div id="loading">loading the rat…</div>
+      <div id="frame"></div>
+      <div class="hud tl">
+        <div class="brain" id="brain"><i></i><span id="brainTxt">BRAIN OFF</span></div>
+        <div class="tline">t = <b id="tval">—</b> s</div>
+      </div>
+      <div class="hud tr">DeepMind rodent · MuJoCo · physics <b>500 Hz</b> · policy <b>50 Hz</b><br>
+        stream <b id="hz">—</b> · render <b id="fps">—</b></div>
+      <div id="flash"><div class="big">PRESS</div><div class="sub" id="flashSub"></div></div>
+      <div class="hud bl">
+        <div class="pf"><div class="k">Replay proof · sha256</div>
+          <div class="proof"><span id="proofTxt"></span><i class="caret off" id="caret"></i></div></div>
+        <div class="pchip" id="pchip"></div>
+      </div>
+    </section>
+
+    <section class="pane pons">
+      <div class="hd"><span class="t">ponsfamily.com/launchpad/create</span><span>operator script · headless Chromium</span>
+        <span class="r" id="shotInfo">—</span></div>
+      <div class="view" id="view">
+        <img id="shot" alt="" hidden>
+        <svg id="cur" viewBox="0 0 26 26"><path d="M3 2 L3 21 L8.2 16.4 L11.6 24 L15 22.5 L11.7 15.1 L18.6 15.1 Z"
+          fill="#fff" stroke="#07070a" stroke-width="1.6" stroke-linejoin="round"/></svg>
+        <div id="ring"></div>
+        <div id="idle">the pons create page streams here once the rig starts</div>
+      </div>
+    </section>
+    <section class="pane tx" id="txPane">
+      <div class="hd"><span class="t">eth_sendTransaction</span><span id="txKind">rig wallet hook</span>
+        <span class="r" id="txState">waiting</span></div>
+      <div class="body">
+        <div class="verdict" id="verdict"></div>
+        <div class="txnote" id="txnote"></div>
+        <div id="txgrid" class="txgrid"></div>
+        <div class="txwait" id="txwait">The operator script fills the form and opens pons's launch review; the rat's lever
+          press clicks Confirm, which makes pons request the launch transaction. The rig decodes the calldata, checks every
+          field against what was filled in and, in DRY, refuses to sign.</div>
+      </div>
+    </section>
+  </main>
+
+  <div class="steps" id="steps"></div>
+
+  <footer class="bottom">
+    <div class="tele">
+      <div class="cell"><div class="k">Paw → lever</div><div class="v" id="pawV">—<small>mm</small></div>
+        <canvas id="spark" width="360" height="68"></canvas></div>
+      <div class="cell"><div class="k">Lever angle</div><div class="v" id="angV">—<small>°</small></div>
+        <div class="bar" id="bar"><i id="barFill"></i><s id="barTh"></s><em id="barLbl">press 11.5°</em>
+          <span class="tk" style="left:0">0°</span><span class="tk" style="right:0">30°</span></div></div>
+      <div class="cell"><div class="k">Pose stream</div><div class="v" id="frV">0<small>frames</small></div>
+        <div class="sub" id="frSub">waiting for the trial</div></div>
+      <div class="cell"><div class="k">Press</div><div class="v" id="prV">—</div>
+        <div class="sub" id="prSub">outcome —</div></div>
+    </div>
+    <div id="log"></div>
+  </footer>
+
+  <div class="honest">Virtual rat: DeepMind's rodent model in MuJoCo, driven by a trained neural network (not a real brain).
+    The operator script fills the form and opens pons's launch review; the rat's lever press clicks Confirm, which makes pons
+    request the launch transaction. The proof in the description is reproduced by replay.py.</div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const Q = new URLSearchParams(location.search);
+const AUTOSTART = Q.get('autostart') === '1';
+const LOWQ = Q.get('quality') === 'low';
+const RIG = window.RIG = {done: false, outcome: null, events: 0, frames: 0, fps: 0};
+
+/* ================================================================ layout: 1920x1080 stage, scaled to fit */
+const app = $('app');
+let SCALE = 1;
+function fitStage(){
+  SCALE = Math.min(innerWidth / 1920, innerHeight / 1080);
+  const ox = (innerWidth - 1920 * SCALE) / 2, oy = (innerHeight - 1080 * SCALE) / 2;
+  app.style.transform = `translate(${ox}px,${oy}px) scale(${SCALE})`;
+  resize3d();
+}
+
+/* ================================================================ stepper, log, top bar */
+const STAGES = [
+  ['wallet','wallet','script'], ['terms','terms','script'], ['image','image','script'], ['name','name','script'],
+  ['ticker','ticker','script'], ['description','description','script'], ['rehearsal','rehearsal','proof'],
+  ['brain_off','brain off','rat'], ['brain_on','brain on','rat'], ['press','press','rat'],
+  ['click_launch','click confirm','launch'], ['tx','tx','launch'], ['outcome','outcome','launch']];
+const GROUPS = [['script','operator script'], ['proof','proof'], ['rat','the rat · live sim'], ['launch','launch · pons']];
+(function buildSteps(){
+  const host = $('steps');
+  for (const [g, label] of GROUPS){
+    const items = STAGES.filter(s => s[2] === g);
+    const el = document.createElement('div');
+    el.className = 'grp ' + g; el.style.flex = String(items.length * (g === 'script' ? 0.92 : 1.08));
+    el.innerHTML = `<div class="gl">${label}</div><div class="row">` + items.map(([k, lb]) =>
+      `<div class="st" id="st-${k}"><div class="d"></div><div class="tx2"><div class="lb">${lb}</div>` +
+      `<div class="dt" id="dt-${k}">&nbsp;</div></div></div>`).join('') + '</div>';
+    host.appendChild(el);
+  }
+})();
+function setStage(k, state, detail){
+  const e = $('st-' + k); if (!e) return;
+  e.classList.remove('active', 'done', 'failed');
+  if (state) e.classList.add(state);
+  if (detail !== undefined && detail !== null && detail !== '') { $('dt-' + k).textContent = detail; $('dt-' + k).title = detail; }
+}
+function resetSteps(){ for (const [k] of STAGES){ setStage(k, null); $('dt-' + k).innerHTML = '&nbsp;'; } }
+
+const logEl = $('log');
+function log(msg, cls){
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.innerHTML = '<span>' + new Date().toLocaleTimeString([], {hour12: false}) + '</span>' + esc(msg);
+  d.title = msg;
+  logEl.appendChild(d);
+  while (logEl.children.length > 60) logEl.removeChild(logEl.firstChild);
+}
+
+let STATUS = null;
+async function loadStatus(){
+  try { STATUS = await (await fetch('/status', {cache: 'no-store'})).json(); } catch (e) { STATUS = null; }
+  const s = STATUS || {};
+  const live = s.mode === 'LIVE';
+  $('mode').textContent = !STATUS ? 'MODE ?' : live ? 'LIVE' : s.mode === 'DRY' ? 'DRY RUN' : String(s.mode || 'MODE ?');
+  $('mode').className = 'pill' + (live ? ' live' : '');
+  $('sym').innerHTML = '<b>$' + esc(s.symbol || '—') + '</b>' + (s.name ? ' · ' + esc(s.name) : '');
+  $('pol').innerHTML = 'policy <b>' + esc((s.policy_sha256 || '—').slice(0, 12)) + '</b>';
+  $('pol').title = s.policy_sha256 || '';
+  $('seed').innerHTML = 'seed <b>' + esc(Q.get('seed') || s.seed || '—') + '</b>';
+  if (s.dev){ $('dev').hidden = false; $('dev').textContent = 'DEV REPLAY · placeholder pons · fake tx'; $('dev').title = s.dev_note || ''; }
+  if (s.busy) log('rig is busy with another run');
+  if (!live && s.dry_balance_override_eth)
+    $('txwait').textContent += ` The DRY wallet is a throwaway that holds nothing: pons's balance reads get a simulated ` +
+      `${s.dry_balance_override_eth} ETH so pons enables its launch button.`;
+}
+
+/* ================================================================ 3D: renderer, scene, post */
+THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
+const canvas = $('gl');
+const renderer = new THREE.WebGLRenderer({canvas, antialias: false, powerPreference: 'high-performance'});
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.AgXToneMapping !== undefined ? THREE.AgXToneMapping : THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#07070a');
+const camera = new THREE.PerspectiveCamera(30, 1.5, 0.005, 6);
+camera.up.set(0, 0, 1);
+
+const pmrem = new THREE.PMREMGenerator(renderer);
+/* reflections: a dark studio with a few softboxes (a uniformly bright room washes the whole chamber out) */
+function studioEnv(){
+  const s = new THREE.Scene();
+  s.add(new THREE.Mesh(new THREE.BoxGeometry(12, 12, 12), new THREE.MeshBasicMaterial({color: 0x0b0b0e, side: THREE.BackSide})));
+  const panel = (w, h, pos, rgb, k) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({color: new THREE.Color(rgb).multiplyScalar(k), side: THREE.DoubleSide}));
+    m.position.set(...pos); m.lookAt(0, 0, 0); s.add(m);
+  };
+  panel(5, 3, [0.3, 0, 5.8], 0xfff1e0, 4.0);        // house softbox overhead
+  panel(1.0, 5, [-5.8, 1.5, 1.2], 0xc4d4ff, 3.0);    // cool strip behind
+  panel(3.5, 2, [2.5, -5.8, 1.6], 0xffe4c8, 1.6);   // warm key, camera side
+  panel(2, 1.2, [5.8, 2.5, 0.6], 0xffffff, 0.8);    // small kicker
+  return pmrem.fromScene(s, 0.03).texture;
+}
+scene.environment = Q.get('env') === 'room' ? pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture : studioEnv();
+
+const rtt = new THREE.WebGLRenderTarget(16, 16, {type: THREE.HalfFloatType, samples: LOWQ ? 0 : 4});
+const composer = new EffectComposer(renderer, rtt);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.42, 0.55, 1.05);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+const vignette = new ShaderPass({
+  uniforms: {tDiffuse: {value: null}, uAmt: {value: 0.62}, uAspect: {value: 1.4}, uSeed: {value: 0}, uCy: {value: 0.5}},
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform sampler2D tDiffuse; uniform float uAmt; uniform float uAspect; uniform float uSeed; uniform float uCy;
+    varying vec2 vUv;
+    float h(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233)) + uSeed) * 43758.5453); }
+    void main(){
+      vec4 c = texture2D(tDiffuse, vUv);
+      vec2 d = (vUv - vec2(0.5, uCy)) * vec2(uAspect, 1.0) / uAspect * 1.9;   // centred on the part of the view the drawer leaves free
+      float v = smoothstep(1.25, 0.35, length(d));
+      c.rgb *= mix(1.0 - uAmt, 1.0, v);
+      c.rgb += (h(gl_FragCoord.xy) - 0.5) / 255.0;   // dither: no banding in the dark falloff
+      gl_FragColor = vec4(c.rgb, 1.0);
+    }`,
+});
+composer.addPass(vignette);
+
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true; controls.dampingFactor = 0.08;
+controls.minDistance = 0.08; controls.maxDistance = 1.6; controls.enablePan = true;
+let manualCam = false;
+controls.addEventListener('start', () => { manualCam = true; });
+canvas.addEventListener('dblclick', () => { manualCam = false; });
+
+let W3 = 16, H3 = 16;
+function resize3d(){
+  const pane = $('simPane');
+  W3 = Math.max(16, pane.clientWidth); H3 = Math.max(16, pane.clientHeight);
+  const pr = Math.max(0.5, Math.min(2, (window.devicePixelRatio || 1) * SCALE)) * (LOWQ ? 0.75 : 1);
+  renderer.setPixelRatio(pr);
+  renderer.setSize(W3, H3, false);
+  composer.setPixelRatio(pr);
+  composer.setSize(W3, H3);
+  camera.aspect = W3 / H3; camera.updateProjectionMatrix();
+  vignette.uniforms.uAspect.value = W3 / H3;
+}
+
+/* ---------------------------------------------------------------- lights */
+scene.add(new THREE.HemisphereLight(0x9aa3b8, 0x0b0908, 0.35));
+const house = new THREE.SpotLight(0xfff0dc, 2.1, 0, 0.72, 0.85, 2);        // overhead house light
+house.position.set(0.03, 0.05, 0.62); house.target.position.set(0.0, 0.0, 0.0);
+house.castShadow = true; house.shadow.mapSize.set(2048, 2048);
+house.shadow.camera.near = 0.25; house.shadow.camera.far = 0.9;
+house.shadow.bias = -0.00004; house.shadow.normalBias = 0.0006; house.shadow.radius = 3;
+scene.add(house, house.target);
+const key = new THREE.DirectionalLight(0xffe2c4, 1.7);                    // warm key, front-right of camera
+key.position.set(0.55, -0.62, 0.52); key.target.position.set(0.02, 0, 0.03);
+key.castShadow = true; key.shadow.mapSize.set(2048, 2048);
+Object.assign(key.shadow.camera, {left: -0.3, right: 0.3, top: 0.3, bottom: -0.3, near: 0.2, far: 1.8});
+key.shadow.bias = -0.00005; key.shadow.normalBias = 0.0006;
+scene.add(key, key.target);
+const rim = new THREE.DirectionalLight(0xa9c2ff, 2.4);                    // cool rim from behind
+rim.position.set(-0.7, 0.55, 0.45); rim.target.position.set(0.02, 0, 0.04);
+scene.add(rim, rim.target);
+const fill = new THREE.DirectionalLight(0xcfd8ff, 0.35);
+fill.position.set(0.1, -0.8, 0.1); scene.add(fill);
+const cueLight = new THREE.PointLight(0xff3c82, 0, 0.16, 2);
+scene.add(cueLight);
+
+/* ================================================================ chamber (constants from rat.json) */
+function brushedTexture(){
+  const c = document.createElement('canvas'); c.width = 16; c.height = 512;
+  const g = c.getContext('2d');
+  for (let y = 0; y < 512; y++){
+    const v = 168 + 16 * Math.sin(y * 0.37) * Math.sin(y * 0.071) + 16 * (Math.random() - 0.5);
+    g.fillStyle = `rgb(${v|0},${v|0},${v|0})`; g.fillRect(0, y, 16, 1);
+  }
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1, 3);
+  return t;
+}
+const M = {
+  steel: new THREE.MeshPhysicalMaterial({color: 0xa7abb2, metalness: 1, roughness: 0.34, roughnessMap: brushedTexture(), envMapIntensity: 0.55}),
+  dark: new THREE.MeshStandardMaterial({color: 0x2a2b30, metalness: 0.9, roughness: 0.45, envMapIntensity: 0.45}),
+  rod: new THREE.MeshStandardMaterial({color: 0xc9ccd2, metalness: 1, roughness: 0.2, envMapIntensity: 0.75}),
+  tray: new THREE.MeshStandardMaterial({color: 0x040405, metalness: 0, roughness: 0.75}),
+  hole: new THREE.MeshStandardMaterial({color: 0x010101, roughness: 1}),
+  // clear polycarbonate: no diffuse at all, only what it reflects, added on top (like glass)
+  acrylic: new THREE.MeshPhysicalMaterial({color: 0x000000, metalness: 0, roughness: 0.06, transparent: true, opacity: 1,
+    blending: THREE.AdditiveBlending, envMapIntensity: 0.7, depthWrite: false, side: THREE.DoubleSide}),
+  lever: new THREE.MeshPhysicalMaterial({color: 0xd4d6db, metalness: 1, roughness: 0.16, clearcoat: 0.35, envMapIntensity: 0.9}),
+  cue: new THREE.MeshStandardMaterial({color: 0xcfcfd4, roughness: 0.3, emissive: new THREE.Color('#ff3c82'), emissiveIntensity: 0}),
+};
+const lever = new THREE.Group();
+let CH = null;
+function buildChamber(ch){
+  CH = ch;
+  const WX = ch.WALL_X, BX = ch.BACK_X, SY = ch.SIDE_Y, H2 = 2 * ch.WALL_H, LZ = ch.LEVER_Z, LL = ch.LEVER_LEN;
+  const T = ch.WALL_T || 0.01, len = WX - BX, cx = (WX + BX) / 2;
+  const box = (sx, sy, sz, m, x, y, z, r = 0) => {
+    const g = r > 0 ? new RoundedBoxGeometry(sx, sy, sz, 3, r) : new THREE.BoxGeometry(sx, sy, sz);
+    const o = new THREE.Mesh(g, m); o.position.set(x, y, z); o.castShadow = true; o.receiveShadow = true; scene.add(o); return o;
+  };
+  // grid floor: steel rods (along y) at ROD_PITCH over a dark tray; rod tops at z = 0 (the physics floor)
+  const rr = ch.ROD_R || 0.0022, pitch = ch.ROD_PITCH || 0.008;
+  box(len, 2 * SY, 0.01, M.tray, cx, 0, -0.013);
+  const n = Math.floor((len - 0.004) / pitch) + 1;
+  const rods = new THREE.InstancedMesh(new THREE.CylinderGeometry(rr, rr, 2 * SY, 18, 1), M.rod, n);
+  const m4 = new THREE.Matrix4();
+  for (let i = 0; i < n; i++){ m4.makeTranslation(BX + 0.004 + i * pitch, 0, -rr); rods.setMatrixAt(i, m4); }
+  rods.castShadow = true; rods.receiveShadow = true; scene.add(rods);
+  // side rails under the rods
+  for (const s of [-1, 1]) box(len, 0.006, 0.008, M.dark, cx, s * (SY - 0.003), -0.006);
+  // front panel (brushed steel) with lever housing, cue light, magazine
+  box(T, 2 * SY + 2 * T, H2, M.steel, WX + T / 2, 0, H2 / 2, 0.0015);
+  box(0.008, 0.06, 0.018, M.dark, WX - 0.003, 0, LZ, 0.0012);
+  box(0.0015, 0.05, 0.008, M.hole, WX - 0.0072, 0, LZ);
+  lever.position.set(WX, 0, LZ);
+  const paddle = new THREE.Mesh(new RoundedBoxGeometry(LL, 2 * (ch.PADDLE_HALF ? ch.PADDLE_HALF[1] : 0.022),
+    2 * (ch.PADDLE_HALF ? ch.PADDLE_HALF[2] : 0.003), 3, 0.0011), M.lever);
+  paddle.position.set(-LL / 2, 0, 0); paddle.castShadow = true; paddle.receiveShadow = true;
+  lever.add(paddle); scene.add(lever);
+  box(0.006, 0.05, 0.045, M.dark, WX - 0.002, 0.09, 0.035, 0.0015);           // food magazine
+  box(0.002, 0.036, 0.03, M.hole, WX - 0.0052, 0.09, 0.03);
+  const cue = new THREE.Mesh(new THREE.SphereGeometry(0.012, 40, 20), M.cue);
+  cue.scale.set(0.5, 1, 1); cue.position.set(WX - 0.001, 0, 0.105); scene.add(cue);
+  const bezel = new THREE.Mesh(new THREE.TorusGeometry(0.0128, 0.0018, 12, 48), M.dark);
+  bezel.rotation.y = Math.PI / 2; bezel.position.set(WX - 0.0005, 0, 0.105); scene.add(bezel);
+  cueLight.position.set(WX - 0.03, 0, 0.1);
+  // house-light fixture on the panel top
+  box(0.012, 0.05, 0.006, M.dark, WX - 0.004, -0.09, 0.2, 0.0015);
+  // clear side walls (at the physics wall faces) with dark top rails, dark back wall
+  for (const s of [-1, 1]){
+    const w = new THREE.Mesh(new THREE.BoxGeometry(len, T, H2), M.acrylic);
+    w.position.set(cx, s * (SY + T / 2), H2 / 2); w.renderOrder = 5; scene.add(w);
+    box(len + 0.02, T + 0.006, 0.006, M.dark, cx + 0.005, s * (SY + T / 2), H2 + 0.003, 0.001);
+    box(0.01, T + 0.006, H2, M.dark, BX - 0.005, s * (SY + T / 2), H2 / 2, 0.001);
+  }
+  box(T, 2 * SY + 2 * T, H2, M.dark, BX - T / 2, 0, H2 / 2);
+  // floor under everything, far below: catches nothing, keeps the void black
+  const under = new THREE.Mesh(new THREE.PlaneGeometry(4, 4), new THREE.MeshStandardMaterial({color: 0x050506, roughness: 1}));
+  under.position.z = -0.02; under.receiveShadow = true; scene.add(under);
+}
+
+/* ================================================================ the rat: CPU LBS + shell fur */
+let RAT = null;        // loaded asset + buffers
+const NL_MAX = LOWQ ? 12 : +(Q.get('shells') || 24);
+const U = {            // fur uniforms shared by all shells
+  uNL: {value: NL_MAX}, uLen: {value: 0.0040}, uComb: {value: 1.15}, uGrav: {value: 0.22},
+  uDen: {value: new THREE.Vector3(1100, 1750, 1750)},
+  uEyeL: {value: new THREE.Vector3(9, 9, 9)}, uEyeR: {value: new THREE.Vector3(9, 9, 9)},
+};
+const FUR_GLSL = `
+  float fhash13(vec3 p){ p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
+  vec3 fhash33(vec3 p){ p = fract(p * vec3(0.1031, 0.1030, 0.0973)); p += dot(p, p.yxz + 33.33);
+    return fract((p.xxy + p.yxx) * p.zyx); }
+  // one strand per cell of a 3D grid laid over the REST surface: it stays glued to the skin as it deforms
+  float strandCell(vec3 q, float lay){
+    vec3 c = floor(q); vec3 f = fract(q) - 0.5;
+    vec3 j = (fhash33(c) - 0.5) * 0.42;
+    float len = 0.42 + 0.58 * fhash13(c + 11.7);
+    float rad = 0.56 * (1.0 - lay / len);
+    float d = length(f - j);
+    float aa = max(fwidth(d), 1e-4) * 0.8;
+    return (lay > len) ? 0.0 : 1.0 - smoothstep(rad - aa, rad + aa, d);
+  }
+  float furCover(vec3 rest, float lay){
+    vec3 q = rest * uDen;
+    return max(strandCell(q, lay), strandCell(q + vec3(0.5, 0.37, 0.61), lay));
+  }`;
+
+function makeRatMaterials(){
+  const skin = new THREE.MeshPhysicalMaterial({vertexColors: true, roughness: 0.8, metalness: 0,
+    sheen: 0.6, sheenRoughness: 0.5, sheenColor: new THREE.Color(0xffffff), envMapIntensity: 0.3});
+  skin.onBeforeCompile = sh => {
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float fur; attribute float hood; varying float vFur; varying float vHood;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvFur = fur; vHood = hood;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vFur; varying float vHood;')
+      // under the fur the skin is the root colour, in shadow; bare skin keeps its pink
+      .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= mix(1.0, 0.42, smoothstep(0.05, 0.5, vFur));')
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = mix(0.46, 0.9, smoothstep(0.0, 0.4, vFur));')
+      .replace('#include <lights_physical_fragment>', '#include <lights_physical_fragment>\nmaterial.sheenColor *= (0.15 + 0.85 * smoothstep(0.05, 0.5, vFur)) * mix(1.0, 0.2, vHood);');
+  };
+  const fur = new THREE.MeshPhysicalMaterial({vertexColors: true, roughness: 0.82, metalness: 0,
+    sheen: 1.0, sheenRoughness: 0.42, sheenColor: new THREE.Color(0xf4f0ea), envMapIntensity: 0.3, alphaToCoverage: true});
+  fur.onBeforeCompile = sh => {
+    Object.assign(sh.uniforms, U);
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', `#include <common>
+        attribute float fur; attribute float hood; attribute vec3 restPos; attribute vec3 comb;
+        uniform float uNL; uniform float uLen; uniform float uComb; uniform float uGrav; uniform vec3 uEyeL; uniform vec3 uEyeR;
+        varying vec3 vRest; varying float vFur; varying float vLay; varying float vHood;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        float lay = (float(gl_InstanceID) + 1.0) / uNL;
+        float eye = min(distance(restPos, uEyeL), distance(restPos, uEyeR));
+        float fa = fur * smoothstep(0.0035, 0.0072, eye);
+        vRest = restPos; vFur = fa; vLay = lay; vHood = hood;
+        vec3 nn = normalize(objectNormal);
+        vec3 cb = comb - nn * dot(nn, comb);
+        float h = uLen * mix(1.0, 0.72, hood) * fa * lay;
+        transformed += nn * h * (1.0 - 0.3 * lay) + (cb * uComb + vec3(0.0, 0.0, -uGrav)) * h * lay;`);
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', `#include <common>
+        uniform vec3 uDen; varying vec3 vRest; varying float vFur; varying float vLay; varying float vHood;
+        ${FUR_GLSL}`)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        if (vFur < 0.05) discard;
+        float furA = furCover(vRest, vLay / clamp(vFur * 1.4, 0.3, 1.0));
+        if (furA < 0.01) discard;
+        float ao = mix(0.34, 1.0, pow(vLay, 0.75));
+        diffuseColor.rgb *= ao * mix(1.0, 0.62, vHood);
+        diffuseColor.rgb += vec3(0.022, 0.016, 0.012) * vHood * vLay * vLay;   // dark hood: faintly brown tips`)
+      .replace('#include <lights_physical_fragment>', '#include <lights_physical_fragment>\nmaterial.sheenColor *= mix(1.0, 0.08, vHood);')
+      .replace('#include <opaque_fragment>', '#include <opaque_fragment>\ngl_FragColor.a = furA;');
+  };
+  fur.customProgramCacheKey = () => 'ratfur-v2';
+  skin.customProgramCacheKey = () => 'ratskin-v2';
+  return {skin, fur};
+}
+
+function q2m(w, x, y, z, o){
+  const n = 1 / Math.hypot(w, x, y, z); w *= n; x *= n; y *= n; z *= n;
+  o[0] = 1 - 2 * (y * y + z * z); o[1] = 2 * (x * y - w * z); o[2] = 2 * (x * z + w * y);
+  o[3] = 2 * (x * y + w * z); o[4] = 1 - 2 * (x * x + z * z); o[5] = 2 * (y * z - w * x);
+  o[6] = 2 * (x * z - w * y); o[7] = 2 * (y * z + w * x); o[8] = 1 - 2 * (x * x + y * y);
+}
+
+function buildRat(R){
+  const NV = R.n_verts, NB = R.n_bones;
+  const rest = Float32Array.from(R.verts);
+  const faces = (NV < 65536 ? Uint16Array : Uint32Array).from(R.faces);
+  const weld = Int32Array.from(R.weld || [...Array(NV).keys()]);
+  // all influences, normalised per vertex once (the formula divides by the weight sum)
+  const wsum = new Float64Array(NV);
+  const infl = R.weights.map(flat => {
+    const n = flat.length / 2;
+    const ids = Int32Array.from(flat.slice(0, n)), w = Float32Array.from(flat.slice(n));
+    for (let k = 0; k < n; k++) wsum[ids[k]] += w[k];
+    return {ids, w};
+  });
+  for (const b of infl) for (let k = 0; k < b.ids.length; k++) b.w[k] /= wsum[b.ids[k]];
+  const bindPos = R.bind_pos.map(p => Float64Array.from(p));
+  const bindRT = R.bind_quat.map(q => { const m = new Float64Array(9); q2m(q[0], q[1], q[2], q[3], m);
+    return Float64Array.of(m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]); });   // transpose
+
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(rest), nrm = Float32Array.from(R.rest_normals), comb = new Float32Array(NV * 3);
+  const aPos = new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage);
+  const aNrm = new THREE.BufferAttribute(nrm, 3).setUsage(THREE.DynamicDrawUsage);
+  const aComb = new THREE.BufferAttribute(comb, 3).setUsage(THREE.DynamicDrawUsage);
+  geo.setAttribute('position', aPos);
+  geo.setAttribute('normal', aNrm);
+  geo.setAttribute('comb', aComb);
+  geo.setAttribute('restPos', new THREE.BufferAttribute(rest, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(Float32Array.from(R.coat), 3));
+  // fur amount from rat.json, thinned on the ears (a rat's ears are nearly bare): skull-carried verts high
+  // and behind the eyes, in the skull's bind frame
+  const furA = Float32Array.from(R.fur);
+  {
+    const sk = R.face ? R.face.skull_bone : R.bones.indexOf('skull'), flat = R.weights[sk], n = flat.length / 2;
+    const Rs = new Float64Array(9); q2m(...R.bind_quat[sk], Rs); const p0 = R.bind_pos[sk];
+    for (let k = 0; k < n; k++){
+      const i = flat[k]; if (flat[n + k] / wsum[i] < 0.5) continue;
+      const d = [rest[i * 3] - p0[0], rest[i * 3 + 1] - p0[1], rest[i * 3 + 2] - p0[2]];
+      const lx = Rs[0] * d[0] + Rs[3] * d[1] + Rs[6] * d[2], lz = Rs[2] * d[0] + Rs[5] * d[1] + Rs[8] * d[2];
+      const ear = Math.min(1, Math.max(0, (lz - 0.0105) / 0.0045)) * Math.min(1, Math.max(0, (-lx - 0.003) / 0.004));
+      furA[i] *= 1 - 0.8 * ear;
+    }
+  }
+  geo.setAttribute('fur', new THREE.BufferAttribute(furA, 1));
+  geo.setAttribute('hood', new THREE.BufferAttribute(Float32Array.from(R.hood || new Array(NV).fill(0)), 1));
+  geo.setIndex(new THREE.BufferAttribute(faces, 1));
+  geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0.05), 0.6);
+
+  const mats = makeRatMaterials();
+  const base = new THREE.Mesh(geo, mats.skin);
+  base.castShadow = true; base.receiveShadow = true; base.frustumCulled = false; base.renderOrder = 1;
+  const shells = new THREE.InstancedMesh(geo, mats.fur, NL_MAX);
+  shells.receiveShadow = true; shells.castShadow = false; shells.frustumCulled = false; shells.renderOrder = 2;
+  scene.add(base, shells);
+
+  // eyes: glossy black beads at the skull + (0.0011, ±0.0128, 0.0025) in skull frame
+  const face = R.face || {skull_bone: R.bones.indexOf('skull'), eye_offset: [0.0011, 0.0128, 0.0025], eye_radius: 0.0034};
+  const eyeMat = new THREE.MeshPhysicalMaterial({color: 0x030102, roughness: 0.06, metalness: 0, clearcoat: 1,
+    clearcoatRoughness: 0.03, envMapIntensity: 1.4});
+  const eyes = [1, -1].map(s => { const e = new THREE.Mesh(new THREE.SphereGeometry(face.eye_radius || 0.0034, 24, 14), eyeMat);
+    e.castShadow = false; scene.add(e); return e; });
+  const sk = face.skull_bone, eo = face.eye_offset;
+  const RbS = new Float64Array(9); q2m(...R.bind_quat[sk], RbS);
+  const eyeRest = [1, -1].map(s => { const o = [eo[0], s * eo[1], eo[2]];
+    return new THREE.Vector3(bindPos[sk][0] + RbS[0] * o[0] + RbS[1] * o[1] + RbS[2] * o[2],
+                             bindPos[sk][1] + RbS[3] * o[0] + RbS[4] * o[1] + RbS[5] * o[2],
+                             bindPos[sk][2] + RbS[6] * o[0] + RbS[7] * o[1] + RbS[8] * o[2]); });
+  U.uEyeL.value.copy(eyeRest[0]); U.uEyeR.value.copy(eyeRest[1]);
+
+  // whiskers (film.py layout) from the nose-tip vertex, carried in the skull's frame
+  const wLocal = buildWhiskers(R, rest, face, bindPos[sk], RbS);
+  const wPos = new Float32Array(wLocal.length);
+  const wGeo = new THREE.BufferGeometry();
+  wGeo.setAttribute('position', new THREE.BufferAttribute(wPos, 3).setUsage(THREE.DynamicDrawUsage));
+  const nW = wLocal.length / 3, wCol = new Float32Array(nW * 4);
+  for (let i = 0; i < nW; i++){                     // 24 points per whisker (12 segments x 2 ends): fade root -> tip
+    const t = (Math.floor((i % 24) / 2) + (i % 2)) / 12;
+    wCol.set([0.93, 0.9, 0.85, 0.62 * (1 - t) ** 1.3 + 0.04], i * 4);
+  }
+  wGeo.setAttribute('color', new THREE.BufferAttribute(wCol, 4));
+  const whiskers = new THREE.LineSegments(wGeo, new THREE.LineBasicMaterial({vertexColors: true, transparent: true,
+    depthWrite: false}));
+  whiskers.frustumCulled = false; scene.add(whiskers);
+
+  // vertices the drawer framing fits on screen: the body without the long tail (vertebra_C4 on), which may leave
+  // the frame, as it does in the normal framing
+  const tailW = new Float32Array(NV);
+  R.bones.forEach((n, b) => { const mt = /^vertebra_C(\d+)$/.exec(n);
+    if (mt && +mt[1] >= 4) for (let k = 0; k < infl[b].ids.length; k++) tailW[infl[b].ids[k]] += infl[b].w[k]; });
+  const frameIdx = [];
+  for (let i = 0; i < NV; i += 4) if (tailW[i] < 0.5) frameIdx.push(i);
+
+  RAT = {R, NV, NB, rest, faces, weld, infl, bindPos, bindRT, geo, pos, nrm, comb, aPos, aNrm, aComb,
+    acc: new Float64Array(NV * 3), base, shells, eyes, eyeOff: eo, sk, wLocal, wPos, wGeo,
+    P: new Float32Array(NB * 3), Qt: new Float32Array(NB * 4), frameIdx: Int32Array.from(frameIdx)};
+  // idle: the bind pose, moved to where a trial starts (no frames yet)
+  for (let b = 0; b < NB; b++){
+    RAT.P[b * 3] = bindPos[b][0] - 0.066; RAT.P[b * 3 + 1] = bindPos[b][1]; RAT.P[b * 3 + 2] = bindPos[b][2] + 0.003;
+    RAT.Qt.set(R.bind_quat[b], b * 4);
+  }
+  applyPose(RAT.P, RAT.Qt);
+}
+
+function buildWhiskers(R, rest, face, skP, RbS){
+  let s = 3 >>> 0;
+  const rnd = () => { s = (s + 0x6D2B79F5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const nv = face.nose_vert;
+  const nose = nv !== undefined ? [rest[nv * 3], rest[nv * 3 + 1], rest[nv * 3 + 2]] : [skP[0] + 0.04, skP[1], skP[2]];
+  const out = [], SEG = 12;
+  for (const side of [1, -1]) for (let i = 0; i < 14; i++){
+    const row = i % 4, col = Math.floor(i / 4);
+    const p0 = [nose[0] - 0.008 - col * 0.0035, nose[1] + side * (0.005 + row * 0.0012), nose[2] - 0.003 - row * 0.0018];
+    const ln = 0.035 + rnd() * 0.035 - col * 0.004;
+    let d = [-0.1 + (rnd() * 0.4 - 0.15), side, -0.15 + row * 0.12 + (rnd() * 0.2 - 0.1)];
+    const dl = Math.hypot(...d); d = d.map(v => v / dl);
+    const p1 = [p0[0] + d[0] * ln * 0.5 + 0.005, p0[1] + d[1] * ln * 0.5, p0[2] + d[2] * ln * 0.5 + 0.003];
+    const p2 = [p0[0] + d[0] * ln - 0.006, p0[1] + d[1] * ln, p0[2] + d[2] * ln - 0.004];
+    const c = [0, 1, 2].map(k => 2 * p1[k] - 0.5 * (p0[k] + p2[k]));              // quadratic through p1 at t = .5
+    const at = t => [0, 1, 2].map(k => (1 - t) * (1 - t) * p0[k] + 2 * (1 - t) * t * c[k] + t * t * p2[k]);
+    for (let k = 0; k < SEG; k++){
+      for (const p of [at(k / SEG), at((k + 1) / SEG)]){
+        const r = [p[0] - skP[0], p[1] - skP[1], p[2] - skP[2]];                   // world(bind) -> skull local
+        out.push(RbS[0] * r[0] + RbS[3] * r[1] + RbS[6] * r[2], RbS[1] * r[0] + RbS[4] * r[1] + RbS[7] * r[2],
+                 RbS[2] * r[0] + RbS[5] * r[1] + RbS[8] * r[2]);
+      }
+    }
+  }
+  return Float32Array.from(out);
+}
+
+const _Rb = new Float64Array(9), _M = new Float64Array(9);
+const COMB_REST = (() => { const v = [-1, 0, -0.35], l = Math.hypot(...v); return v.map(x => x / l); })();
+/* v' = sum_b w_b (R_b R_bind_b^T (v - p_bind_b) + x_b), weights normalised per vertex; normals area-weighted
+   through the weld map (seam duplicates share one normal, so the shells don't crack) */
+function applyPose(P, Qt){
+  const {NV, NB, rest, infl, bindPos, bindRT, pos, comb, nrm, acc, faces, weld} = RAT;
+  pos.fill(0); comb.fill(0);
+  for (let b = 0; b < NB; b++){
+    q2m(Qt[b * 4], Qt[b * 4 + 1], Qt[b * 4 + 2], Qt[b * 4 + 3], _Rb);
+    const T = bindRT[b], Rb = _Rb, m = _M;
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++)
+      m[r * 3 + c] = Rb[r * 3] * T[c] + Rb[r * 3 + 1] * T[3 + c] + Rb[r * 3 + 2] * T[6 + c];
+    const bp = bindPos[b];
+    const tx = P[b * 3] - (m[0] * bp[0] + m[1] * bp[1] + m[2] * bp[2]);
+    const ty = P[b * 3 + 1] - (m[3] * bp[0] + m[4] * bp[1] + m[5] * bp[2]);
+    const tz = P[b * 3 + 2] - (m[6] * bp[0] + m[7] * bp[1] + m[8] * bp[2]);
+    const cx = m[0] * COMB_REST[0] + m[1] * COMB_REST[1] + m[2] * COMB_REST[2];
+    const cy = m[3] * COMB_REST[0] + m[4] * COMB_REST[1] + m[5] * COMB_REST[2];
+    const cz = m[6] * COMB_REST[0] + m[7] * COMB_REST[1] + m[8] * COMB_REST[2];
+    const ids = infl[b].ids, ws = infl[b].w, n = ids.length;
+    const m0 = m[0], m1 = m[1], m2 = m[2], m3 = m[3], m4 = m[4], m5 = m[5], m6 = m[6], m7 = m[7], m8 = m[8];
+    for (let k = 0; k < n; k++){
+      const i3 = ids[k] * 3, w = ws[k], x = rest[i3], y = rest[i3 + 1], z = rest[i3 + 2];
+      pos[i3]     += w * (m0 * x + m1 * y + m2 * z + tx);
+      pos[i3 + 1] += w * (m3 * x + m4 * y + m5 * z + ty);
+      pos[i3 + 2] += w * (m6 * x + m7 * y + m8 * z + tz);
+      comb[i3] += w * cx; comb[i3 + 1] += w * cy; comb[i3 + 2] += w * cz;
+    }
+  }
+  acc.fill(0);
+  for (let f = 0; f < faces.length; f += 3){
+    const a = faces[f] * 3, b = faces[f + 1] * 3, c = faces[f + 2] * 3;
+    const e1x = pos[b] - pos[a], e1y = pos[b + 1] - pos[a + 1], e1z = pos[b + 2] - pos[a + 2];
+    const e2x = pos[c] - pos[a], e2y = pos[c + 1] - pos[a + 1], e2z = pos[c + 2] - pos[a + 2];
+    const nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+    for (const v of [weld[faces[f]] * 3, weld[faces[f + 1]] * 3, weld[faces[f + 2]] * 3]){
+      acc[v] += nx; acc[v + 1] += ny; acc[v + 2] += nz;
+    }
+  }
+  for (let i = 0; i < NV; i++){
+    const j = weld[i] * 3, x = acc[j], y = acc[j + 1], z = acc[j + 2], l = Math.hypot(x, y, z);
+    if (l > 1e-24){ nrm[i * 3] = x / l; nrm[i * 3 + 1] = y / l; nrm[i * 3 + 2] = z / l; }   // else keep the last good one
+  }
+  RAT.aPos.needsUpdate = true; RAT.aNrm.needsUpdate = true; RAT.aComb.needsUpdate = true;
+  // eyes + whiskers ride the skull
+  const s = RAT.sk, px = P[s * 3], py = P[s * 3 + 1], pz = P[s * 3 + 2];
+  q2m(Qt[s * 4], Qt[s * 4 + 1], Qt[s * 4 + 2], Qt[s * 4 + 3], _Rb);
+  const o = RAT.eyeOff;
+  [1, -1].forEach((sg, k) => {
+    const lx = o[0], ly = sg * o[1], lz = o[2];
+    RAT.eyes[k].position.set(px + _Rb[0] * lx + _Rb[1] * ly + _Rb[2] * lz, py + _Rb[3] * lx + _Rb[4] * ly + _Rb[5] * lz,
+                             pz + _Rb[6] * lx + _Rb[7] * ly + _Rb[8] * lz);
+  });
+  const L = RAT.wLocal, Wp = RAT.wPos;
+  for (let i = 0; i < L.length; i += 3){
+    const x = L[i], y = L[i + 1], z = L[i + 2];
+    Wp[i] = px + _Rb[0] * x + _Rb[1] * y + _Rb[2] * z;
+    Wp[i + 1] = py + _Rb[3] * x + _Rb[4] * y + _Rb[5] * z;
+    Wp[i + 2] = pz + _Rb[6] * x + _Rb[7] * y + _Rb[8] * z;
+  }
+  RAT.wGeo.attributes.position.needsUpdate = true;
+}
+
+/* ================================================================ pose stream: buffer + 50 Hz -> display interpolation */
+const FR = [];            // {t, brain, pressed, lever, paw, d: Float32Array(65*7)}
+let ph = null;            // display playhead, sim seconds
+const DELAY = 0.05;       // play this far behind the newest frame, so there is always a frame after the playhead
+let recvTimes = [];
+let lastShown = null, shownPressed = false, leverShown = 0;
+function onPose(buf){
+  const f = new Float32Array(buf);
+  if (f.length < 7 || f[0] !== 1.0) return;
+  const nb = f[6] | 0;
+  if (!RAT || nb !== RAT.NB || f.length < 7 + nb * 7){ console.warn('pose frame with', nb, 'bones'); return; }
+  const fr = {t: f[1], brain: f[2] > 0.5, pressed: f[3] > 0.5, lever: f[4], paw: f[5], d: f.subarray(7, 7 + nb * 7)};
+  if (FR.length && fr.t < FR[FR.length - 1].t - 1e-6){ FR.length = 0; ph = null; }      // a new trial
+  FR.push(fr); if (FR.length > 400) FR.splice(0, FR.length - 400);
+  RIG.frames++;
+  const now = performance.now(); recvTimes.push(now); while (recvTimes.length && now - recvTimes[0] > 1000) recvTimes.shift();
+}
+function samplePose(dt){
+  if (!FR.length) return null;
+  const newest = FR[FR.length - 1].t;
+  if (ph === null) ph = FR[0].t;
+  ph += dt;
+  const target = newest - DELAY;
+  if (target - ph > 0.3) ph = target;                        // fell far behind (tab hidden etc.): catch up
+  else ph += (target - ph) * Math.min(1, dt * 1.5);          // gently hold the delay
+  if (ph > newest) ph = newest;                               // never extrapolate
+  if (ph < FR[0].t) ph = FR[0].t;
+  let i = FR.length - 1;
+  while (i > 0 && FR[i].t > ph) i--;
+  const a = FR[i], b = FR[Math.min(i + 1, FR.length - 1)];
+  const al = b.t > a.t ? Math.min(1, Math.max(0, (ph - a.t) / (b.t - a.t))) : 0;
+  const {P, Qt, NB} = RAT;
+  for (let k = 0; k < NB; k++){
+    const o = k * 7;
+    P[k * 3] = a.d[o] + (b.d[o] - a.d[o]) * al;
+    P[k * 3 + 1] = a.d[o + 1] + (b.d[o + 1] - a.d[o + 1]) * al;
+    P[k * 3 + 2] = a.d[o + 2] + (b.d[o + 2] - a.d[o + 2]) * al;
+    let w2 = b.d[o + 3], x2 = b.d[o + 4], y2 = b.d[o + 5], z2 = b.d[o + 6];
+    if (a.d[o + 3] * w2 + a.d[o + 4] * x2 + a.d[o + 5] * y2 + a.d[o + 6] * z2 < 0){ w2 = -w2; x2 = -x2; y2 = -y2; z2 = -z2; }
+    Qt[k * 4] = a.d[o + 3] + (w2 - a.d[o + 3]) * al;         // nlerp (q2m normalises)
+    Qt[k * 4 + 1] = a.d[o + 4] + (x2 - a.d[o + 4]) * al;
+    Qt[k * 4 + 2] = a.d[o + 5] + (y2 - a.d[o + 5]) * al;
+    Qt[k * 4 + 3] = a.d[o + 6] + (z2 - a.d[o + 6]) * al;
+  }
+  return {a, b, al, lever: a.lever + (b.lever - a.lever) * al, shown: al < 0.5 ? a : b};
+}
+
+/* ================================================================ camera: slow orbit, push in at the press */
+/* The front panel sits right in front of the rat's face, so a camera outside the box cannot see the face and
+   the lever from the front. The auto camera works from the rat's side, slightly behind the shoulder and above,
+   through the clear side wall: the whole rat, its paws, the lever and the cue light stay in frame. */
+const camS = {tgt: new THREE.Vector3(0.05, 0, 0.04), dist: 0.52, distTo: 0.52, push: 1, pushTo: 1, el0: 0.42, elTo: 0.42};
+/* Drawer framing. Once the tx drawer covers the lower part of the rat pane, the camera frames the rat in the part
+   it leaves free: a lens shift (setViewOffset: the picture moves up, the canvas keeps the pane's full size and
+   aspect, nothing is cropped or squashed) plus the least pull-back that fits the rat's measured screen box. */
+const frameV = {cover: 0, shift: 0, shiftTo: 0, fit: 1, fitTo: 1, at: 0};
+const FRAME_TOP = 60;     // px of the pane's top kept for the HUD (BRAIN ON · t, the physics line)
+const _pc = new THREE.PerspectiveCamera(), _pv = new THREE.Vector3();
+function autoFrame(){
+  if (!RAT || frameV.cover <= 0){ frameV.shiftTo = 0; frameV.fitTo = 1; return; }
+  // the rat's screen box under the auto camera without the drawer framing (current pose, target distance)
+  const dir = _pv.copy(camera.position).sub(camS.tgt);
+  if (dir.lengthSq() < 1e-10) return;
+  dir.setLength(camS.distTo * camS.pushTo);
+  _pc.fov = camera.fov; _pc.aspect = W3 / H3; _pc.near = camera.near; _pc.far = camera.far; _pc.up.set(0, 0, 1);
+  _pc.position.copy(camS.tgt).add(dir); _pc.lookAt(camS.tgt);
+  _pc.updateMatrixWorld(); _pc.updateProjectionMatrix();
+  const pos = RAT.pos, v = new THREE.Vector3();
+  let x0 = 9, x1 = -9, y0 = 9, y1 = -9;
+  for (const j of RAT.frameIdx){
+    const i = j * 3;
+    v.set(pos[i], pos[i + 1], pos[i + 2]).project(_pc);
+    if (v.x < x0) x0 = v.x; if (v.x > x1) x1 = v.x; if (v.y < y0) y0 = v.y; if (v.y > y1) y1 = v.y;
+  }
+  // NDC y range the rat may use: above the drawer + proof line (12 px gap), below the top HUD lines (60 px)
+  const lo = -1 + 2 * (frameV.cover + 12) / H3, hi = 1 - 2 * FRAME_TOP / H3, mx = 0.06;
+  // pulling back by s shrinks the box about the look-at point (NDC 0,0) by ~1/s
+  const s = Math.min(2.2, Math.max(1, (y1 - y0) / (hi - lo), x1 / (1 - mx), -x0 / (1 - mx)));
+  frameV.fitTo = s;
+  frameV.shiftTo = ((lo + hi) / 2 - (y0 + y1) / (2 * s)) * H3 / 2;   // px: the box's centre to the free part's centre
+}
+let tClock = 0;
+function updateCamera(dt, now){
+  tClock += dt;
+  camS.push += (camS.pushTo - camS.push) * Math.min(1, dt * 1.4);
+  camS.el0 += (camS.elTo - camS.el0) * Math.min(1, dt * 1.4);
+  camS.distTo = FR.length ? 0.44 : 0.52;                       // idle: wider, the trial: closer
+  camS.dist += (camS.distTo - camS.dist) * Math.min(1, dt * 0.9);
+  if (frameV.cover > 0 && now - frameV.at > 300){ frameV.at = now; autoFrame(); }
+  frameV.fit += (frameV.fitTo - frameV.fit) * Math.min(1, dt * 1.8);
+  frameV.shift += (frameV.shiftTo - frameV.shift) * Math.min(1, dt * 1.8);
+  if (Math.abs(frameV.shift) > 0.2) camera.setViewOffset(W3, H3, 0, frameV.shift, W3, H3);
+  else if (camera.view && camera.view.enabled) camera.clearViewOffset();
+  vignette.uniforms.uCy.value = 0.5 + frameV.shift / H3;
+  if (manualCam || !RAT){ controls.update(); return; }
+  const torso = RAT.P;                                       // bone 0 = torso
+  const tx = 0.5 * Math.min(Math.max(torso[0] + 0.05, -0.03), 0.13) + 0.5 * 0.085;
+  const want = new THREE.Vector3(tx, 0.4 * torso[1], 0.036 + 0.3 * Math.max(0, torso[2] - 0.05));
+  camS.tgt.lerp(want, Math.min(1, dt * 1.1));
+  const az = -1.72 + 0.1 * Math.sin(tClock * 2 * Math.PI / 40);
+  const el = camS.el0 + 0.05 * Math.sin(tClock * 2 * Math.PI / 57 + 1.0);
+  const d = camS.dist * camS.push * frameV.fit;
+  camera.position.set(camS.tgt.x + d * Math.cos(el) * Math.cos(az), camS.tgt.y + d * Math.cos(el) * Math.sin(az),
+                      camS.tgt.z + d * Math.sin(el));
+  controls.target.copy(camS.tgt);
+  camera.lookAt(camS.tgt);
+}
+
+/* ================================================================ HUD */
+let proofFull = '', proofShown = 0;
+function typeProof(){
+  if (proofShown < proofFull.length){
+    proofShown++;
+    $('proofTxt').textContent = proofFull.slice(0, proofShown);
+    setTimeout(typeProof, 26);
+  } else setTimeout(() => $('caret').classList.add('off'), 1200);
+}
+function showProof(p){
+  if (!p || p === proofFull) return;
+  proofFull = String(p); proofShown = 0; $('caret').classList.remove('off'); typeProof();
+}
+const TH_DEG = 11.459, BAR_MAX = 30;
+$('barTh').style.left = (TH_DEG / BAR_MAX * 100) + '%';
+$('barLbl').style.left = (TH_DEG / BAR_MAX * 100) + '%';
+const sparkBuf = [];
+function drawSpark(){
+  const c = $('spark'), g = c.getContext('2d'), w = c.width, h = c.height;
+  g.clearRect(0, 0, w, h);
+  g.strokeStyle = '#1f1f28'; g.lineWidth = 1; g.beginPath(); g.moveTo(0, h - 1); g.lineTo(w, h - 1); g.stroke();
+  if (sparkBuf.length < 2) return;
+  const t1 = sparkBuf[sparkBuf.length - 1].t, t0 = t1 - 4, ymax = 0.13;
+  const X = t => (t - t0) / 4 * (w - 8), Y = v => 4 + (1 - Math.min(v, ymax) / ymax) * (h - 8);
+  g.strokeStyle = '#b8b8c4'; g.lineWidth = 2; g.beginPath();
+  sparkBuf.forEach((p, i) => i ? g.lineTo(X(p.t), Y(p.v)) : g.moveTo(X(p.t), Y(p.v))); g.stroke();
+  const last = sparkBuf[sparkBuf.length - 1];
+  g.fillStyle = '#ff3c82'; g.beginPath(); g.arc(X(last.t), Y(last.v), 4, 0, 6.283); g.fill();
+}
+let hudT = 0;
+function updateHud(s, now){
+  if (now - hudT < 45) return; hudT = now;
+  if (!s) return;
+  const f = s.shown;
+  $('tval').textContent = f.t.toFixed(3);
+  const br = $('brain'); br.classList.toggle('on', f.brain); $('brainTxt').textContent = f.brain ? 'BRAIN ON' : 'BRAIN OFF';
+  $('pawV').innerHTML = (f.paw * 1000).toFixed(1) + '<small>mm</small>';
+  const deg = s.lever * 180 / Math.PI;
+  $('angV').innerHTML = deg.toFixed(1) + '<small>°</small>';
+  $('angV').classList.toggle('hot', deg >= TH_DEG);
+  $('barFill').style.width = Math.max(0, Math.min(100, deg / BAR_MAX * 100)) + '%';
+  $('barFill').classList.toggle('hot', deg >= TH_DEG);
+  if (!sparkBuf.length || f.t > sparkBuf[sparkBuf.length - 1].t){ sparkBuf.push({t: f.t, v: f.paw}); if (sparkBuf.length > 300) sparkBuf.shift(); }
+  if (sparkBuf.length && f.t < sparkBuf[sparkBuf.length - 1].t - 1e-6) sparkBuf.length = 0;
+  drawSpark();
+  while (recvTimes.length && now - recvTimes[0] > 1000) recvTimes.shift();      // a rate, not a count since the last frame
+  $('frV').innerHTML = RIG.frames + '<small>frames</small>';
+  $('frSub').innerHTML = '50 Hz control · received <b>' + recvTimes.length + ' Hz</b>';
+  $('hz').textContent = recvTimes.length + ' Hz';
+}
+
+/* The PRESS stamp: once per run, from whichever comes first, the displayed press frame (render loop) or the rig's
+   press event (socket, delayed by the display lag). Its timing is wall-clock (Web Animations, plus a timer that
+   clears it): it is gone ~1.5 s after the press however slowly frames are drawn, even if none are. */
+const PRESS_MS = 1500;
+let pressAnims = [], pressTimer = 0;
+function stopPressFx(){ for (const a of pressAnims) a.cancel(); pressAnims = []; clearTimeout(pressTimer); }
+function pressFx(ev){
+  if (shownPressed) return;
+  shownPressed = true; RIG.pressedShown = true;
+  const f = FR.find(x => x.pressed);                     // the press frame itself, even if the display caught up late
+  const t = f ? f.t : Number(ev && ev.t), rad = f ? f.lever : Number(ev && ev.lever_angle);
+  const tS = Number.isFinite(t) ? t.toFixed(3) : '—', degS = Number.isFinite(rad) ? (rad * 180 / Math.PI).toFixed(1) : '—';
+  camS.pushTo = 0.84; camS.elTo = 0.34;
+  M.cue.emissiveIntensity = 9; cueLight.intensity = 0.0013;
+  $('flashSub').textContent = 'lever ' + degS + '° ≥ 11.5°  ·  t = ' + tS + ' s';
+  $('pchip').innerHTML = 'PRESSED <b>t = ' + tS + ' s</b> · lever ' + degS + '°';
+  stopPressFx();
+  pressAnims = [
+    $('flash').animate([{opacity: 0, transform: 'scale(1.08)'}, {opacity: 1, transform: 'none', offset: 0.06},
+      {opacity: 1, transform: 'none', offset: 0.58}, {opacity: 0, transform: 'scale(.96)'}], {duration: PRESS_MS, easing: 'linear'}),
+    $('frame').animate([{opacity: 1}, {opacity: 0}], {duration: 900, easing: 'ease-out'}),
+  ];
+  pressTimer = setTimeout(stopPressFx, PRESS_MS + 100);  // base opacity is 0: cancelling leaves nothing on screen
+  $('pchip').classList.add('on');                        // CSS transition, delayed: it appears as the stamp fades
+}
+
+/* ================================================================ pons stream pane */
+let shotW = 1280, shotH = 900;
+function shotRect(){
+  const v = $('view'), vw = v.clientWidth, vh = v.clientHeight, s = Math.min(vw / shotW, vh / shotH);
+  return {s, x: (vw - shotW * s) / 2, y: (vh - shotH * s) / 2};
+}
+let shotN = 0, shotTimes = [];
+function onShot(m){
+  const img = $('shot');
+  if (m.w) shotW = m.w; if (m.h) shotH = m.h;
+  img.src = 'data:image/jpeg;base64,' + m.jpg; img.hidden = false; $('idle').style.display = 'none';
+  shotN++; const now = performance.now(); shotTimes.push(now); while (now - shotTimes[0] > 2000) shotTimes.shift();
+  $('shotInfo').innerHTML = '<b>' + (shotTimes.length / 2).toFixed(1) + '</b> fps · ' + shotW + '×' + shotH;
+}
+let lastCur = null;
+function placeCursor(){
+  if (!lastCur) return;
+  const r = shotRect();
+  $('cur').style.transform = `translate(${r.x + lastCur.cx * r.s - 3}px, ${r.y + lastCur.cy * r.s - 2}px)`;
+}
+function onCursor(m){
+  const r = shotRect(), c = $('cur');
+  lastCur = {cx: m.cx, cy: m.cy};
+  c.style.display = 'block';
+  placeCursor();
+  if (m.click){
+    const ring = $('ring');
+    ring.style.left = (r.x + m.cx * r.s) + 'px'; ring.style.top = (r.y + m.cy * r.s) + 'px';
+    ring.animate([{opacity: 1, transform: 'scale(.3)'}, {opacity: 0, transform: 'scale(1.7)'}], {duration: 700, easing: 'ease-out'});
+  }
+}
+
+/* ================================================================ tx panel */
+const TX_ORDER = ['to', 'from', 'selector', 'value', 'pairToken', 'name', 'symbol', 'creator', 'creatorTaxBps', 'image',
+  'socials', 'uint256_0', 'amountIn', 'trailingBytes', 'bytes32_a', 'bytes32_b', 'abi_encoding', 'calldata_bytes',
+  'nonce', 'gas', 'chainId', 'proof', 'description'];
+const TX_WIDE = ['proof', 'description'];      // full width, never cut: the proof is the point of the panel
+// redundant on screen (value is shown in ETH and checked in wei); everything is kept in captured_tx.json
+const txHidden = (k, v) => k === 'value_wei';
+const VERDICT = {
+  dry_captured: 'DRY RUN — pons built the launch tx, the rig refused to sign. <em>No coin was created.</em>',
+  dry_refused_mismatch: 'DRY RUN — the captured tx failed a check. The rig refused to sign. <em>No coin was created.</em>',
+};
+const DEV_VERDICT = 'DEV REPLAY — fake tx, <em>pons was not involved.</em>';
+function fmtVal(v){
+  if (Array.isArray(v)) return v.every(x => x === '' || x === null) ? `[${v.length} × empty]` : v.map(x => x === '' ? '""' : String(x)).join(', ');
+  if (v && typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+function shortVal(s){ return /^0x[0-9a-fA-F]{40,}$/.test(s) && s.length > 24 ? s.slice(0, 10) + '…' + s.slice(-8) : s; }
+function checkOf(c){ if (c === true || (c && c.ok === true)) return 1; if (c === false || (c && c.ok === false)) return -1; return 0; }
+function onTx(m){
+  const f = m.fields || {}, c = m.checks || {};
+  const keys = TX_ORDER.filter(k => k in f).concat(Object.keys(f).filter(k => !TX_ORDER.includes(k)))
+    .filter(k => !txHidden(k, f[k]) || (c[k] && checkOf(c[k]) < 0));
+  let html = '', nOk = 0, nBad = 0;
+  const row = (k, full, ck, wide) => {
+    const r = checkOf(ck); if (r > 0) nOk++; if (r < 0) nBad++;
+    const shown = wide ? full : shortVal(full);
+    const tip = typeof ck === 'object' && ck && ck.expected !== undefined ? full + '\nexpected: ' + ck.expected : full;
+    return `<div class="f${wide ? ' wide' : ''}"><span class="k">${esc(k)}</span><span class="v" title="${esc(tip)}">${esc(shown)}</span>` +
+      `<span class="c${r < 0 ? ' bad' : ''}">${r > 0 ? '✓' : r < 0 ? '✗' : ''}</span></div>`;
+  };
+  const narrow = keys.filter(k => !TX_WIDE.includes(k)), wide = keys.filter(k => TX_WIDE.includes(k));
+  for (const k of narrow) html += row(k, fmtVal(f[k]), c[k], false);
+  for (let i = narrow.length; i % TX_COLS; i++) html += '<div class="f"></div>';     // fill the last row
+  for (const k of wide) html += row(k, fmtVal(f[k]), c[k], true);
+  for (const k of Object.keys(c).filter(k => !(k in f))) html += row('check ' + k, '', c[k], false);
+  $('txgrid').innerHTML = html;
+  $('txwait').style.display = 'none';
+  const v = m.verdict || '';
+  const vt = m.dev ? DEV_VERDICT : VERDICT[v] || esc((m.mode ? m.mode + ' — ' : '') + v + (m.hash ? '  ' + m.hash : '') +
+    (m.broadcast !== undefined ? ' · broadcast ' + m.broadcast : '') + (m.send_error ? ' · send error: ' + m.send_error : ''));
+  $('verdict').innerHTML = vt;
+  $('verdict').className = 'verdict' + (nBad || v === 'dry_refused_mismatch' ? ' bad' : '');
+  // DRY disclosure: the rig answered pons's balance reads with a simulated balance so pons would build the tx
+  const sim = m.simulation || {}, fb = sim.fake_balance_eth;
+  $('txnote').textContent = m.dev ? 'Dev harness replaying a recorded run: this tx was made up by live/dev_viewer.py; ' +
+    'no pons page built it and nothing decoded it.' :
+    fb ? `DRY: pons was shown a simulated ${fb} ETH balance for the throwaway wallet so it would build ` +
+    `the tx; the wallet holds nothing. Nothing was signed or broadcast.` +
+    (sim.ok ? ` eth_call of this exact tx: would create token ${String(sim.predicted_token || '').slice(0, 10)}…` +
+      (sim.gas_estimate ? `, gas ${Number(sim.gas_estimate).toLocaleString('en-US')}` : '') + '.' : '') : '';
+  $('txState').innerHTML = `<b>${nOk}</b>/${nOk + nBad} checks ✓ · ${esc(m.dev ? 'DEV fake tx' : v)}`;
+  // the tx panel becomes a drawer over the lower part of the rat view; the pons stream takes the whole right side
+  const pane = $('txPane');
+  if (!pane.classList.contains('drawer')){
+    pane.classList.add('drawer'); $('simPane').appendChild(pane);
+    pane.animate([{transform: 'translateY(100%)'}, {transform: 'none'}], {duration: 650, easing: 'cubic-bezier(.2,.75,.25,1)'});
+  }
+  $('main').classList.add('txon');   // the ResizeObserver refits the drawer and the 3D view while the columns animate
+  fitTx();
+}
+const TX_COLS = 3;          // narrow fields per row in the drawer
+const DRAWER_MAX = 0.42;    // the drawer never covers more than this share of the rat pane
+function fitTx(){      // every decoded field stays on screen: shrink the type until the drawer fits (no scrolling on video)
+  const pane = $('txPane'), body = pane.querySelector('.body'), g = $('txgrid');
+  if (g.firstChild){
+    const drawer = pane.classList.contains('drawer'), maxH = $('simPane').clientHeight * DRAWER_MAX;
+    for (let fs = 12.5; fs >= 9; fs -= 0.5){
+      g.style.setProperty('--fs', fs + 'px');
+      if (drawer ? pane.offsetHeight <= maxH : body.scrollHeight <= body.clientHeight + 1) break;
+    }
+  }
+  frameDrawer();
+}
+function frameDrawer(){    // what the drawer (and the proof line above it) hides of the rat pane, for the camera
+  const pane = $('txPane'), sim = $('simPane');
+  const cover = pane.classList.contains('drawer') ? pane.offsetHeight : 0;
+  sim.style.setProperty('--cover', cover + 'px');          // the proof line sits just above the drawer
+  const next = cover ? cover + document.querySelector('.hud.bl').offsetHeight + 16 : 0;
+  if (next !== frameV.cover){ frameV.cover = next; frameV.at = 0; autoFrame(); }
+}
+
+/* ================================================================ run control */
+let ws = null, running = false;
+function resetRun(){
+  resetSteps(); FR.length = 0; ph = null; RIG.frames = 0; RIG.done = false; RIG.outcome = null; sparkBuf.length = 0;
+  window.__rigDone = false; window.__rigDoneMsg = null;
+  shownPressed = false; camS.pushTo = 1; camS.elTo = 0.42; M.cue.emissiveIntensity = 0; cueLight.intensity = 0;
+  proofFull = ''; $('proofTxt').textContent = ''; $('txgrid').innerHTML = ''; $('verdict').innerHTML = '';
+  $('txwait').style.display = ''; $('txState').textContent = 'waiting'; $('txnote').textContent = ''; $('prV').textContent = '—'; $('prSub').textContent = 'outcome —';
+  $('cur').style.display = 'none'; lastCur = null;
+  stopPressFx(); $('pchip').classList.remove('on');
+  const pane = $('txPane');
+  if (pane.classList.contains('drawer')){ pane.classList.remove('drawer'); $('main').appendChild(pane); }
+  $('main').classList.remove('txon');
+  frameDrawer();
+}
+// the panes animate between the two layouts: keep the cursor on the page it points at, refit the drawer to the sim
+// pane's width (the drawer's own height is never observed: fitTx changes it) and resize the 3D view with its pane.
+// A 3D resize reallocates every render target (GPU memory churn a busy machine can run out on), so it happens once,
+// when the pane has settled; while the pane animates, the canvas keeps its aspect (object-fit: cover), never stretched.
+let resize3dTimer = 0, fitQueued = false;
+if (window.ResizeObserver){
+  new ResizeObserver(placeCursor).observe($('view'));
+  new ResizeObserver(() => {
+    clearTimeout(resize3dTimer);
+    resize3dTimer = setTimeout(() => { resize3d(); fitTx(); }, 150);
+    if (fitQueued) return;
+    fitQueued = true;
+    setTimeout(() => { fitQueued = false; fitTx(); }, 16);
+  }).observe($('simPane'));
+}
+function start(){
+  if (running || !RAT) return;
+  running = true; resetRun();
+  $('start').hidden = true; $('rec').classList.add('on');
+  const seed = +(Q.get('seed') || (STATUS && STATUS.seed) || 2026);
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/run');
+  ws.binaryType = 'arraybuffer';
+  // LIVE only: the per-process token the rig printed at startup (page URL ?token=...); DRY needs none
+  const token = Q.get('token');
+  ws.onopen = () => { log('connected to the rig · seed ' + seed);
+    ws.send(JSON.stringify(token ? {type: 'start', seed, token} : {type: 'start', seed})); };
+  ws.onmessage = e => {
+    if (typeof e.data !== 'string'){ onPose(e.data); return; }
+    let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+    RIG.events++;
+    handle(m);
+  };
+  ws.onclose = () => {
+    running = false; $('rec').classList.remove('on');
+    if (!RIG.done) log('connection closed before the run finished', 'pk');
+    if (!AUTOSTART){ $('start').hidden = false; $('start').disabled = false; }
+  };
+  ws.onerror = () => log('websocket error', 'pk');
+}
+function handle(m){
+  switch (m.type){
+    case 'log': log(m.msg || ''); break;
+    case 'stage': setStage(m.stage, m.state, m.detail); break;
+    case 'shot': onShot(m); break;
+    case 'cursor': onCursor(m); break;
+    case 'proof': showProof(m.proof); log('proof ' + m.proof, 'hi'); break;
+    case 'press':
+      $('prV').textContent = 't = ' + Number(m.t).toFixed(3) + ' s';
+      if (m.proof) showProof(m.proof);
+      // the stamp goes with the displayed press frame; if rendering is throttled or paused, the event fires it
+      // after the display lag (≤ 0.4 s) instead
+      setTimeout(() => pressFx(m), 1000 * Math.max(0, Math.min(0.4, ph === null ? 0 : Number(m.t) - ph || 0)) + 20);
+      log('PRESS at t = ' + Number(m.t).toFixed(3) + ' s · proof ' + String(m.proof || '').slice(0, 16) + '…', 'pk');
+      break;
+    case 'tx': onTx(m); break;
+    case 'done':
+      RIG.done = true; RIG.outcome = m.outcome;
+      window.__rigDoneMsg = m; window.__rigDone = true;          // live/record.py polls these (its page contract)
+      $('prSub').innerHTML = 'outcome <b>' + esc(m.outcome || '—') + '</b>';
+      log('done · ' + (m.outcome || '') + ' · ' + (m.run_dir || ''), 'hi');
+      window.dispatchEvent(new CustomEvent('rig-done', {detail: m}));
+      break;
+    default: break;
+  }
+}
+$('start').addEventListener('click', start);
+
+/* ================================================================ main loop */
+let lastNow = performance.now(), fpsAcc = 0, fpsN = 0, slowSince = 0;
+function loop(now){
+  requestAnimationFrame(loop);
+  const dt = Math.min(0.1, (now - lastNow) / 1000); lastNow = now;
+  if (RAT){
+    const s = samplePose(dt);
+    if (s){
+      applyPose(RAT.P, RAT.Qt);
+      leverShown = s.lever;
+      RIG.shownT = s.shown.t; RIG.brainOn = s.shown.brain;
+      if (s.shown.pressed && !shownPressed) pressFx(null);
+      updateHud(s, now);
+    }
+    lever.rotation.y = -leverShown;             // hinge axis (0,-1,0): positive angle takes the tip down
+  }
+  updateCamera(dt, now);
+  vignette.uniforms.uSeed.value = (now * 0.001) % 10;
+  composer.render();
+  // frame-rate guard: fewer shells if the machine cannot keep up (a recording must not stutter)
+  fpsAcc += dt; fpsN++;
+  if (fpsAcc > 1){
+    RIG.fps = fpsN / fpsAcc; $('fps').textContent = RIG.fps.toFixed(0) + ' fps';
+    if (RAT && RIG.fps < 28 && RAT.shells.count > 10){
+      slowSince++;
+      if (slowSince >= 2){ RAT.shells.count = Math.max(10, Math.round(RAT.shells.count * 0.66)); U.uNL.value = RAT.shells.count;
+        log('render: ' + RIG.fps.toFixed(0) + ' fps, fur shells reduced to ' + RAT.shells.count); slowSince = 0; }
+    } else slowSince = 0;
+    fpsAcc = 0; fpsN = 0;
+  }
+}
+
+if (Q.get('debug') === '1') window.__rig3d = {THREE, scene, renderer, composer, bloom, vignette, camera, controls, M, U,
+  house, key, rim, fill, cueLight, get RAT(){ return RAT; }, get camS(){ return camS; }, get frameV(){ return frameV; },
+  setManual(v){ manualCam = v; }};
+
+async function boot(){
+  fitStage(); addEventListener('resize', fitStage);
+  requestAnimationFrame(loop);
+  await loadStatus();
+  try {
+    const R = await (await fetch('/rat.json')).json();
+    buildChamber(R.chamber);
+    buildRat(R);
+    $('loading').remove();
+    log(`rat loaded: ${R.n_verts} verts, ${R.n_faces} faces, ${R.n_bones} bones, ${R.weights.reduce((a, w) => a + w.length / 2, 0)} skin influences`);
+  } catch (e){
+    $('loading').textContent = 'could not load /rat.json: ' + e; console.error(e); return;
+  }
+  $('start').disabled = false;
+  if (AUTOSTART) start();
+}
+boot();
+</script>
+</body>
+</html>
