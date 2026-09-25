@@ -5,7 +5,7 @@
 <base href="/">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>labrat · buyback</title>
-<meta name="description" content="Rat buybacks for $LABRAT: every target R-01 hits while it trains adds to the next buyback, and the rat clicks each buy through itself on pons. Buybacks start soon.">
+<meta name="description" content="Rat buybacks for $LABRAT: one buyback an hour, sized by R-01's hit rate at Rat Tiles that hour, and the rat clicks each buy through itself on pons. Buybacks start soon.">
 <meta name="theme-color" content="#000000">
 <meta name="color-scheme" content="dark">
 <meta property="og:type" content="website">
@@ -136,11 +136,11 @@
 <section class="hero trial" id="top">
   <div class="wrap wide trial-hd">
     <p class="eyebrow"><span class="dot"></span>Buyback &middot; Subject R-01 &middot; $LABRAT</p>
-    <h1 class="trial-h">Every hit, a buyback. Every buy, clicked by the rat.</h1>
-    <p class="trial-lead">R-01 trains live below. Each target it hits adds to the next $LABRAT buyback, and each buyback is clicked through by the rat itself on the real pons page, step by step.</p>
+    <h1 class="trial-h">The better it plays, the bigger the buyback.</h1>
+    <p class="trial-lead">R-01 plays Rat Tiles live below. Its hits and misses are counted each hour; on the hour, its hit rate sets the size of one $LABRAT buyback, and the rat clicks that buy through itself on the real pons page.</p>
     <div class="bbk-banner" role="status">
       <span class="bbk-pill">Buybacks start soon</span>
-      <p>The rat's buybacks go live soon. Until then, each buy session below runs on the real pons page and is simulated: checked on the live chain, not sent.</p>
+      <p>The hourly budget is announced when it's ready. Until then, every hour is still counted, and each hourly buy session below runs on the real pons page and is simulated: checked on the live chain, not sent.</p>
     </div>
     <div class="bbk-wallet" id="wallet">
       <span class="bbk-k">Buyback wallet</span>
@@ -203,11 +203,11 @@
         <span class="badge conn" id="rt-badge"><i aria-hidden="true"></i><b id="rt-badge-t">CONNECTING</b></span>
         <span class="bb-conn" id="rt-conn"></span>
       </div>
-      <p class="bb-rule">Our own falling-tiles game, played by R-01. Black tiles slide down the four lanes of a virtual screen. The rat turns its head to put the cursor on the lowest tile and presses the lever to tap it before it slides off the bottom (its network is told where the tiles are as numbers; it never sees a picture). Every tile it taps plays the next note of a public-domain melody, so when R-01 plays well, you hear the tune. Each tap is a whole-body lever press that takes the rat half a second to two seconds, so the tiles start slow and training speeds them up as R-01 improves.<span id="rt-bb" hidden> Every tile R-01 taps also counts as a hit toward the $LABRAT buybacks.</span></p>
+      <p class="bb-rule rt-rule">Our own falling-tiles game, played by R-01. Its head picks a lane; a lever press hits that lane's red button as a tile reaches it. Every hit plays the next note of a public-domain melody.</p>
       <div class="rt-body">
         <figure class="rt-board">
           <div class="rt-screen" id="rt-screen">
-            <canvas id="rt-canvas" role="img" aria-label="The Rat Tiles board: four lanes of falling tiles and R-01's cursor"></canvas>
+            <canvas id="rt-canvas" role="img" aria-label="The Rat Tiles board: four lanes of tiles sliding toward a row of red buttons, with the rat standing in the lane of R-01's cursor"></canvas>
             <div class="rt-empty" id="rt-empty"><b id="rt-empty-t">Connecting to the lab</b><span id="rt-empty-s"></span></div>
           </div>
           <figcaption class="rt-cap" id="rt-cap"></figcaption>
@@ -231,11 +231,12 @@
             <dl class="bb-kv rt-kv">
               <div><dt>Tiles hit</dt><dd id="rt-hits">&mdash;</dd></div>
               <div><dt>Missed</dt><dd id="rt-miss">&mdash;</dd></div>
-              <div><dt>Streak</dt><dd id="rt-streak">&mdash;</dd></div>
+              <div><dt>Hit rate</dt><dd id="rt-rate">&mdash;</dd></div>
               <div><dt>Best streak</dt><dd id="rt-best">&mdash;</dd></div>
             </dl>
           </div>
           <p class="rt-sub" id="rt-sub"></p>
+          <p class="bb-note rt-how">In time, a press is a hit; a press with no tile on the button, or a tile that slides past, counts against it. R-01's network is told where the tiles are as numbers; it never sees a picture, and this view is our drawing of its game. Each press is a whole-body lever press that takes the rat half a second to two seconds, so the tiles start slow and training speeds them up as it improves.<span id="rt-bb" hidden> Its hits, misses and off-tile presses make each hour's hit rate, which sizes that hour's $LABRAT buyback.</span></p>
           <p class="bb-note" id="rt-note">The sound is made in your browser: each note plays when the stream reports that R-01 hit a tile.</p>
         </aside>
       </div>
@@ -251,14 +252,38 @@
         <span class="bb-mode dry" id="bb-test" hidden>Test stream</span>
         <span class="bb-conn" id="bb-conn">loading</span>
       </div>
-      <p class="bb-rule">Every target the rat hits during live training adds <b id="bb-per">a small amount of ETH</b> to the next $LABRAT buyback, funded by the coin's trading fees. Buybacks are batched and capped per hour and per day.<span id="bb-lever" hidden> In the lever task, each clean press counts as a hit.</span> The rule is fixed in code; the rat's hits trigger it.</p>
-      <dl class="bb-kv">
+      <p class="bb-rule">One $LABRAT buyback an hour, sized by how well R-01 played that hour: <b>hourly budget &times; hit rate</b>. Its hits, misses and off-tile presses are counted through the hour (hit rate = hits &divide; all three); on the hour, the rate sets the buy and the rat clicks it through on pons. One buy an hour, instead of one per tile, keeps gas low. The budget comes from the coin's trading fees and is announced when it's ready; fixed caps per buy, per hour and per day apply.<span id="bb-lever" hidden> In the lever task, each clean press counts as a hit.</span></p>
+      <div class="bbh" aria-label="This hour">
+        <div class="bbh-hd">
+          <span class="bbh-k">This hour</span><span class="bbh-t" id="bb-win-t"></span>
+          <span class="bbh-next" id="bb-next" aria-live="off"></span>
+        </div>
+        <div class="bbh-bar" aria-hidden="true"><i id="bb-win-bar"></i></div>
+        <dl class="bb-kv bbh-kv">
+          <div><dt>Hits</dt><dd id="bb-w-hits">&mdash;</dd></div>
+          <div><dt>Missed</dt><dd id="bb-w-miss">&mdash;</dd></div>
+          <div><dt>Off-tile presses</dt><dd id="bb-w-wrong">&mdash;</dd></div>
+          <div class="hot"><dt>Hit rate</dt><dd id="bb-w-rate">&mdash;</dd></div>
+        </dl>
+      </div>
+      <div class="bbf" aria-label="This hour's buy size">
+        <div class="bbf-t"><span>Hourly budget</span><b id="bb-f-budget" class="tba">To be announced</b><small id="bb-f-sub"></small></div>
+        <i class="bbf-op" aria-hidden="true">&times;</i>
+        <div class="bbf-t"><span>Hit rate</span><b id="bb-f-rate">&mdash;</b></div>
+        <i class="bbf-op" id="bb-f-eq" aria-hidden="true">=</i>
+        <div class="bbf-t out"><span id="bb-f-k">Buy on the hour</span><b id="bb-f-buy">&mdash;</b></div>
+      </div>
+      <p class="bbf-note" id="bb-f-note"></p>
+      <div class="bbl" id="bb-last" hidden>
+        <p class="bbh-k" id="bb-last-k">Last hour</p>
+        <p class="bbl-stats" id="bb-last-stats"></p>
+        <p class="bbl-buy" id="bb-last-buy" hidden></p>
+      </div>
+      <dl class="bb-kv bb-tot">
         <div><dt>Hits counted</dt><dd id="bb-hits">&mdash;</dd></div>
-        <div><dt>Pending</dt><dd id="bb-pending">&mdash;</dd></div>
         <div><dt id="bb-buys-k">Simulated buys</dt><dd id="bb-buys">&mdash;</dd></div>
         <div><dt id="bb-out-k">LABRAT (simulated)</dt><dd id="bb-out">&mdash;</dd></div>
       </dl>
-      <p class="bb-split" id="bb-split"></p>
       <ol class="bb-list" id="bb-list" aria-label="Recent buybacks"></ol>
       <p class="bb-note" id="bb-note"></p>
     </section>
@@ -274,7 +299,7 @@
         <span class="bb-mode dry" id="rp-sim">Simulated</span>
         <span class="bb-conn" id="rp-conn"></span>
       </div>
-      <p class="bb-rule">For each buyback, R-01 clicks through the buy itself on the $LABRAT page on pons. The rig lights one target at a time, the rat steers the cursor onto it with its head, and a lever press clicks; presses off the target are ignored. After the rat clicks the amount field, the rig types the batch amount. Wallet details on the page are hidden in this stream.</p>
+      <p class="bb-rule">For each buyback, R-01 clicks through the buy itself on the $LABRAT page on pons. The rig lights one target at a time, the rat steers the cursor onto it with its head, and a lever press clicks; presses off the target are ignored. After the rat clicks the amount field, the rig types the hour's amount. Wallet details on the page are hidden in this stream.</p>
       <div class="rp-body">
         <figure class="rp-screen" id="rp-screen">
           <canvas id="rp-canvas" width="1280" height="900" role="img" aria-label="The pons page as the rat works through the buy"></canvas>
@@ -306,13 +331,13 @@
 <section class="bbk-sec" id="how" aria-labelledby="how-h">
   <div class="wrap wide">
     <h2 id="how-h">How the rat buys back</h2>
-    <p class="bbk-lead">R-01 doesn't know what money is. It plays a clicking game, and a fixed rule in the code turns its clicks into $LABRAT buybacks.</p>
+    <p class="bbk-lead">R-01 doesn't know what money is. It plays a game, and a fixed rule in the code turns how well it plays each hour into one $LABRAT buyback.</p>
     <ol class="bbk-steps">
-      <li><b>It trains live</b><span>R-01 practises aiming its head and pressing the lever to hit targets on its screen. You can watch it above.</span></li>
-      <li><b>Hits fill the buyback</b><span>Every target it hits adds a little ETH to the next buyback. Buybacks are batched and capped per hour and per day.</span></li>
-      <li><b>It goes to pons</b><span>About every 10 minutes, the rig opens the real $LABRAT page on pons and lights one button at a time.</span></li>
-      <li><b>It clicks Buy itself</b><span>The rat's head moves the cursor and its lever press clicks: the amount, Buy LABRAT, then Confirm.</span></li>
-      <li><b>Every buy is checked</b><span>Before anything is sent, the rig checks the transaction: the right coin, the right amount, nothing extra. Then it goes out from the buyback wallet.</span></li>
+      <li><b>It plays live</b><span>R-01 plays Rat Tiles while it trains: its head picks a lane, and a lever press hits that lane's red button as a tile reaches it. You can watch it above.</span></li>
+      <li><b>Hits and misses are counted each hour</b><span>A tile pressed in time is a hit. A tile that slides past, or a press with no tile on the button, counts against it.</span></li>
+      <li><b>On the hour, the hit rate sets the buy</b><span>Hourly budget &times; that hour's hit rate, within fixed caps. One buy an hour instead of one per tile keeps gas low. The budget is announced when it's ready.</span></li>
+      <li><b>The rat clicks the buy through on pons</b><span>The rig opens the real $LABRAT page and lights one button at a time; the rat's head moves the cursor and its lever press clicks: the amount, Buy LABRAT, then Confirm.</span></li>
+      <li><b>Checked, then sent from the buyback wallet</b><span>Before anything is sent, the rig checks the transaction: the right coin, the right amount, nothing extra. Then it goes out from the buyback wallet above.</span></li>
     </ol>
     <p class="bbk-fine">The rat's brain is two trained artificial neural networks driving a simulated body, not a real rat. The same brain launched $LABRAT, and its fingerprint is on-chain.</p>
   </div>

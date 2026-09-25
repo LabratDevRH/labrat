@@ -704,6 +704,13 @@ const PONS = (function ratOnPons() {
     const upd = typeof j.updated === 'string' ? Date.parse(j.updated) : NaN;
     const age = Number.isFinite(upd) ? Math.max(0, (Date.now() - upd) / 1000) : Infinity;
     if (age > BB_STALE_S) return '';
+    // one session an hour, on the hour (UTC): next_buy_at from the engine, else its older seconds-to-go
+    const at = iso(j.next_buy_at) ? Date.parse(j.next_buy_at) : NaN;
+    if (Number.isFinite(at)) {
+      const left = (at - Date.now()) / 1000;
+      return left < 60 ? 'Next buyback session starting shortly'
+        : 'Next buyback session at ' + hhmm(j.next_buy_at) + ' (in about ' + Math.round(left / 60) + ' min)';
+    }
     const next = int(j.next_buy_in_s, 0, 1e7);
     const why = typeof j.next_buy_note === 'string' && NOTE.test(j.next_buy_note) ? j.next_buy_note : '';
     if (next !== null) {
@@ -711,7 +718,7 @@ const PONS = (function ratOnPons() {
       return left < 60 ? 'Next buyback session starting shortly' : 'Next buyback session in about ' + Math.round(left / 60) + ' min';
     }
     if (why && why !== 'waiting for hits') return 'No buyback session scheduled right now (' + why + ')';
-    return 'The next buyback session starts once enough hits are pending';
+    return 'Buyback sessions run once an hour, on the hour (UTC)';
   }
 
   function render() {
@@ -777,8 +784,10 @@ const PONS = (function ratOnPons() {
 
     // figures
     const amt = dec(h && h.amount_eth) || (res && res.eth) || (bbp && bbp.eth);
-    const hits = h && obj(h.batch) ? int(h.batch.hits, 1, 1e6) : null;
-    put(E.amtK, 'Buy size' + (hits ? ' · ' + hits + ' hits' : ''));
+    const bt = h && obj(h.batch), hr = bt && typeof bt.hit_rate === 'number' && bt.hit_rate >= 0 && bt.hit_rate <= 1 ? bt.hit_rate : null;
+    const hits = bt ? int(bt.hits, 1, 1e6) : null;
+    put(E.amtK, 'Buy size' + (hr !== null ? ' · hit rate ' + (hr * 100).toFixed(hr === 1 || hr === 0 ? 0 : 1) + '%'
+      : hits ? ' · ' + hits + ' hits' : ''));
     put(E.amt, amt ? amt + ' ETH' : '—');
     put(E.outK, sim ? 'LABRAT (simulated)' : 'LABRAT bought');
     put(E.out, res && res.ok && res.out ? res.out : bbp && bbp.out ? bbp.out : live && !res ? 'pending' : '—');
@@ -912,11 +921,18 @@ const PONS = (function ratOnPons() {
 /* ------------------------------------------------------------------ Rat Tiles: R-01 plays piano
    A training run whose hello says task "tiles" also streams, on the relay socket the 3D view uses (live.js hands them
    over through onTiles; the relay replays the newest snapshot to a late joiner):
-     {"type":"tiles","t","song","speed","lanes":4,"cursor":[x,y],"tiles":[[id,lane,y,h,state],...],"note_i"}
-         at most 10 a second; x, y and h in screen units (0..1, y down; y is a tile's centre); state "up"|"hit"|"miss";
-         speed in screen heights per second; the lanes split the screen's width equally
-     {"type":"tile","id","lane","result":"hit"|"miss"|"wrong","note_i","song"}   once per tile outcome
-   This panel draws the board a fifth of a second behind the stream (interpolating between snapshots) and keeps the score.
+     {"type":"tiles","t","song","speed","lanes":4,"cursor":[x,y],"tiles":[[id,lane,y,h,state],...],"note_i",
+      "hit_y","window"}
+         about 8 a second; x, y and h in screen units (0..1, y down; y is a tile's centre); state "up"|"hit"|"miss";
+         speed in screen heights per second; the lanes split the screen's width equally. hit_y is the line of red
+         buttons near the bottom and window the half-height of the timing window around it (0.86 / 0.06 when absent).
+     {"type":"tile","id","lane","result":"hit"|"miss"|"wrong","note_i","song","timing"}   once per tile outcome
+   The rule: the cursor's x (where R-01's head points) picks the lane; a lever press presses that lane's button. It is
+   a hit only while a tile is on the hit line in that lane; a press with no tile on the line there is "wrong"; a tile
+   that slides past the line untapped is a "miss". timing: seconds early (-) or late (+) of perfect, for hits.
+   This panel draws that screen as a runway in perspective (a drawing of the game's state: every tile, the cursor's
+   lane and each outcome come from the stream; the rat on the runway is the labrat logo, standing in the cursor's
+   lane), a quarter of a second behind the stream, interpolating between snapshots, and keeps the score.
    Sound: nothing is created until the viewer taps "Tap to hear R-01 play" (no AudioContext exists before that tap).
    After it, each hit plays that tile's note of the song (assets/songs.json: public-domain melodies) with a piano-like
    tone made in the browser (WebAudio oscillators and a short noise knock; no recordings).
@@ -928,16 +944,17 @@ const TILES = (function ratTiles() {
   const E = sec ? { badge: $('#rt-badge'), badgeT: $('#rt-badge-t'), conn: $('#rt-conn'), screen: $('#rt-screen'),
     cv: $('#rt-canvas'), emptyT: $('#rt-empty-t'), emptyS: $('#rt-empty-s'), cap: $('#rt-cap'), songK: $('#rt-song-k'),
     song: $('#rt-song'), comp: $('#rt-composer'), pd: $('#rt-pd'), notes: $('#rt-notes'), notesT: $('#rt-notes-t'),
-    hits: $('#rt-hits'), miss: $('#rt-miss'), streak: $('#rt-streak'), best: $('#rt-best'), sub: $('#rt-sub'),
+    hits: $('#rt-hits'), miss: $('#rt-miss'), rate: $('#rt-rate'), best: $('#rt-best'), sub: $('#rt-sub'),
     listen: $('#rt-listen'), mute: $('#rt-mute'), bb: $('#rt-bb') } : null;
   const cx = E && Object.values(E).every(Boolean) && E.cv.getContext ? E.cv.getContext('2d') : null;
   const panel = !!cx;
 
-  const DELAY = 0.2;         // s: the board plays this far behind the newest snapshot (the stream's jitter buffer)
+  const DELAY = 0.25;        // s: the board plays this far behind the newest snapshot (the stream's jitter buffer)
   const STALE_S = 4;         // no snapshot for this long: the board stops (the run may be between attempts)
   const LATE_S = 0.6;        // a hit due longer ago than this makes no sound (a hidden tab catching up)
   const BEAT_S = 0.6;        // one beat of a melody: how long a note's key is held (at least 0.8 s: the rat is slow)
   const MAX_LANES = 8;
+  const HIT_Y = 0.86, WINDOW = 0.06;   // the hit line and the timing window's half-height, when a snapshot has none
   const fin = v => typeof v === 'number' && Number.isFinite(v);
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
   const sid = s => (typeof s === 'string' && /^[a-z0-9_-]{1,40}$/.test(s)) ? s : null;
@@ -945,6 +962,7 @@ const TILES = (function ratTiles() {
   const isTestHello = h => !!h && (h.test === true || /^\s*TEST\b/.test(String(h.label || '')));
   const put = (el, s) => { const t = String(s == null ? '' : s); if (el.textContent !== t) el.textContent = t; };
   const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+  const ratePct = (h, n) => n > 0 ? (h / n * 100).toFixed(h === n || h === 0 ? 0 : 1) + '%' : '—';
 
   /* ---- the melodies (assets/songs.json, the same file the training env reads) */
   const SEMI = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
@@ -1046,15 +1064,16 @@ const TILES = (function ratTiles() {
     st: null,                  // {live, test, streaming, task, run} from the 3D view (or this panel's own socket)
     open: false, wasOpen: false,
     snaps: [], lastAt: 0, play: null, lastT: 0,
-    lanes: 4, song: null, noteI: null, firstSeen: null, speed: null,
+    lanes: 4, hitY: HIT_Y, win: WINDOW, song: null, noteI: null, firstSeen: null, speed: null,
     results: new Map(),        // note index -> 'hit' | 'miss', this play of the song
-    tileState: new Map(), tileNote: new Map(),   // tile id -> result / note index, from the tile events of this attempt
-    hits: 0, misses: 0, wrong: 0, streak: 0, best: 0, attempt: null,
+    tileState: new Map(), tileNote: new Map(), hitAt: new Map(),   // tile id -> result / note index / when it was hit
+    hits: 0, misses: 0, wrong: 0, streak: 0, best: 0, attempt: null, streakAt: -9,
     run: null, had: false,
-    pending: [], fx: [], trail: [],
+    pending: [], fx: [], btn: [],
+    rat: { x: 1.5, v: 0, face: 1, faceK: 1, pressAt: -9, pressLane: null, run: 0 },
     sound: false, bbTiles: false,
   };
-  let stripKey = null, bars = [], lastMode = '', raf = 0, visible = true, W = 0, H = 0, dpr = 1;
+  let stripKey = null, bars = [], lastMode = '', raf = 0, visible = true, W = 0, H = 0, dpr = 1, lastDraw = 0;
 
   function mode(now) {
     const st = S.st;
@@ -1069,12 +1088,12 @@ const TILES = (function ratTiles() {
   function newRun(run) {
     S.run = run; S.had = false;
     S.hits = S.misses = S.wrong = S.streak = S.best = 0; S.attempt = null;
-    S.song = null; S.noteI = S.firstSeen = null; S.results.clear(); S.tileState.clear(); S.tileNote.clear();
-    S.snaps.length = 0; S.play = null; S.pending.length = 0; S.fx.length = 0; S.trail.length = 0;
+    S.song = null; S.noteI = S.firstSeen = null; S.results.clear(); S.tileState.clear(); S.tileNote.clear(); S.hitAt.clear();
+    S.snaps.length = 0; S.play = null; S.pending.length = 0; S.fx.length = 0; S.btn.length = 0;
   }
   function newPlay(song, noteI) {
     S.song = song; S.noteI = noteI; S.firstSeen = noteI;
-    S.results.clear(); S.tileState.clear(); S.tileNote.clear();
+    S.results.clear(); S.tileState.clear(); S.tileNote.clear(); S.hitAt.clear();
   }
 
   /* st.stream (from live.js, or from onRaw): the relay's training session, null or {live, test, task, run}. It does
@@ -1097,7 +1116,7 @@ const TILES = (function ratTiles() {
   function onRelay(open) {
     S.open = !!open;
     if (S.open) S.wasOpen = true;
-    if (panel) renderUi();
+    if (panel) { renderUi(); kick(); }
   }
 
   /* ---- the stream */
@@ -1115,6 +1134,8 @@ const TILES = (function ratTiles() {
     const c = m.cursor;
     return { t: fin(m.t) ? m.t : null, song: sid(m.song), lanes, tiles, byId: new Map(tiles.map(t => [t.id, t])),
              speed: fin(m.speed) && m.speed > 0 && m.speed < 20 ? m.speed : null,
+             hitY: fin(m.hit_y) && m.hit_y >= 0.5 && m.hit_y <= 0.98 ? m.hit_y : null,
+             win: fin(m.window) && m.window > 0 && m.window <= 0.3 ? m.window : null,
              cursor: Array.isArray(c) && fin(c[0]) && fin(c[1]) && c[0] >= 0 && c[1] >= 0 ? [clamp(c[0], 0, 1), clamp(c[1], 0, 1)] : null,
              noteI: Number.isInteger(m.note_i) && m.note_i >= 0 && m.note_i < 100000 ? m.note_i : null };
   }
@@ -1132,6 +1153,8 @@ const TILES = (function ratTiles() {
       if (S.snaps.length > 40) S.snaps.splice(0, S.snaps.length - 40);
       S.lastAt = now; S.had = true; S.lanes = s.lanes;
       if (s.speed) S.speed = s.speed;
+      S.hitY = s.hitY !== null ? s.hitY : HIT_Y;
+      S.win = s.win !== null ? s.win : WINDOW;
       if (s.song && (s.song !== S.song || (s.noteI !== null && S.noteI !== null && s.noteI < S.noteI))) newPlay(s.song, s.noteI);
       if (s.noteI !== null) { S.noteI = s.noteI; if (S.firstSeen === null) S.firstSeen = s.noteI; }
       loadSongs();
@@ -1141,7 +1164,8 @@ const TILES = (function ratTiles() {
     }
     if (m.type !== 'tile' || !['hit', 'miss', 'wrong'].includes(m.result)) return;
     const ev = { result: m.result, id: Number.isInteger(m.id) ? m.id : null, lane: Number.isInteger(m.lane) && m.lane >= 0 && m.lane < MAX_LANES ? m.lane : null,
-                 noteI: Number.isInteger(m.note_i) && m.note_i >= 0 && m.note_i < 100000 ? m.note_i : null, song: sid(m.song) };
+                 noteI: Number.isInteger(m.note_i) && m.note_i >= 0 && m.note_i < 100000 ? m.note_i : null, song: sid(m.song),
+                 timing: fin(m.timing) && Math.abs(m.timing) < 10 ? m.timing : null };
     S.pending.push({ due: now + DELAY, kind: 'tile', ev });
     kick();
   }
@@ -1185,16 +1209,30 @@ const TILES = (function ratTiles() {
     const cursor = ca && cb ? [ca[0] + (cb[0] - ca[0]) * al, ca[1] + (cb[1] - ca[1]) * al] : near.cursor;
     return { tiles, cursor, lanes: b.lanes };
   }
-  function activeTile(smp) {
-    let best = null;
-    for (const t of smp.tiles) {
-      const st = S.tileState.get(t.id) || t.state;
-      if (st === 'up' && t.y - t.h / 2 < 1 && (!best || t.y > best.y)) best = t;
-    }
-    return best;
-  }
 
   /* ---- tile events, applied when the board reaches them */
+  function judge(t) {                           // a hit's timing, in words
+    if (!fin(t)) return '';
+    return Math.abs(t) * (S.speed || 0.3) <= Math.max(0.015, S.win * 0.5) ? 'Perfect' : t < 0 ? 'Early' : 'Late';
+  }
+  function press(now, lane, kind) {
+    const R = S.rat;
+    R.pressAt = now; R.pressLane = lane;
+    S.btn[lane] = { at: now, kind };
+  }
+  function makeFx(kind, at, lane, o) {
+    const f = Object.assign({ kind, at, lane }, o || {});
+    if (!RM.matches) {
+      const n = kind === 'hit' ? 26 : kind === 'miss' ? 11 : 0;
+      f.parts = [];
+      for (let i = 0; i < n; i++) {
+        f.parts.push(kind === 'hit'
+          ? { a: -Math.PI * (0.06 + 0.88 * Math.random()), sp: 0.28 + Math.random() * 0.62, r: 1.1 + Math.random() * 2.3, c: Math.random() }
+          : { a: Math.random() * Math.PI * 2, sp: 0.03 + Math.random() * 0.06, r: 0.012 + Math.random() * 0.016, c: Math.random() });
+      }
+    }
+    return f;
+  }
   function pump(now) {
     advance(now);
     let changed = false;
@@ -1202,156 +1240,573 @@ const TILES = (function ratTiles() {
       const p = S.pending.shift();
       changed = true;
       if (p.kind === 'episode') {
-        S.attempt = p.ev; S.tileState.clear(); S.tileNote.clear();
+        S.attempt = p.ev; S.tileState.clear(); S.tileNote.clear(); S.hitAt.clear();
         continue;
       }
       const ev = p.ev, late = now - p.due > LATE_S;
       if (ev.song && ev.song !== S.song) newPlay(ev.song, ev.noteI);
       const smp = sample(), L = S.lanes;
       const tile = smp && ev.id !== null ? smp.tiles.find(t => t.id === ev.id) : null;
-      const lane = tile ? tile.lane : ev.lane !== null ? Math.min(ev.lane, L - 1) : 0;
       const cur = smp && smp.cursor;
+      const curLane = cur ? Math.min(L - 1, Math.floor(cur[0] * L)) : 0;
+      // a wrong press names the lane the press landed in (its id is the lowest tile's); the others, the tile's lane
+      const lane = Math.min(L - 1, ev.result === 'wrong' ? (ev.lane !== null ? ev.lane : curLane)
+        : tile ? tile.lane : ev.lane !== null ? ev.lane : curLane);
       if (ev.result === 'hit') {
-        S.hits++; S.streak++; S.best = Math.max(S.best, S.streak);
+        S.hits++; S.streak++; S.best = Math.max(S.best, S.streak); S.streakAt = now;
         if (ev.noteI !== null) S.results.set(ev.noteI, 'hit');
-        if (ev.id !== null) { S.tileState.set(ev.id, 'hit'); if (ev.noteI !== null) S.tileNote.set(ev.id, ev.noteI); }
+        if (ev.id !== null) { S.tileState.set(ev.id, 'hit'); S.hitAt.set(ev.id, now); if (ev.noteI !== null) S.tileNote.set(ev.id, ev.noteI); }
         const song = SONGS.get(S.song), note = song && ev.noteI !== null ? song.notes[ev.noteI] : null;
         if (note && S.sound && !late) Piano.play(note.midi, note.beats);
-        S.fx.push({ kind: 'hit', at: now, id: ev.id, lane, y: tile ? tile.y : cur ? cur[1] : 0.7, label: note ? note.name : '' });
+        press(now, lane, 'hit');
+        S.fx.push(makeFx('hit', now, lane, { label: note ? note.name : '', judge: judge(ev.timing) }));
       } else if (ev.result === 'miss') {
         S.misses++; S.streak = 0;
         if (ev.noteI !== null) S.results.set(ev.noteI, 'miss');
         if (ev.id !== null) S.tileState.set(ev.id, 'miss');
-        S.fx.push({ kind: 'miss', at: now, lane });
+        S.fx.push(makeFx('miss', now, lane));
       } else {
         S.wrong++; S.streak = 0;
-        S.fx.push({ kind: 'wrong', at: now, x: cur ? cur[0] : (lane + 0.5) / L, y: cur ? cur[1] : 0.8 });
+        press(now, lane, 'wrong');
+        S.fx.push(makeFx('wrong', now, lane));
       }
     }
-    if (S.fx.length) S.fx = S.fx.filter(f => now - f.at < 1.2);
+    if (S.fx.length) S.fx = S.fx.filter(f => now - f.at < 1.3);
     if (changed) renderUi();
   }
 
-  /* ---- drawing */
-  const INK = '#0c0818', BOARD = '#ebe5f5', GOLD = '#F5AC29', MAG = '#D60C94';
-  function rrect(x, y, w, h, r) {
-    r = Math.min(r, w / 2, h / 2);
-    cx.beginPath(); cx.moveTo(x + r, y); cx.arcTo(x + w, y, x + w, y + h, r); cx.arcTo(x + w, y + h, x, y + h, r);
-    cx.arcTo(x, y + h, x, y, r); cx.arcTo(x, y, x + w, y, r); cx.closePath();
+  /* ---- the scene: the rat's screen as a runway under a glowing sky, the lanes meeting at a sun on the horizon.
+     Screen y (down) maps to the runway's depth with a true perspective, so a tile's speed along its lane is the
+     stream's speed and it grows as it comes closer. */
+  const Y_FAR = -0.2;                       // the far end of the rat's screen that has room on the runway
+  const V = { key: '', sky: null, track: null, g: null, rat: null, ratW: 0, ratH: 0, ratPad: 0, notes: null, bokeh: null, amb: null };
+  const TAU = Math.PI * 2;
+
+  function geom() {
+    const portrait = H > W * 1.02;
+    const hy = H * (portrait ? 0.15 : 0.165);          // the horizon: where the lanes meet
+    const Sa = H * (portrait ? 0.34 : 0.35);           // the row of y = Y_FAR
+    const Sc = H * (portrait ? 0.85 : 0.86);           // the row of y = 1 (the bottom edge of the rat's screen)
+    const p = Sa - hy, q = Sc - hy;
+    const yc = (q - p * Y_FAR) / (q - p), A = q * (yc - 1);
+    const nearHalf = Math.min(W * (portrait ? 0.54 : 0.47), H * 0.66);
+    const g = { W, H, hy, Sa, Sc, q, yc, A, nearHalf, vx: W / 2, portrait };
+    g.sy = y => hy + A / Math.max(0.03, yc - y);
+    g.yOf = s => yc - A / Math.max(1e-3, s - hy);
+    g.half = s => nearHalf * (s - hy) / q;
+    g.X = (u, s) => g.vx + (u - 0.5) * 2 * g.half(s);
+    return g;
   }
-  // between sessions: a dark, empty board (lanes and faint outlines only) under the standby message
-  function drawIdle() {
-    cx.fillStyle = '#0b0519'; cx.fillRect(0, 0, W, H);
-    const L = S.lanes, lw = W / L;
-    cx.strokeStyle = 'rgba(136,8,181,.32)'; cx.lineWidth = 1;
-    for (let k = 1; k < L; k++) { const x = Math.round(k * lw) + 0.5; cx.beginPath(); cx.moveTo(x, 0); cx.lineTo(x, H); cx.stroke(); }
-    cx.strokeStyle = 'rgba(210,192,240,.12)'; cx.fillStyle = 'rgba(210,192,240,.035)'; cx.lineWidth = 1;
-    [[0, 0.16], [2, 0.44], [1, 0.72], [3, 1.0]].forEach(([lane, y]) => {
-      if (lane >= L) return;
-      rrect(lane * lw + lw * 0.05, (y - 0.12) * H, lw * 0.9, 0.24 * H, 4); cx.fill(); cx.stroke();
+  function btnGeom(g, L) {
+    const sb = g.sy(S.hitY), lw = 2 * g.half(sb) / L, rx = lw * 0.3, ry = rx * 0.44;
+    return { sb, lw, rx, ry, d: ry * 0.72 };
+  }
+
+  /* sprites, made once: soft bokeh discs, music-note glyphs (drawn as paths), and the rat (the labrat logo with its
+     black background keyed out) */
+  function sprites() {
+    if (V.notes) return;
+    const mk = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return [c, c.getContext('2d')]; };
+    V.bokeh = [[255, 214, 130], [255, 140, 210], [205, 175, 255], [255, 255, 255]].map(([r, gg, b]) => {
+      const [c, x] = mk(64, 64), gr = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gr.addColorStop(0, `rgba(${r},${gg},${b},.95)`); gr.addColorStop(0.55, `rgba(${r},${gg},${b},.5)`);
+      gr.addColorStop(0.8, `rgba(${r},${gg},${b},.18)`); gr.addColorStop(1, `rgba(${r},${gg},${b},0)`);
+      x.fillStyle = gr; x.fillRect(0, 0, 64, 64); return c;
     });
-    cx.fillStyle = 'rgba(234,53,96,.3)'; cx.fillRect(0, H - 3, W, 3);
-  }
-  function draw(now, m) {
-    cx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (m !== 'live' && m !== 'test') { S.trail.length = 0; drawIdle(); return; }
-    cx.fillStyle = BOARD; cx.fillRect(0, 0, W, H);
-    const smp = S.snaps.length ? sample() : null;
-    const L = smp ? smp.lanes : S.lanes, lw = W / L, pad = Math.max(2, lw * 0.035);
-    const act = smp && (m === 'live' || m === 'test') ? activeTile(smp) : null;
-    if (act) { cx.fillStyle = 'rgba(214,12,148,.07)'; cx.fillRect(act.lane * lw, 0, lw, H); }
-    cx.strokeStyle = 'rgba(75,4,196,.18)'; cx.lineWidth = 1;
-    for (let k = 1; k < L; k++) { const x = Math.round(k * lw) + 0.5; cx.beginPath(); cx.moveTo(x, 0); cx.lineTo(x, H); cx.stroke(); }
-    cx.fillStyle = 'rgba(234,53,96,.55)'; cx.fillRect(0, H - 3, W, 3);           // the edge a tile must not slide past
-    const fs = Math.max(10, Math.min(20, lw * 0.16));
-    if (smp) {
-      for (const t of smp.tiles) {
-        const x0 = t.lane * lw + pad, w = lw - 2 * pad, y0 = (t.y - t.h / 2) * H, h = t.h * H;
-        if (y0 > H || y0 + h < 0) continue;
-        const st = S.tileState.get(t.id) || t.state;
-        rrect(x0, y0, w, h, 4);
-        if (st === 'hit') {
-          cx.fillStyle = 'rgba(245,172,41,.24)'; cx.fill();
-          cx.strokeStyle = 'rgba(232,110,61,.5)'; cx.lineWidth = 1.5; cx.stroke();
-          const ni = S.tileNote.get(t.id), song = SONGS.get(S.song), note = song && ni !== undefined ? song.notes[ni] : null;
-          if (note) {
-            cx.fillStyle = '#9a4a0c'; cx.font = '600 ' + fs + 'px "JetBrains Mono", ui-monospace, monospace';
-            cx.textAlign = 'center'; cx.textBaseline = 'middle'; cx.fillText(note.name, x0 + w / 2, y0 + h / 2);
-          }
-        } else if (st === 'miss') {
-          cx.fillStyle = 'rgba(234,53,96,.38)'; cx.fill();
-        } else {
-          cx.fillStyle = INK; cx.fill();
-          if (t === act) { cx.strokeStyle = GOLD; cx.lineWidth = 2.5; rrect(x0 + 1.25, y0 + 1.25, w - 2.5, h - 2.5, 3.5); cx.stroke(); }
+    const glyph = (kind, col) => {
+      const [c, x] = mk(96, 96);
+      x.fillStyle = x.strokeStyle = col; x.lineCap = 'round'; x.lineJoin = 'round';
+      const head = (hx, hy) => { x.save(); x.translate(hx, hy); x.rotate(-0.42); x.beginPath(); x.ellipse(0, 0, 11, 7.6, 0, 0, TAU); x.fill(); x.restore(); };
+      const shape = () => {
+        x.lineWidth = 4.2;
+        if (kind === 0) {             // an eighth note
+          head(38, 68); x.beginPath(); x.moveTo(47.8, 64); x.lineTo(47.8, 20); x.stroke();
+          x.beginPath(); x.moveTo(47.8, 20); x.bezierCurveTo(56, 29, 68, 33, 62, 52); x.stroke();
+        } else if (kind === 1) {      // two beamed eighths
+          head(27, 70); head(63, 62);
+          x.beginPath(); x.moveTo(36.8, 66); x.lineTo(36.8, 27); x.moveTo(72.8, 58); x.lineTo(72.8, 19); x.stroke();
+          x.beginPath(); x.moveTo(35, 24); x.lineTo(74.6, 15); x.lineTo(74.6, 25); x.lineTo(35, 34); x.closePath(); x.fill();
+        } else {                      // a quarter note
+          head(40, 68); x.beginPath(); x.moveTo(49.8, 64); x.lineTo(49.8, 18); x.stroke();
         }
+      };
+      x.shadowColor = col; x.shadowBlur = 16; shape(); x.shadowBlur = 6; shape();
+      return c;
+    };
+    V.notes = [0, 1, 2].map(k => ['#fff1fb', '#ffd776', '#ffb3e6'].map(col => glyph(k, col)));
+    // floating notes and bokeh: fixed pseudo-random layout (the same on every visit)
+    let seed = 7;
+    const R = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    V.amb = {
+      bokeh: Array.from({ length: 16 }, () => ({ x: R(), y: 0.02 + R() * 0.5, r: 0.012 + R() * 0.04, c: Math.floor(R() * 4),
+        a: 0.25 + R() * 0.45, sp: 0.1 + R() * 0.25, tw: 0.6 + R() * 1.4, ph: R() * TAU })),
+      notes: Array.from({ length: 11 }, () => ({ xs: Array.from({ length: 6 }, () => R()), y0: 0.4 + R() * 0.18,
+        rise: 0.32 + R() * 0.28, dur: 7 + R() * 6, l0: R(), s: 0.05 + R() * 0.045, k: Math.floor(R() * 3), c: Math.floor(R() * 3),
+        a: 0.45 + R() * 0.4, ph: R() * TAU, rot: (R() - 0.5) * 0.5 })),
+    };
+    // the rat: the owner's pixel-art logo (a rat on black), cropped to the rat, its black keyed to transparent, with a
+    // soft violet outline so it reads on the bright runway
+    const img = new Image();
+    img.decoding = 'async';
+    img.onload = () => {
+      const nw = img.naturalWidth, nh = img.naturalHeight;
+      const sx = 60 / 1254 * nw, sy0 = 318 / 1254 * nh, sw = 1150 / 1254 * nw, sh = 650 / 1254 * nh;
+      const tw = 520, th = Math.round(tw * 650 / 1150), pad = 16;
+      const [k, kx] = mk(tw, th);
+      kx.imageSmoothingQuality = 'high';
+      kx.drawImage(img, sx, sy0, sw, sh, 0, 0, tw, th);
+      let keyed = true;
+      try {
+        const d = kx.getImageData(0, 0, tw, th), px = d.data;
+        for (let i = 0; i < px.length; i += 4) {
+          const m = Math.max(px[i], px[i + 1], px[i + 2]);
+          px[i + 3] = Math.round(clamp((m - 28) / 44, 0, 1) * 255);
+        }
+        kx.putImageData(d, 0, 0);
+      } catch (e) { keyed = false; }
+      const [c, x] = mk(tw + 2 * pad, th + 2 * pad);
+      if (keyed) { x.shadowColor = 'rgba(46,8,96,.85)'; x.shadowBlur = 9; x.shadowOffsetY = 2; }
+      x.drawImage(k, pad, pad);
+      V.rat = c; V.ratW = tw; V.ratH = th; V.ratPad = pad; V.ratKeyed = keyed;
+      if (!raf) draw(performance.now() / 1000, mode(performance.now() / 1000), 0);
+    };
+    img.src = 'assets/labrat-logo.jpg';
+  }
+
+  /* the parts of the picture that only change with the size: the sky, and the runway with its hit line and sockets */
+  function layers(g, L) {
+    const key = [W, H, dpr, L, S.hitY, S.win].join(',');
+    if (V.key === key && V.sky) return;
+    V.key = key;
+    const mk = () => {
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(W * dpr)); c.height = Math.max(1, Math.round(H * dpr));
+      const x = c.getContext('2d'); x.setTransform(dpr, 0, 0, dpr, 0, 0); return [c, x];
+    };
+    const off = (s, a, b) => clamp((s - a) / (b - a), 0, 1);
+    // the sky: deep violet overhead, a sunset band on the horizon, magenta haze under it
+    const [sky, a] = mk();
+    const hf = g.hy / H;
+    let gr = a.createLinearGradient(0, 0, 0, H);
+    gr.addColorStop(0, '#16043a'); gr.addColorStop(hf * 0.45, '#3b0c8c'); gr.addColorStop(hf * 0.82, '#a01ea4');
+    gr.addColorStop(hf, '#ff9a5e'); gr.addColorStop(Math.min(1, hf + 0.06), '#ea3f8a');
+    gr.addColorStop(Math.min(1, hf + 0.3), '#8a18ac'); gr.addColorStop(1, '#2c0768');
+    a.fillStyle = gr; a.fillRect(0, 0, W, H);
+    const R0 = Math.max(W, H) * 0.8;
+    gr = a.createRadialGradient(g.vx, g.hy, 0, g.vx, g.hy, R0);
+    gr.addColorStop(0, 'rgba(255,252,232,1)'); gr.addColorStop(0.025, 'rgba(255,240,170,.95)');
+    gr.addColorStop(0.08, 'rgba(252,196,92,.55)'); gr.addColorStop(0.2, 'rgba(245,116,84,.25)');
+    gr.addColorStop(0.45, 'rgba(214,12,148,.1)'); gr.addColorStop(1, 'rgba(214,12,148,0)');
+    a.fillStyle = gr; a.fillRect(0, 0, W, H);
+    const blob = (x, y, rw, rh, col, al) => {
+      a.save(); a.translate(x, y); a.scale(1, rh / rw);
+      const b = a.createRadialGradient(0, 0, 0, 0, 0, rw);
+      b.addColorStop(0, `rgba(${col},${al})`); b.addColorStop(0.6, `rgba(${col},${al * 0.45})`); b.addColorStop(1, `rgba(${col},0)`);
+      a.fillStyle = b; a.beginPath(); a.arc(0, 0, rw, 0, TAU); a.fill(); a.restore();
+    };
+    blob(g.vx, g.hy, W * 0.75, H * 0.07, '255,210,150', 0.55);                         // the horizon's glow
+    [[0.1, 0.012, 0.3, 0.03, 0.5], [0.9, 0.006, 0.34, 0.034, 0.45], [0.3, -0.01, 0.2, 0.018, 0.35],
+     [0.72, -0.014, 0.22, 0.02, 0.35], [0.02, 0.1, 0.3, 0.05, 0.2], [0.98, 0.13, 0.3, 0.055, 0.2],
+     [0.16, -0.1, 0.24, 0.022, 0.12], [0.84, -0.12, 0.28, 0.025, 0.12]]
+      .forEach(([x, dy, w, h, al]) => blob(x * W, g.hy + dy * H, w * W, h * H, '255,222,240', al));   // clouds
+    V.sky = sky;
+
+    // the runway
+    const [trk, b] = mk();
+    const top = g.hy + 0.5, bot = H + 4;
+    const quad = (u0, u1, s0, s1) => { b.beginPath(); b.moveTo(g.X(u0, s0), s0); b.lineTo(g.X(u1, s0), s0); b.lineTo(g.X(u1, s1), s1); b.lineTo(g.X(u0, s1), s1); b.closePath(); };
+    b.save(); b.shadowColor = 'rgba(255,120,200,.6)'; b.shadowBlur = 34;
+    quad(0, 1, g.Sa - (g.Sa - g.hy) * 0.35, bot); b.fillStyle = 'rgba(255,236,248,.5)'; b.fill(); b.restore();
+    gr = b.createLinearGradient(0, g.hy, 0, H);
+    gr.addColorStop(0, 'rgba(255,224,190,0)');
+    gr.addColorStop(off(g.Sa, g.hy, H) * 0.55, 'rgba(255,232,232,.62)');
+    gr.addColorStop(off(g.Sa, g.hy, H), 'rgba(255,244,252,.93)');
+    gr.addColorStop(1, 'rgba(238,226,252,.98)');
+    quad(0, 1, top, bot); b.fillStyle = gr; b.fill();
+    for (let k = 1; k < L; k += 2) { quad(k / L, (k + 1) / L, top, bot); b.fillStyle = 'rgba(120,64,196,.045)'; b.fill(); }
+    // lane lines and the glowing rails, fading into the haze at the far end
+    const fade = (rgb, a0) => { const l = b.createLinearGradient(0, g.hy, 0, H); l.addColorStop(0, `rgba(${rgb},0)`);
+      l.addColorStop(off(g.Sa, g.hy, H), `rgba(${rgb},${a0})`); l.addColorStop(1, `rgba(${rgb},${a0})`); return l; };
+    b.lineCap = 'round';
+    for (let k = 1; k < L; k++) {
+      b.strokeStyle = fade('104,44,168', 0.34); b.lineWidth = 1.3;
+      b.beginPath(); b.moveTo(g.vx, g.hy); b.lineTo(g.X(k / L, bot), bot); b.stroke();
+    }
+    for (const u of [0, 1]) {
+      b.strokeStyle = fade('255,120,190', 0.32); b.lineWidth = 9;
+      b.beginPath(); b.moveTo(g.vx, g.hy); b.lineTo(g.X(u, bot), bot); b.stroke();
+      b.strokeStyle = fade('255,196,110', 0.95); b.lineWidth = 2.4;
+      b.beginPath(); b.moveTo(g.vx, g.hy); b.lineTo(g.X(u, bot), bot); b.stroke();
+    }
+    // the timing window and the hit line
+    const B = btnGeom(g, L), s0 = g.sy(S.hitY - S.win), s1 = g.sy(S.hitY + S.win);
+    gr = b.createLinearGradient(0, s0, 0, s1);
+    gr.addColorStop(0, 'rgba(255,190,90,.05)'); gr.addColorStop(0.5, 'rgba(255,190,90,.26)'); gr.addColorStop(1, 'rgba(255,190,90,.05)');
+    quad(0, 1, s0, s1); b.fillStyle = gr; b.fill();
+    b.strokeStyle = 'rgba(255,90,150,.28)'; b.lineWidth = 10;
+    b.beginPath(); b.moveTo(g.X(0, B.sb), B.sb); b.lineTo(g.X(1, B.sb), B.sb); b.stroke();
+    gr = b.createLinearGradient(g.X(0, B.sb), 0, g.X(1, B.sb), 0);
+    gr.addColorStop(0, 'rgba(234,53,96,.9)'); gr.addColorStop(0.5, 'rgba(255,200,90,1)'); gr.addColorStop(1, 'rgba(234,53,96,.9)');
+    b.strokeStyle = gr; b.lineWidth = 2.2;
+    b.beginPath(); b.moveTo(g.X(0, B.sb), B.sb); b.lineTo(g.X(1, B.sb), B.sb); b.stroke();
+    // the buttons' sockets: a chrome ring and a dark well
+    for (let k = 0; k < L; k++) {
+      const x = g.X((k + 0.5) / L, B.sb), y = B.sb;
+      b.fillStyle = 'rgba(46,10,80,.22)';
+      b.beginPath(); b.ellipse(x, y + B.ry * 0.35, B.rx * 1.42, B.ry * 1.42, 0, 0, TAU); b.fill();
+      gr = b.createLinearGradient(0, y - B.ry * 1.3, 0, y + B.ry * 1.3);
+      gr.addColorStop(0, '#fff8ff'); gr.addColorStop(0.5, '#cdb9ea'); gr.addColorStop(1, '#6f55a0');
+      b.fillStyle = gr; b.beginPath(); b.ellipse(x, y, B.rx * 1.3, B.ry * 1.3, 0, 0, TAU); b.fill();
+      b.fillStyle = '#2a0617'; b.beginPath(); b.ellipse(x, y, B.rx * 1.06, B.ry * 1.06, 0, 0, TAU); b.fill();
+    }
+    // a soft vignette over everything
+    gr = b.createRadialGradient(W / 2, H * 0.45, Math.min(W, H) * 0.3, W / 2, H * 0.45, Math.max(W, H) * 0.85);
+    gr.addColorStop(0, 'rgba(10,2,28,0)'); gr.addColorStop(1, 'rgba(10,2,28,.42)');
+    b.fillStyle = gr; b.fillRect(0, 0, W, H);
+    V.track = trk;
+  }
+
+  function glow(x, y, r, rgb, al) {
+    if (al <= 0.01 || r <= 0) return;
+    const gr = cx.createRadialGradient(x, y, 0, x, y, r);
+    gr.addColorStop(0, `rgba(${rgb},${al.toFixed(3)})`); gr.addColorStop(0.4, `rgba(${rgb},${(al * 0.4).toFixed(3)})`); gr.addColorStop(1, `rgba(${rgb},0)`);
+    cx.fillStyle = gr;                          // plain alpha: an additive glow would vanish on the bright runway
+    cx.beginPath(); cx.arc(x, y, r, 0, TAU); cx.fill();
+  }
+  function ellipse(x, y, rx, ry) { cx.beginPath(); cx.ellipse(x, y, Math.max(0.1, rx), Math.max(0.1, ry), 0, 0, TAU); }
+
+  /* the sky's life: drifting bokeh and music notes floating up (behind the runway) */
+  function ambient(g, now, still) {
+    const t = still ? 0 : now;
+    cx.globalCompositeOperation = 'lighter';
+    for (const b of V.amb.bokeh) {
+      const r = b.r * H, x = (b.x + Math.sin(t * b.sp + b.ph) * 0.02) * W, y = (b.y + Math.cos(t * b.sp * 0.7 + b.ph) * 0.012) * H;
+      cx.globalAlpha = b.a * (0.6 + 0.4 * Math.sin(t * b.tw + b.ph));
+      cx.drawImage(V.bokeh[b.c], x - r, y - r, 2 * r, 2 * r);
+    }
+    cx.globalCompositeOperation = 'source-over';
+    for (const n of V.amb.notes) {
+      const cyc = still ? 0 : Math.floor(n.l0 + t / n.dur), life = still ? n.l0 : (n.l0 + t / n.dur) - cyc;
+      const y = (n.y0 - life * n.rise) * H;
+      // across the sky, and never over the runway at its row
+      const u = n.xs[cyc % n.xs.length];
+      const half = y > g.hy ? g.half(y) + W * 0.035 : W * 0.06, side = Math.max(0, W / 2 - half);
+      const x = (u < 0.5 ? (u / 0.5) * side : W - ((u - 0.5) / 0.5) * side) + Math.sin(life * TAU * 0.8 + n.ph) * W * 0.01;
+      const s = n.s * H;
+      cx.globalAlpha = n.a * Math.pow(Math.sin(Math.PI * life), 0.8);
+      cx.save(); cx.translate(x, y); cx.rotate(n.rot + (still ? 0 : Math.sin(t * 0.9 + n.ph) * 0.14));
+      cx.drawImage(V.notes[n.k][n.c], -s / 2, -s / 2, s, s); cx.restore();
+    }
+    cx.globalAlpha = 1;
+  }
+
+  /* lines across the runway, moving toward the viewer at the tiles' speed */
+  function beatLines(g, now, playing, still) {
+    const step = 0.2, sp = playing ? (S.speed || 0.2) : 0.06;
+    const ph = still ? 0 : ((playing && S.play !== null ? S.play : now) * sp) % step;
+    const bottomY = g.yOf(H + 2);
+    cx.lineWidth = 1;
+    for (let y = Y_FAR - 0.8 + ph; y < bottomY; y += step) {
+      const s = g.sy(y);
+      if (s < g.hy + 2) continue;
+      const a = 0.16 * clamp((s - g.hy) / (g.Sa - g.hy), 0, 1);
+      cx.strokeStyle = `rgba(136,70,200,${a.toFixed(3)})`;
+      cx.beginPath(); cx.moveTo(g.X(0, s), s); cx.lineTo(g.X(1, s), s); cx.stroke();
+    }
+  }
+
+  /* the lane the rat's cursor is in: a soft beam from the rat up past its button */
+  function laneBeam(g, B, L, smp) {
+    const c = smp && smp.cursor;
+    if (!c) return;
+    const k = Math.min(L - 1, Math.floor(clamp(c[0], 0, 0.9999) * L));
+    const s0 = g.sy(S.hitY - 0.32), s1 = H + 4, u0 = k / L, u1 = (k + 1) / L;
+    const gr = cx.createLinearGradient(0, s0, 0, s1);
+    gr.addColorStop(0, 'rgba(214,12,148,0)'); gr.addColorStop(clamp((B.sb - s0) / (s1 - s0), 0, 1), 'rgba(214,12,148,.2)');
+    gr.addColorStop(1, 'rgba(214,12,148,.1)');
+    cx.fillStyle = gr;
+    cx.beginPath(); cx.moveTo(g.X(u0, s0), s0); cx.lineTo(g.X(u1, s0), s0); cx.lineTo(g.X(u1, s1), s1); cx.lineTo(g.X(u0, s1), s1); cx.closePath(); cx.fill();
+  }
+
+  function tileLook(st) { return st === 'up' || st === 'miss' || st === 'hit' ? st : 'up'; }
+  function drawTiles(g, smp, now, L) {
+    const list = smp.tiles.slice().sort((a, b) => a.y - b.y);
+    const bottomY = g.yOf(H + 30);
+    for (const t of list) {
+      const st = tileLook(S.tileState.get(t.id) || t.state);
+      const y0 = t.y - t.h / 2, y1 = t.y + t.h / 2;
+      if (y0 > bottomY || y1 < Y_FAR - 0.6) continue;
+      let al = clamp((t.y + 0.32) / 0.34, 0, 1);                        // out of the haze at the far end
+      if (st === 'hit') {
+        const at = S.hitAt.get(t.id), age = at !== undefined ? now - at : (t.y - S.hitY) / (S.speed || 0.3);
+        al *= clamp(1 - age / 0.3, 0, 1);
+      } else if (st === 'miss') al *= 0.85 * clamp(1 - (y0 - 0.95) / 0.2, 0, 1);
+      if (al <= 0.01) continue;
+      const s0 = g.sy(Math.max(y0, -3)), s1 = g.sy(y1);
+      const u0 = (t.lane + 0.075) / L, u1 = (t.lane + 0.925) / L;
+      const a0 = g.X(u0, s0), a1 = g.X(u1, s0), b0 = g.X(u0, s1), b1 = g.X(u1, s1);
+      const k = (s1 - g.hy) / g.q, th = Math.max(1.2, 0.013 * H * k);
+      cx.globalAlpha = al;
+      // contact shadow
+      cx.fillStyle = 'rgba(52,16,100,.16)';
+      cx.beginPath(); cx.moveTo(a0 + 2, s0 + th); cx.lineTo(a1 + 4, s0 + th); cx.lineTo(b1 + 6 * k, s1 + th * 2.2); cx.lineTo(b0 + 3 * k, s1 + th * 2.2); cx.closePath(); cx.fill();
+      // the slab's near face
+      cx.fillStyle = st === 'miss' ? '#3d3647' : st === 'hit' ? '#c77d18' : '#06020c';
+      cx.beginPath(); cx.moveTo(b0, s1); cx.lineTo(b1, s1); cx.lineTo(b1, s1 + th); cx.lineTo(b0, s1 + th); cx.closePath(); cx.fill();
+      // the top: glossy black, a sheen on its far part, and a rim light from the sun behind it
+      let gr = cx.createLinearGradient(0, s0, 0, s1);
+      if (st === 'miss') { gr.addColorStop(0, '#9a92a8'); gr.addColorStop(1, '#5d5669'); }
+      else if (st === 'hit') { gr.addColorStop(0, '#fff6c4'); gr.addColorStop(1, '#f5ac29'); }
+      else { gr.addColorStop(0, '#34203f'); gr.addColorStop(0.2, '#150b1f'); gr.addColorStop(1, '#030106'); }
+      cx.fillStyle = gr;
+      cx.beginPath(); cx.moveTo(a0, s0); cx.lineTo(a1, s0); cx.lineTo(b1, s1); cx.lineTo(b0, s1); cx.closePath(); cx.fill();
+      if (st === 'up') {
+        const sh = s0 + (s1 - s0) * 0.42;
+        gr = cx.createLinearGradient(0, s0, 0, sh);
+        gr.addColorStop(0, 'rgba(255,236,255,.22)'); gr.addColorStop(1, 'rgba(255,236,255,0)');
+        cx.fillStyle = gr;
+        cx.beginPath(); cx.moveTo(a0, s0); cx.lineTo(a1, s0); cx.lineTo(g.X(u1, sh), sh); cx.lineTo(g.X(u0, sh), sh); cx.closePath(); cx.fill();
+        cx.strokeStyle = 'rgba(255,170,228,.38)'; cx.lineWidth = 1;
+        cx.beginPath(); cx.moveTo(a0, s0); cx.lineTo(a1, s0); cx.lineTo(b1, s1); cx.lineTo(b0, s1); cx.closePath(); cx.stroke();
+        cx.strokeStyle = 'rgba(255,214,150,.9)'; cx.lineWidth = Math.max(1, 1.8 * k);
+        cx.beginPath(); cx.moveTo(a0 + 1, s0); cx.lineTo(a1 - 1, s0); cx.stroke();
+      } else if (st === 'hit') {
+        cx.strokeStyle = 'rgba(255,248,200,.9)'; cx.lineWidth = 1.5;
+        cx.beginPath(); cx.moveTo(a0, s0); cx.lineTo(a1, s0); cx.lineTo(b1, s1); cx.lineTo(b0, s1); cx.closePath(); cx.stroke();
       }
     }
-    // effects
+    cx.globalAlpha = 1;
+  }
+
+  function drawButtons(g, B, now, L, smp, still) {
+    for (let k = 0; k < L; k++) {
+      const bx = g.X((k + 0.5) / L, B.sb), b = S.btn[k], age = b ? now - b.at : 9;
+      let pr = 0, shake = 0;
+      if (age >= 0 && age < 0.42) pr = age < 0.06 ? age / 0.06 : Math.max(0, 1 - (age - 0.06) / 0.3);
+      if (b && b.kind === 'wrong' && age < 0.45 && !still) shake = Math.sin(age * 72) * (1 - age / 0.45) * B.rx * 0.16;
+      // a tile on the line in this lane: the button is live
+      const ready = !!smp && smp.tiles.some(t => t.lane === k && tileLook(S.tileState.get(t.id) || t.state) === 'up' &&
+        Math.abs(t.y - S.hitY) <= t.h / 2 + S.win);
+      const x = bx + shake, top = B.sb - B.d * (1 - pr * 0.72);
+      if (pr > 0) glow(x, top, B.rx * 2.6, b.kind === 'hit' ? '255,178,30' : '255,30,60', 0.7 * pr);
+      else if (ready) glow(x, top, B.rx * 2.1, '255,50,90', 0.26 + (still ? 0 : 0.12 * Math.sin(now * 10)));
+      // the side of the cap
+      let gr = cx.createLinearGradient(x - B.rx, 0, x + B.rx, 0);
+      gr.addColorStop(0, '#5e0410'); gr.addColorStop(0.35, '#c8142c'); gr.addColorStop(0.7, '#9a0c1f'); gr.addColorStop(1, '#4a030c');
+      cx.fillStyle = gr;
+      cx.beginPath(); cx.moveTo(x - B.rx, top); cx.lineTo(x - B.rx, B.sb); cx.ellipse(x, B.sb, B.rx, B.ry, 0, Math.PI, 0, true);
+      cx.lineTo(x + B.rx, top); cx.closePath(); cx.fill();
+      // the top of the cap: glossy red, brighter while pressed or live
+      const lit = pr > 0 || ready;
+      gr = cx.createRadialGradient(x - B.rx * 0.3, top - B.ry * 0.45, B.rx * 0.05, x, top, B.rx * 1.08);
+      gr.addColorStop(0, lit ? '#ffc2b8' : '#ff948c'); gr.addColorStop(0.45, lit ? '#ff3048' : '#e8172f'); gr.addColorStop(1, lit ? '#b80d24' : '#8e0819');
+      cx.fillStyle = gr; ellipse(x, top, B.rx, B.ry); cx.fill();
+      cx.strokeStyle = 'rgba(255,214,214,.55)'; cx.lineWidth = 1; ellipse(x, top, B.rx, B.ry); cx.stroke();
+      gr = cx.createRadialGradient(x - B.rx * 0.34, top - B.ry * 0.34, 0, x - B.rx * 0.34, top - B.ry * 0.34, B.rx * 0.42);
+      gr.addColorStop(0, 'rgba(255,255,255,.8)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+      cx.fillStyle = gr; ellipse(x - B.rx * 0.34, top - B.ry * 0.34, B.rx * 0.42, B.ry * 0.36); cx.fill();
+    }
+  }
+
+  function stepRat(dt, now, smp, playing) {
+    const R = S.rat, L = S.lanes;
+    let target = Math.min(L - 1, Math.max(0, Math.floor(L / 2 - 0.5))) + 0.5;
+    const c = playing && smp ? smp.cursor : null;
+    if (c) { const u = clamp(c[0], 0, 0.9999) * L, k = Math.floor(u); target = k + 0.5 + (u - k - 0.5) * 0.3; }
+    if (now - R.pressAt < 0.3 && R.pressLane !== null) target = R.pressLane + 0.5;
+    if (RM.matches) { R.x = target; R.v = 0; }
+    else {
+      const w = 15;
+      let t = Math.min(dt, 0.1);
+      while (t > 1e-4) { const h = Math.min(t, 1 / 120), acc = w * w * (target - R.x) - 2 * w * R.v; R.v += acc * h; R.x += R.v * h; t -= h; }
+    }
+    if (R.v > 0.6) R.face = -1; else if (R.v < -0.6) R.face = 1;
+    R.faceK = RM.matches ? R.face : R.faceK + (R.face - R.faceK) * Math.min(1, dt * 14);
+    R.run += Math.abs(R.v) * dt * 5.2;
+  }
+  function drawRat(g, B, now, L, still) {
+    const R = S.rat, feet = B.sb + (H - B.sb) * 0.84;
+    const lw = 2 * g.half(feet) / L;
+    const w = Math.min(lw * 0.96, H * 0.36, W * 0.44), h = w * (V.ratH || 650) / (V.ratW || 1150);
+    const x = clamp(g.X(R.x / L, feet), w * 0.5 + 4, W - w * 0.5 - 4), pa = now - R.pressAt;   // kept whole on the screen
+    let sq = 0, lift = 0;
+    if (!still && pa >= 0 && pa < 0.46) {           // a press: crouch, hop up at the button, land
+      if (pa < 0.07) sq = 0.16 * (pa / 0.07);
+      else if (pa < 0.22) { const k = (pa - 0.07) / 0.15; sq = 0.16 - 0.3 * Math.sin(k * Math.PI / 2); lift = Math.sin(k * Math.PI) * h * 0.42; }
+      else { const k = (pa - 0.22) / 0.24; sq = 0.14 * Math.sin(k * Math.PI) * (1 - k * 0.5) - 0.14 * (1 - k) * (k < 0.15 ? 1 : 0); }
+    }
+    const bob = still ? 0 : Math.sin(now * 2.4) * h * 0.012 + Math.abs(Math.sin(R.run)) * h * 0.07 * clamp(Math.abs(R.v) / 2.5, 0, 1);
+    const shs = 1 - clamp(lift / h, 0, 0.6) * 0.6;
+    cx.fillStyle = 'rgba(40,8,80,.3)'; ellipse(x, feet, w * 0.42 * shs, h * 0.085 * shs); cx.fill();
+    if (!V.rat) return;
+    const sc = w / V.ratW, p = V.ratPad * sc;
+    cx.save();
+    cx.translate(x, feet - lift - bob);
+    const fk = Math.abs(R.faceK) < 0.15 ? (R.faceK < 0 ? -0.15 : 0.15) : R.faceK;
+    cx.scale(fk * (1 + sq * 0.55), 1 - sq);
+    if (!V.ratKeyed) cx.globalCompositeOperation = 'screen';
+    cx.drawImage(V.rat, -w / 2 - p, -h * 0.96 - p, w + 2 * p, h + 2 * p);   // its paws (4% above the crop's edge) on the row
+    cx.restore();
+    cx.globalCompositeOperation = 'source-over';
+  }
+
+  function drawFx(g, B, now, L, still) {
+    const fs = clamp(B.lw * 0.26, 15, 34);
     for (const f of S.fx) {
       const age = now - f.at;
       if (age < 0) continue;
+      const bx = g.X((f.lane + 0.5) / L, B.sb), by = B.sb - B.d;
       if (f.kind === 'hit') {
-        const x = (f.lane + 0.5) * lw, y = f.y * H, k = age / 0.55;
-        if (k < 1) {
-          cx.strokeStyle = 'rgba(245,172,41,' + (0.9 * (1 - k)).toFixed(3) + ')'; cx.lineWidth = 3 * (1 - k) + 1;
-          cx.beginPath(); cx.arc(x, y, lw * (0.18 + 0.42 * k), 0, 7); cx.stroke();
+        if (age < 0.32) glow(bx, by, B.rx * (2.4 + 4 * age), '255,190,40', 0.8 * (1 - age / 0.32));
+        if (age < 0.5) {
+          const k = age / 0.5;
+          cx.strokeStyle = `rgba(255,224,130,${(1 - k).toFixed(3)})`; cx.lineWidth = 3.5 * (1 - k) + 0.8;
+          ellipse(bx, B.sb - B.d * 0.4, B.rx * (1.2 + 2.4 * k), B.ry * (1.2 + 2.4 * k)); cx.stroke();
         }
-        if (f.label && age < 1.1) {
-          cx.fillStyle = 'rgba(154,74,12,' + (1 - age / 1.1).toFixed(3) + ')';
-          cx.font = '700 ' + Math.round(fs * 1.25) + 'px "JetBrains Mono", ui-monospace, monospace';
-          cx.textAlign = 'center'; cx.textBaseline = 'middle'; cx.fillText(f.label, x, y - H * 0.08 - age * H * 0.12);
+        if (f.parts && age < 0.85) {             // sparks: saturated golds and a few magentas, so they read on white
+          const fa = 1 - age / 0.85;
+          for (const p of f.parts) {
+            const x = bx + Math.cos(p.a) * p.sp * H * age, y = by + Math.sin(p.a) * p.sp * H * age + 0.7 * H * age * age;
+            const r = p.r * (0.7 + fa * 0.7) * clamp(H / 600, 0.8, 1.6);
+            cx.fillStyle = p.c < 0.45 ? `rgba(255,176,24,${fa})` : p.c < 0.8 ? `rgba(255,214,40,${fa})` : `rgba(236,40,150,${fa})`;
+            cx.beginPath(); cx.moveTo(x, y - r * 2.2); cx.lineTo(x + r * 0.6, y - r * 0.6); cx.lineTo(x + r * 2.2, y);
+            cx.lineTo(x + r * 0.6, y + r * 0.6); cx.lineTo(x, y + r * 2.2); cx.lineTo(x - r * 0.6, y + r * 0.6);
+            cx.lineTo(x - r * 2.2, y); cx.lineTo(x - r * 0.6, y - r * 0.6); cx.closePath(); cx.fill();
+          }
+        }
+        if (age < 1.05) {
+          const k = age / 1.05, al = k < 0.65 ? 1 : 1 - (k - 0.65) / 0.35;
+          const rise = still ? 0 : H * 0.08 * (1 - Math.pow(1 - Math.min(1, age * 2), 3));
+          const y = by - B.ry * 2.6 - rise, pop = still ? 1 : 1 + 0.35 * Math.max(0, 1 - age / 0.14);
+          cx.globalAlpha = al; cx.textAlign = 'center'; cx.textBaseline = 'alphabetic';
+          if (f.judge) {
+            cx.font = `700 ${Math.round(fs * 0.5)}px "JetBrains Mono", ui-monospace, monospace`;
+            cx.lineWidth = 3; cx.strokeStyle = 'rgba(60,8,90,.65)'; cx.strokeText(f.judge.toUpperCase(), bx, y - fs * 1.05 * pop);
+            cx.fillStyle = f.judge === 'Perfect' ? '#fff37a' : '#ffd0ec'; cx.fillText(f.judge.toUpperCase(), bx, y - fs * 1.05 * pop);
+          }
+          if (f.label) {
+            cx.font = `700 ${Math.round(fs * pop)}px "Space Grotesk", system-ui, sans-serif`;
+            cx.lineWidth = 4; cx.strokeStyle = 'rgba(120,30,20,.55)'; cx.strokeText(f.label, bx, y);
+            const gr = cx.createLinearGradient(0, y - fs, 0, y);
+            gr.addColorStop(0, '#ffffff'); gr.addColorStop(1, '#ffc440');
+            cx.fillStyle = gr; cx.fillText(f.label, bx, y);
+          }
+          cx.globalAlpha = 1;
         }
       } else if (f.kind === 'miss') {
-        const k = age / 0.7;
-        if (k < 1) {
-          const g = cx.createLinearGradient(0, H * 0.7, 0, H);
-          g.addColorStop(0, 'rgba(234,53,96,0)'); g.addColorStop(1, 'rgba(234,53,96,' + (0.55 * (1 - k)).toFixed(3) + ')');
-          cx.fillStyle = g; cx.fillRect(f.lane * lw, H * 0.7, lw, H * 0.3);
+        const dur = 0.8;
+        if (age < dur) {
+          const fa = 1 - age / dur;
+          if (f.parts) for (const p of f.parts) {
+            const x = bx + Math.cos(p.a) * p.sp * H * age * 1.4, y = B.sb + Math.sin(p.a) * p.sp * H * age * 0.6 - 0.06 * H * age;
+            cx.fillStyle = `rgba(186,176,200,${(0.5 * fa).toFixed(3)})`;
+            cx.beginPath(); cx.arc(x, y, p.r * H * (1 + age * 2.2), 0, TAU); cx.fill();
+          } else { cx.fillStyle = `rgba(186,176,200,${(0.4 * fa).toFixed(3)})`; ellipse(bx, B.sb, B.rx * 1.6, B.ry * 1.6); cx.fill(); }
+          cx.globalAlpha = fa; cx.textAlign = 'center'; cx.textBaseline = 'alphabetic';
+          cx.font = `700 ${Math.round(fs * 0.5)}px "JetBrains Mono", ui-monospace, monospace`;
+          cx.lineWidth = 3; cx.strokeStyle = 'rgba(255,255,255,.85)';
+          const y = B.sb - B.d - B.ry * 2.2 - (still ? 0 : H * 0.03 * age);
+          cx.strokeText('MISS', bx, y); cx.fillStyle = '#5a5070'; cx.fillText('MISS', bx, y);
+          cx.globalAlpha = 1;
         }
       } else if (f.kind === 'wrong') {
-        const k = age / 0.6;
-        if (k < 1) {
-          const x = f.x * W, y = f.y * H, r = lw * (0.08 + 0.2 * k);
-          cx.strokeStyle = 'rgba(234,53,96,' + (1 - k).toFixed(3) + ')'; cx.lineWidth = 2.5;
-          cx.beginPath(); cx.arc(x, y, r, 0, 7); cx.stroke();
-          const s = lw * 0.06;
-          cx.beginPath(); cx.moveTo(x - s, y - s); cx.lineTo(x + s, y + s); cx.moveTo(x + s, y - s); cx.lineTo(x - s, y + s); cx.stroke();
+        const dur = 0.6;
+        if (age < dur) {
+          const k = age / dur;
+          cx.strokeStyle = `rgba(255,60,80,${(1 - k).toFixed(3)})`; cx.lineWidth = 3;
+          ellipse(bx, B.sb - B.d * 0.5, B.rx * (1.3 + 1.2 * k), B.ry * (1.3 + 1.2 * k)); cx.stroke();
+          const s = fs * 0.32, y = by - B.ry * 2.4;
+          cx.lineWidth = 3.2; cx.lineCap = 'round';
+          cx.beginPath(); cx.moveTo(bx - s, y - s); cx.lineTo(bx + s, y + s); cx.moveTo(bx + s, y - s); cx.lineTo(bx - s, y + s); cx.stroke();
         }
       }
     }
-    // the rat's cursor (its head's direction) and a short trail
-    const c = smp && (m === 'live' || m === 'test') ? smp.cursor : null;
-    if (c) {
-      const TR = 0.3;                           // s of trail; a jump (a new attempt, a gap in the stream) starts it over
-      const lastPt = S.trail[S.trail.length - 1];
-      if (lastPt && Math.hypot(c[0] - lastPt[0], c[1] - lastPt[1]) > 0.12) S.trail.length = 0;
-      S.trail.push([c[0], c[1], now]);
-      while (S.trail.length && now - S.trail[0][2] > TR) S.trail.shift();
-      for (let i = 1; i < S.trail.length; i++) {
-        const a = S.trail[i - 1], b = S.trail[i], k = 1 - (now - b[2]) / TR;
-        cx.strokeStyle = 'rgba(214,12,148,' + (0.35 * k).toFixed(3) + ')'; cx.lineWidth = 2.5 * k + 0.5;
-        cx.beginPath(); cx.moveTo(a[0] * W, a[1] * H); cx.lineTo(b[0] * W, b[1] * H); cx.stroke();
-      }
-      const x = c[0] * W, y = c[1] * H, r = Math.max(7, Math.min(14, W * 0.012));
-      cx.lineWidth = 5; cx.strokeStyle = 'rgba(255,255,255,.9)'; cx.beginPath(); cx.arc(x, y, r, 0, 7); cx.stroke();
-      cx.lineWidth = 2.5; cx.strokeStyle = MAG; cx.beginPath(); cx.arc(x, y, r, 0, 7); cx.stroke();
-      cx.fillStyle = MAG; cx.beginPath(); cx.arc(x, y, 2.6, 0, 7); cx.fill();
-    } else S.trail.length = 0;
+  }
+
+  function chip(x, y, text, align) {
+    cx.font = `600 ${Math.round(clamp(H * 0.024, 10.5, 13))}px "Space Grotesk", system-ui, sans-serif`;
+    const tw = cx.measureText(text).width, ph = Math.round(clamp(H * 0.045, 20, 26)), pw = tw + 20;
+    const x0 = align === 'right' ? x - pw : x;
+    cx.fillStyle = 'rgba(22,6,48,.5)';
+    cx.beginPath();
+    if (cx.roundRect) cx.roundRect(x0, y, pw, ph, ph / 2); else cx.rect(x0, y, pw, ph);
+    cx.fill();
+    cx.strokeStyle = 'rgba(255,220,250,.22)'; cx.lineWidth = 1; cx.stroke();
+    cx.fillStyle = '#fff4fb'; cx.textAlign = 'left'; cx.textBaseline = 'middle';
+    cx.fillText(text, x0 + 10, y + ph / 2 + 0.5);
+  }
+  function hud(g, now, still) {
+    const song = S.song ? SONGS.get(S.song) : null;
+    if (song) {
+      const p = clamp((S.noteI || 0) / song.notes.length, 0, 1);
+      cx.fillStyle = 'rgba(255,255,255,.14)'; cx.fillRect(0, 0, W, 3);
+      const gr = cx.createLinearGradient(0, 0, W, 0);
+      gr.addColorStop(0, '#D60C94'); gr.addColorStop(0.6, '#F5AC29'); gr.addColorStop(1, '#FCF010');
+      cx.fillStyle = gr; cx.fillRect(0, 0, W * p, 3);
+    }
+    const pad = clamp(W * 0.02, 8, 14);
+    const title = song ? song.title : S.song ? S.song.replace(/_/g, ' ') : '';
+    if (title) chip(pad, pad + 4, W < 440 && title.length > 18 ? title.slice(0, 17) + '…' : title, 'left');
+    const n = S.hits + S.misses + S.wrong;
+    if (n) chip(W - pad, pad + 4, ratePct(S.hits, n) + ' hit rate', 'right');
+    if (S.streak >= 2) {
+      const pop = still ? 0 : clamp(1 - (now - S.streakAt) / 0.22, 0, 1);
+      const fs = clamp(H * 0.08, 26, 56) * (1 + 0.2 * pop), y = pad + 4 + clamp(H * 0.045, 20, 26) + fs * 0.9;
+      cx.textAlign = 'center'; cx.textBaseline = 'alphabetic';
+      cx.font = `700 ${Math.round(fs)}px "Space Grotesk", system-ui, sans-serif`;
+      cx.lineWidth = 5; cx.strokeStyle = 'rgba(60,8,100,.5)'; cx.strokeText(String(S.streak), W / 2, y);
+      const gr = cx.createLinearGradient(0, y - fs * 0.8, 0, y);
+      gr.addColorStop(0, '#fffbe6'); gr.addColorStop(1, '#F5AC29');
+      cx.fillStyle = gr; cx.fillText(String(S.streak), W / 2, y);
+      cx.font = `700 ${Math.round(clamp(H * 0.02, 9, 11))}px "JetBrains Mono", ui-monospace, monospace`;
+      const ly = y + clamp(H * 0.03, 12, 18);
+      cx.lineWidth = 3; cx.strokeStyle = 'rgba(70,10,100,.7)'; cx.strokeText('S T R E A K', W / 2, ly);
+      cx.fillStyle = '#fff'; cx.fillText('S T R E A K', W / 2, ly);
+    }
+  }
+
+  function draw(now, m, dt) {
+    cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cx.lineJoin = 'round'; cx.miterLimit = 2;          // no miter spikes on outlined text
+    const playing = m === 'live' || m === 'test', still = RM.matches, L = S.lanes;
+    sprites();
+    const g = V.g && V.g.W === W && V.g.H === H ? V.g : (V.g = geom());
+    layers(g, L);
+    const smp = playing && S.snaps.length ? sample() : null;
+    stepRat(dt, now, smp, playing);
+    const B = btnGeom(g, L);
+    cx.drawImage(V.sky, 0, 0, W, H);
+    ambient(g, now, still);
+    cx.drawImage(V.track, 0, 0, W, H);
+    beatLines(g, now, playing, still);
+    laneBeam(g, B, L, smp);
+    if (smp) drawTiles(g, smp, now, L);
+    drawButtons(g, B, now, L, smp, still);
+    drawRat(g, B, now, L, still);
+    drawFx(g, B, now, L, still);
+    if (playing) hud(g, now, still);
   }
   function size() {
     const r = E.screen.getBoundingClientRect();
     dpr = Math.min(2, window.devicePixelRatio || 1);
     W = Math.max(1, r.width); H = Math.max(1, r.height);
     E.cv.width = Math.round(W * dpr); E.cv.height = Math.round(H * dpr);
-    draw(performance.now() / 1000, mode(performance.now() / 1000));
+    V.g = null;
+    const now = performance.now() / 1000;
+    draw(now, mode(now), 0);
   }
   function frame(ms) {
     raf = 0;
-    const now = ms / 1000, m = mode(now);
+    const now = ms / 1000, m = mode(now), playing = m === 'live' || m === 'test';
     pump(now);
-    draw(now, m);
+    const busy = playing || S.fx.length > 0, animate = busy || !RM.matches;
+    // between sessions the sky still drifts, at half the frame rate
+    if (busy || now - lastDraw > 1 / 31 || m !== lastMode) {
+      draw(now, m, lastDraw ? clamp(now - lastDraw, 0, 0.1) : 0.016);
+      lastDraw = now;
+    }
     if (m !== lastMode) renderUi();
-    if ((m === 'live' || m === 'test' || S.fx.length || S.pending.length) && visible && !document.hidden) raf = requestAnimationFrame(frame);
+    if ((animate || S.pending.length) && visible && !document.hidden) raf = requestAnimationFrame(frame);
   }
   function kick() {
     if (panel && !raf && visible && !document.hidden) raf = requestAnimationFrame(frame);
@@ -1361,6 +1816,7 @@ const TILES = (function ratTiles() {
   function renderUi() {
     if (!panel) return;
     const now = performance.now() / 1000, m = mode(now);
+    const changed = m !== lastMode;
     lastMode = m;
     sec.dataset.state = m;
     const live = S.st && S.st.live;
@@ -1380,8 +1836,9 @@ const TILES = (function ratTiles() {
       if (S.had && S.hits + S.misses > 0) s = 'Last session: ' + plural(S.hits, 'tile', 'tiles') + ' hit, ' + S.misses + ' missed. ' + s;
     }
     put(E.emptyT, t); put(E.emptyS, s);
-    put(E.cap, m === 'live' ? 'Live training: the newest saved checkpoint of run ' + (S.st.run || '') + ', playing Rat Tiles in its own simulation. The cursor is where R-01’s head points; a lever press taps.'
-      : m === 'test' ? 'Test stream, not a live training run. The cursor is where R-01’s head points; a lever press taps.' : '');
+    const how = 'R-01’s cursor (where its head points) picks the lane, and its lever press presses that lane’s button; the rat on the runway stands in the cursor’s lane.';
+    put(E.cap, m === 'live' ? 'Live training: the newest saved checkpoint of run ' + (S.st.run || '') + ', playing Rat Tiles in its own simulation. ' + how
+      : m === 'test' ? 'Test stream, not a live training run. ' + how : '');
 
     // the melody
     const song = S.song ? SONGS.get(S.song) : null;
@@ -1416,12 +1873,13 @@ const TILES = (function ratTiles() {
     } else put(E.notesT, '');
 
     // the score
-    const any = S.had || S.hits + S.misses + S.wrong > 0;
+    const any = S.had || S.hits + S.misses + S.wrong > 0, n = S.hits + S.misses + S.wrong;
     put(E.hits, any ? S.hits : '—'); put(E.miss, any ? S.misses : '—');
-    put(E.streak, any ? S.streak : '—'); put(E.best, any ? S.best : '—');
+    put(E.rate, any ? ratePct(S.hits, n) : '—'); put(E.best, any ? S.best : '—');
     const sub = [];
-    if (S.speed && (playing || m === 'wait')) sub.push('A tile crosses the screen in ' + (1 / S.speed).toFixed(1) + ' s');
-    if (S.wrong) sub.push(plural(S.wrong, 'press', 'presses') + ' off the tile');
+    if (S.speed && (playing || m === 'wait')) sub.push('A tile reaches the buttons ' + (S.hitY / S.speed).toFixed(1) + ' s after it appears');
+    if (S.wrong) sub.push(plural(S.wrong, 'press', 'presses') + ' with no tile on the button');
+    if (S.streak > 1) sub.push('streak ' + S.streak);
     if (S.attempt && S.attempt.hits !== null) sub.push('Last attempt: ' + plural(S.attempt.hits, 'tile', 'tiles') + ' hit');
     put(E.sub, sub.join(' · '));
 
@@ -1430,6 +1888,7 @@ const TILES = (function ratTiles() {
     E.mute.setAttribute('aria-pressed', String(Piano.muted));
     put(E.mute.lastElementChild, Piano.muted ? 'Muted' : 'Sound on');
     E.bb.hidden = !S.bbTiles;
+    if (changed && !raf) { const t2 = performance.now() / 1000; draw(t2, m, 0); kick(); }
   }
 
   function teaserUpdate() {
@@ -1471,20 +1930,28 @@ const TILES = (function ratTiles() {
     if (window.ResizeObserver) new ResizeObserver(size).observe(E.screen); else addEventListener('resize', size);
     if ('IntersectionObserver' in window) new IntersectionObserver(es => { visible = es[0].isIntersecting; kick(); }).observe(E.screen);
     document.addEventListener('visibilitychange', kick);
+    if (RM.addEventListener) RM.addEventListener('change', () => { V.key = ''; kick(); size(); });
     // tile events and sound keep going while the board is scrolled away (the frame loop only runs while it is visible)
-    setInterval(() => { const now = performance.now() / 1000; pump(now); if (mode(now) !== lastMode) { renderUi(); draw(now, mode(now)); } }, 200);
+    setInterval(() => { const now = performance.now() / 1000; pump(now); if (mode(now) !== lastMode) renderUi(); }, 200);
     loadSongs();
     size();
     renderUi();
+    kick();
   }
   teaserUpdate();
   return { onStatus, onTiles, onEpisode, onRelay, onRaw, onBuyback };
 })();
 
 /* ------------------------------------------------------------------ rat buybacks (buyback.js)
-   Reads the buyback engine's public status JSON. Every figure carries its mode: anything not executed on-chain is
-   labelled "Simulated" and never called a buy; a test stream is never called live; a stale status is shown as stale;
-   no address-like string is ever shown. */
+   Reads the buyback engine's public status JSON. One buy an hour, on the hour (UTC), sized by that hour's hit rate:
+   the hourly budget x hit rate, where hit rate = hits / (hits + misses + wrong presses) and the caps clamp the result.
+     window       {start, end, hits, misses, wrong, hit_rate}     the hour being counted now
+     last_window  {... the same, plus buy: its buy}               the hour that ended last
+     next_buy_at  ISO time of the next buy;  budget {hourly_eth: null|"0.01", rule}   (null: not set yet)
+   An engine without these fields (the older one) still shows its totals and its next buy.
+   Every figure carries its mode: anything not executed on-chain is labelled "Simulated" and never called a buy; a
+   preview amount (while the budget is not set) is marked as one; a test stream is never called live; a stale status
+   is shown as stale; no address-like string is ever shown. */
 (function buybacks() {
   const C = window.LABRAT_BUYBACK, wrap = $('#bb-wrap');
   if (!wrap || !C || typeof C !== 'object' || C.enabled !== true || typeof C.statusUrl !== 'string' || !C.statusUrl) return;
@@ -1498,40 +1965,138 @@ const TILES = (function ratTiles() {
   const txt = s => (typeof s === 'string' && !ADDR.test(s)) ? s : null;
   const dec = s => (typeof s === 'string' && /^\d{1,15}(\.\d{1,18})?$/.test(s)) ? s : null;
   const int = v => (Number.isInteger(v) && v >= 0) ? v : null;
+  const obj = v => (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;
+  const isoMs = s => (typeof s === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?Z$/.test(s)) ? Date.parse(s) : NaN;
+  const hm = ms => new Date(ms).toISOString().slice(11, 16);
   const fmtTok = s => { const d = dec(s); if (d === null) return '—'; const n = Number(d);
     return n >= 100 ? Math.round(n).toLocaleString('en-US') : n.toLocaleString('en-US', { maximumFractionDigits: 2 }); };
   const fmtEth = s => { const d = dec(s); return d === null ? '—' : d + ' ETH'; };
-  const E = { mode: $('#bb-mode'), test: $('#bb-test'), conn: $('#bb-conn'), per: $('#bb-per'), lever: $('#bb-lever'),
-              hits: $('#bb-hits'), pending: $('#bb-pending'), buysK: $('#bb-buys-k'), buys: $('#bb-buys'),
-              outK: $('#bb-out-k'), out: $('#bb-out'), split: $('#bb-split'), list: $('#bb-list'), note: $('#bb-note') };
+  const fmtN = v => v.toLocaleString('en-US');
+  // a window's hit rate: the engine's figure, else hits / (hits + misses + wrong)
+  const rateOf = w => {
+    if (!w) return null;
+    const r = typeof w.hit_rate === 'string' && /^(0(\.\d{1,8})?|1(\.0{1,8})?)$/.test(w.hit_rate) ? Number(w.hit_rate) : w.hit_rate;
+    if (typeof r === 'number' && isFinite(r) && r >= 0 && r <= 1) return r;
+    const h = int(w.hits), m = int(w.misses), x = int(w.wrong);
+    return h === null || m === null || x === null || h + m + x === 0 ? null : h / (h + m + x);
+  };
+  const pctTxt = r => r === null ? '—' : (r * 100).toFixed(r === 0 || r === 1 ? 0 : 1) + '%';
+  const E = { mode: $('#bb-mode'), test: $('#bb-test'), conn: $('#bb-conn'), lever: $('#bb-lever'),
+              winT: $('#bb-win-t'), next: $('#bb-next'), bar: $('#bb-win-bar'),
+              wHits: $('#bb-w-hits'), wMiss: $('#bb-w-miss'), wWrong: $('#bb-w-wrong'), wRate: $('#bb-w-rate'),
+              fBudget: $('#bb-f-budget'), fSub: $('#bb-f-sub'), fRate: $('#bb-f-rate'), fK: $('#bb-f-k'), fBuy: $('#bb-f-buy'), fNote: $('#bb-f-note'), fEq: $('#bb-f-eq'),
+              last: $('#bb-last'), lastK: $('#bb-last-k'), lastStats: $('#bb-last-stats'), lastBuy: $('#bb-last-buy'),
+              hits: $('#bb-hits'), buysK: $('#bb-buys-k'), buys: $('#bb-buys'), outK: $('#bb-out-k'), out: $('#bb-out'),
+              list: $('#bb-list'), note: $('#bb-note') };
+  if (Object.values(E).some(x => !x)) return;
   const STALE_S = 90;          // the engine rewrites its status at least every 10 s; older than this = not running
-  const NOTE = /^[a-z][a-z ;.-]{0,59}$/;   // next_buy_note: a short fixed phrase from the engine
+  const NOTE = /^[a-z][a-z ;.-]{0,59}$/;   // short fixed phrases from the engine
+  // an engine note shown as text: plain words only, nothing address- or number-heavy
+  const safeNote = s => (typeof s === 'string' && s.length <= 140 && /^[A-Za-z][A-Za-z0-9 ,;:.%()'’\/-]*$/.test(s) && !/0x/i.test(s)) ? s.replace(/\.$/, '') : '';
   wrap.hidden = false;
+  let last = null;             // the newest status, for the countdown between polls
+
+  function tick() {            // the hour's progress bar and the countdown to the next buy (every second)
+    const j = last;
+    if (!j) return;
+    const upd = isoMs(j.updated), stale = !Number.isFinite(upd) || (Date.now() - upd) / 1000 > STALE_S;
+    const w = obj(j.window), s = w ? isoMs(w.start) : NaN, e = w ? isoMs(w.end) : NaN, now = Date.now();
+    const frac = Number.isFinite(s) && Number.isFinite(e) && e > s ? Math.min(1, Math.max(0, (now - s) / (e - s))) : 0;
+    E.bar.style.transform = 'scaleX(' + frac.toFixed(4) + ')';
+    const stopped = txt(j.stopped);
+    let at = isoMs(j.next_buy_at);
+    if (!Number.isFinite(at) && int(j.next_buy_in_s) !== null && Number.isFinite(upd)) at = upd + j.next_buy_in_s * 1000;
+    let t = '';
+    if (stopped) t = 'Buys stopped';
+    else if (stale) t = 'Status not updating';
+    else if (Number.isFinite(at)) {
+      const left = Math.max(0, Math.round((at - now) / 1000));
+      const mm = Math.floor(left / 60), ss = left % 60;
+      t = 'Next buy ' + hm(at) + ' UTC · ' + (left <= 0 ? 'due now' : 'in ' + mm + ':' + String(ss).padStart(2, '0'));
+    }
+    if (E.next.textContent !== t) E.next.textContent = t;
+  }
 
   function render(j) {
+    last = j;
     const live = j.mode === 'LIVE';
-    const DRY = 'Simulated';
-    E.mode.textContent = live ? 'LIVE' : DRY;
+    E.mode.textContent = live ? 'LIVE' : 'Simulated';
     E.mode.classList.toggle('dry', !live);
     const rl = j.relay || {}, src = j.source || {};
     // a TEST stream, test streams accepted, another relay, or an engine too old to say: never shown as live hits
-    const test = src.test !== false || src.public_relay !== true || src.accept_test_streams === true ||
-      rl.test_stream === true;
+    const test = src.test !== false || src.public_relay !== true || src.accept_test_streams === true || rl.test_stream === true;
     E.test.hidden = !test;
-    const upd = typeof j.updated === 'string' ? Date.parse(j.updated) : NaN;
-    const age = Number.isFinite(upd) ? (Date.now() - upd) / 1000 : Infinity;
-    const stale = age > STALE_S;
-    const per = dec(j.per_hit_eth); E.per.textContent = per ? per + ' ETH' : 'a tiny amount of ETH';
+    const upd = isoMs(j.updated);
+    const stale = !Number.isFinite(upd) || (Date.now() - upd) / 1000 > STALE_S;
     E.lever.hidden = !(Array.isArray(j.tasks) && j.tasks.includes('lever'));
-    const h = j.hits || {}, p = j.pending || {}, b = j.buys || {};
-    E.hits.textContent = int(h.counted) !== null ? h.counted.toLocaleString('en-US') : '—';
-    const fmtN = v => v.toLocaleString('en-US');
-    E.split.textContent = [int(h.in_buys) !== null ? fmtN(h.in_buys) + ' hits in ' + (live ? '' : 'simulated ') + 'buys' : '',
-      int(h.pending) !== null ? fmtN(h.pending) + ' pending' : '',
-      int(h.over_caps) !== null ? fmtN(h.over_caps) + ' over the cap' : '']
-      .filter(Boolean).join(' · ');
-    E.pending.textContent = fmtEth(p.eth) + (int(p.hits) !== null ? ' · ' + p.hits + ' hits' : '');
-    const simulated = !live || b.simulated !== false;
+    const b = obj(j.buys) || {}, simulated = !live || b.simulated !== false;
+
+    // this hour
+    const w = obj(j.window), ws = w ? isoMs(w.start) : NaN, we = w ? isoMs(w.end) : NaN;
+    E.winT.textContent = Number.isFinite(ws) && Number.isFinite(we) ? hm(ws) + '–' + hm(we) + ' UTC' : '';
+    const n = v => int(v) !== null ? fmtN(v) : '—';
+    E.wHits.textContent = w ? n(w.hits) : '—'; E.wMiss.textContent = w ? n(w.misses) : '—'; E.wWrong.textContent = w ? n(w.wrong) : '—';
+    const rate = rateOf(w);
+    E.wRate.textContent = pctTxt(rate);
+
+    // the rule, with this hour's numbers: hourly budget x hit rate. Until the owner sets the budget, a nominal preview
+    // budget (budget.preview_eth) stands in for it and every buy it sizes is a simulated preview
+    const bud = obj(j.budget), budget = bud ? dec(bud.hourly_eth) : null;
+    const nominal = !budget && bud ? dec(bud.preview_eth) : null;
+    E.fBudget.textContent = budget ? budget + ' ETH' : 'To be announced';
+    E.fBudget.classList.toggle('tba', !budget);
+    E.fSub.textContent = nominal ? 'previews use ' + nominal + ' ETH' : '';
+    E.fRate.textContent = pctTxt(rate);
+    const base = budget || nominal;
+    E.fEq.hidden = !base;
+    const proj = w && dec(w.projected_eth);
+    const amt = proj || (base && rate !== null ? (Number(base) * rate).toFixed(8).replace(/\.?0+$/, '') : null);
+    if (budget) {
+      E.fK.textContent = (simulated ? 'Simulated buy' : 'Buy') + ' on the hour';
+      E.fBuy.textContent = amt ? (proj ? '' : '≈ ') + amt + ' ETH' : '—';
+      E.fNote.textContent = 'At this hour’s hit rate so far, within the per-buy, hourly and daily caps; the buy is sized when the hour closes.';
+    } else if (nominal) {
+      E.fK.textContent = 'Simulated preview on the hour';
+      E.fBuy.textContent = amt ? (proj ? '' : '≈ ') + amt + ' ETH' : '—';
+      E.fNote.textContent = 'The hourly budget is announced when it is ready. Until then every hour is still counted, and a nominal ' +
+        nominal + ' ETH stands in for the budget: each hour runs a simulated preview buy of it × the hit rate, marked as a preview, never sent.';
+    } else {
+      E.fK.textContent = 'Buy on the hour';
+      E.fBuy.textContent = 'Set by the budget';
+      E.fNote.textContent = 'The hourly budget is announced when it is ready. Until then every hour is still counted and each buy is simulated, never sent.';
+    }
+
+    // the last hour
+    const lw = obj(j.last_window);
+    E.last.hidden = !lw;
+    if (lw) {
+      const ls = isoMs(lw.start), le = isoMs(lw.end);
+      E.lastK.textContent = 'Last hour' + (Number.isFinite(ls) && Number.isFinite(le) ? ' · ' + hm(ls) + '–' + hm(le) + ' UTC' : '');
+      const lr = rateOf(lw);
+      E.lastStats.textContent = [int(lw.hits) !== null ? fmtN(lw.hits) + ' hits' : '', int(lw.misses) !== null ? fmtN(lw.misses) + ' missed' : '',
+        int(lw.wrong) !== null ? fmtN(lw.wrong) + ' off-tile' : '', 'hit rate ' + pctTxt(lr)].filter(Boolean).join(' · ');
+      // its buy: {state: due | simulated | bought | none | expired, note, eth_in, labrat_out, simulated, preview}
+      const lb = obj(lw.buy) || {};
+      const why = [lb.note, lw.note].map(safeNote).find(Boolean) || '';
+      const prev = lb.preview === true || lw.preview === true;
+      const sim = !live || lb.simulated !== false || lb.state !== 'bought';
+      const eth = dec(lb.eth_in) || dec(lw.amount_eth);
+      const tok = dec(lb.labrat_out) && Number(lb.labrat_out) > 0 ? fmtTok(lb.labrat_out) : '';
+      const kind = prev ? 'simulated preview buy' : sim ? 'simulated buy' : 'buy';
+      let line = '';
+      if (lb.state === 'simulated' || lb.state === 'bought') line = kind[0].toUpperCase() + kind.slice(1) + ': ' + (eth ? eth + ' ETH' : '') + (tok ? ' → ' + tok + ' LABRAT' : '');
+      else if (lb.state === 'due') line = (eth ? kind[0].toUpperCase() + kind.slice(1) + ' of ' + eth + ' ETH booked' : 'Buy booked') + ': the rat clicks it through on pons next';
+      else if (lb.state === 'expired') line = 'The hour’s buy was not completed in time' + (why ? ': ' + why : '');
+      else if (lb.state === 'none' || (!eth && Object.keys(lb).length)) line = 'No buy this hour' + (why ? ': ' + why : '');
+      else if (eth) line = kind[0].toUpperCase() + kind.slice(1) + ': ' + eth + ' ETH' + (tok ? ' → ' + tok + ' LABRAT' : '');
+      const p = obj(lb.pons);
+      if (line && p && p.clicked_by_rat === true) line += ' · clicked through by the rat on pons';
+      E.lastBuy.textContent = line; E.lastBuy.hidden = !line;
+    }
+
+    // totals
+    const h = obj(j.hits) || {};
+    E.hits.textContent = int(h.counted) !== null ? fmtN(h.counted) : '—';
     E.buysK.textContent = simulated ? 'Simulated buys' : 'Buys';
     E.outK.textContent = simulated ? 'LABRAT (simulated)' : 'LABRAT bought';
     E.buys.textContent = int(b.count) !== null ? b.count + (dec(b.eth_in) ? ' · ' + b.eth_in + ' ETH' : '') : '—';
@@ -1542,34 +2107,29 @@ const TILES = (function ratTiles() {
       const sim = !live || r.simulated !== false;
       const at = txt(r.at) && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(r.at) ? r.at.slice(11, 16) + ' UTC' : '';
       const venue = r.venue === 'pool' ? 'pool' : r.venue === 'curve' ? 'curve' : '';
+      const rr = typeof r.hit_rate === 'number' && isFinite(r.hit_rate) && r.hit_rate >= 0 && r.hit_rate <= 1 ? r.hit_rate : null;
       return '<li><span class="bb-t">' + esc(at) + '</span><span>' + (sim ? 'simulated buy' : 'buy') + ': ' +
         esc(fmtEth(r.eth_in)) + ' &rarr; ' + esc(fmtTok(r.labrat_out)) + ' LABRAT' +
-        (int(r.hits_covered) !== null ? ' <em>(' + r.hits_covered + ' hits)</em>' : '') +
+        (rr !== null ? ' <em>(hit rate ' + esc(pctTxt(rr)) + ')</em>' : '') +
+        (r.preview === true ? ' <em>preview amount</em>' : '') +
         (venue ? ' <em>' + venue + '</em>' : '') +
-        (sim && r.pons && typeof r.pons === 'object' && r.pons.clicked_by_rat === true ? ' <em>clicked by the rat on pons</em>' : '') +
+        (sim && obj(r.pons) && r.pons.clicked_by_rat === true ? ' <em>clicked by the rat on pons</em>' : '') +
         '</span></li>';
     }).join('');
+
     const stopped = txt(j.stopped);
     const counting = rl.counting === true && !stale;
     E.conn.textContent = stale ? 'status stale' : stopped ? 'buys stopped'
-      : counting ? (test ? 'counting a test stream' : 'counting live hits')
+      : counting ? (test ? 'counting a test stream' : 'counting live play')
       : rl.connected === true ? 'waiting for live training' : 'not connected';
     E.conn.className = 'bb-conn' + (stale || stopped ? ' off' : counting && !test ? ' on' : '');
-    const next = int(j.next_buy_in_s);
-    const why = typeof j.next_buy_note === 'string' && NOTE.test(j.next_buy_note) ? j.next_buy_note : '';
-    const sim = simulated ? 'simulated ' : '';
-    let nextTxt = '';
-    if (!stopped && !stale) {
-      if (next === null) nextTxt = why && why !== 'waiting for hits' ? 'No ' + sim + 'buy for now: ' + why + '. ' : '';
-      else if (next === 0) nextTxt = 'Next ' + sim + 'buy due now. ';
-      else nextTxt = 'Next ' + sim + 'buy in about ' + Math.max(1, Math.round(next / 60)) + ' min' + (why && why !== 'due' ? ' (' + why + ')' : '') + '. ';
-    }
-    const updTxt = Number.isFinite(upd) ? new Date(upd).toISOString().slice(11, 16) + ' UTC' : 'an unknown time';
+    const updTxt = Number.isFinite(upd) ? hm(upd) + ' UTC' : 'an unknown time';
     E.note.textContent = (stale ? 'This status has not updated since ' + updTxt + ': the counter may not be running. ' : '') +
-      (test ? 'These hits come from a test stream. ' : '') +
+      (test ? 'These counts come from a test stream. ' : '') +
       (stopped ? 'Buys stopped: ' + stopped + '. ' : '') +
-      (simulated ? 'Buybacks shown are simulated against the live chain. ' : '') + nextTxt +
-      'Hits are counted as each training attempt ends.';
+      (simulated ? 'Buybacks shown are simulated against the live chain: checked, not sent. ' : '') +
+      'Hits, misses and off-tile presses are counted as each training attempt ends; one buy an hour, on the hour (UTC).';
+    tick();
   }
 
   let timer = 0;
@@ -1582,13 +2142,14 @@ const TILES = (function ratTiles() {
       if (!j || typeof j !== 'object') throw new Error('bad status');
       render(j);
       PONS.onBuyback(j);                 // the rat-on-pons panel's "next session" line
-      TILES.onBuyback(j);                // Rat Tiles says its hits count only if the engine counts the tiles task
+      TILES.onBuyback(j);                // Rat Tiles says its play counts only if the engine counts the tiles task
     } catch (e) {
       E.conn.textContent = 'status unavailable'; E.conn.className = 'bb-conn off';
     }
     if (!document.hidden) timer = setTimeout(poll, 15000);
   }
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !timer) poll(); });
+  setInterval(() => { if (!document.hidden) tick(); }, 1000);
   poll();
 })();
 
