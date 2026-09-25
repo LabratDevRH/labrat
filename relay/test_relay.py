@@ -1182,9 +1182,254 @@ async def pons_checks(closers):
         await kt
 
 
+TILES_HELLO = {'type': 'hello', 'source': 'training', 'task': 'tiles', 'run': 'tiles_run_1', 'label': 'relay test tiles',
+               'fps': 25, 'started': '2026-09-25T13:00:00Z'}
+TILES_HELLO2 = dict(TILES_HELLO, run='tiles_run_2', started='2026-09-25T13:30:00Z')
+
+
+def tiles_snap(k, n_tiles=4, size=None):
+    """A Rat Tiles board snapshot numbered k (its note_i). size: pad it to exactly that many bytes."""
+    m = {'type': 'tiles', 't': round(k * 0.1, 3), 'song': 'ode_to_joy', 'speed': 0.12, 'lanes': 4,
+         'cursor': [0.5, 0.62], 'tiles': [[k + i, i % 4, round(0.9 - 0.25 * i, 3), 0.2, 'up'] for i in range(n_tiles)],
+         'note_i': k}
+    s = json.dumps(m, separators=(',', ':'))
+    if size is not None:
+        m['pad'] = ''
+        base = len(json.dumps(m, separators=(',', ':')))
+        m['pad'] = 'x' * (size - base)
+        s = json.dumps(m, separators=(',', ':'))
+        assert len(s) == size, (len(s), size)
+    return s
+
+
+def tile_ev(k, result='hit', size=None):
+    m = {'type': 'tile', 'id': k, 'lane': k % 4, 'result': result, 'note_i': k, 'song': 'ode_to_joy'}
+    if size is not None:
+        m['pad'] = ''
+        m['pad'] = 'y' * (size - len(json.dumps(m, separators=(',', ':'))))
+    return json.dumps(m, separators=(',', ':'))
+
+
+def tkind(text):
+    """('tiles', k) / ('tile', k) for a Rat Tiles text, else None."""
+    d = strict(text)
+    if d.get('type') == 'tiles':
+        return 'tiles', d.get('note_i')
+    if d.get('type') == 'tile':
+        return 'tile', d.get('note_i')
+    return None
+
+
+async def tiles_relay():
+    relay = Relay({'LABRAT_PUBLISH_TOKEN': TOKEN}, 'tiles')
+    closers, raws = [], []
+    try:
+        await tiles_checks(closers, raws)
+    finally:
+        for r in raws:
+            r.shutdown()
+        for c in closers:
+            try:
+                await c()
+            except Exception:
+                pass
+        relay.stop()
+        log = relay.text()
+    check('Traceback' not in log and 'Exception in ASGI' not in log, 'the relay logged no exceptions (Rat Tiles)',
+          f'log: {relay.logpath}')
+    if 'Traceback' in log or 'Exception in ASGI' in log:
+        print(log[-4000:])
+
+
+async def tiles_checks(closers, raws):
+    section('Rat Tiles: tiles / tile messages only in a run whose hello says task "tiles"')
+    V = await Rec('V').start()
+    closers.append(V.close)
+    await until(lambda: len(V.msgs) >= 1, 3)
+    P = await connect(PUB, additional_headers=AUTH, open_timeout=5)
+    closers.append(P.close)
+    await P.send(tiles_snap(0))                                      # before any hello: dropped
+    await P.send(json.dumps(HELLO))                                  # a lever run
+    await P.send(tiles_snap(1))
+    await P.send(tile_ev(1))
+    await until(lambda: V.find_text(lambda d: d == HELLO) is not None, 3)
+    await asyncio.sleep(0.3)
+    st = await status()
+    c = st['counts']
+    check(not [m for m in V.texts() if m.get('type') in ('tiles', 'tile')] and c.get('dropped_outside_session') == 1
+          and c.get('dropped_tiles_wrong_task') == 2 and st['tiles'] is None,
+          'a snapshot before any hello, and tiles / tile in a lever run, are dropped and counted',
+          json.dumps({k: v for k, v in c.items() if 'dropped' in k}))
+    mark = len(V.msgs)
+    await P.send(json.dumps(TILES_HELLO))
+    rows = [{'steps': 1000 * (i + 1), 'ret': 1.0 + i, 'hits': 2 + i} for i in range(3)]
+    for r in rows:
+        await P.send(json.dumps({'type': 'metrics', 'row': r}))
+    await until(lambda: V.find_text(lambda d: d == TILES_HELLO, mark) is not None, 3)
+    st = await status()
+    check(st['live'] is True and st['hello'] == TILES_HELLO, 'a hello with task "tiles" is accepted and live')
+
+    section('Rat Tiles: snapshots at 10 Hz and tile events reach viewers verbatim, in the order sent')
+    mark = len(V.msgs)
+    sent = []
+    t0 = time.perf_counter()
+    for k in range(30):
+        d = t0 + k * 0.1 - time.perf_counter()
+        if d > 0:
+            await asyncio.sleep(d)
+        s = tiles_snap(100 + k)
+        await P.send(s)
+        await P.send(make_frame(100 + k))
+        sent.append(s)
+        if k % 3 == 2:
+            e = tile_ev(100 + k, 'hit' if k % 2 else 'miss')
+            await P.send(e)
+            sent.append(e)
+    await until(lambda: [m for _, m in V.msgs[mark:] if isinstance(m, str)] == sent, 3)
+    got = [m for _, m in V.msgs[mark:] if isinstance(m, str)]
+    check(got == sent, 'all 30 snapshots and 10 tile events arrive, byte for byte, in order', f'{len(got)}/{len(sent)}')
+    check([frame_k(m) for _, m in V.msgs[mark:] if isinstance(m, bytes)] == list(range(100, 130)),
+          'the rat frames in between are unaffected')
+
+    section('Rat Tiles: caps and junk')
+    mark = len(V.msgs)
+    await P.send(tiles_snap(200, size=4097))                         # over 4 KB
+    await P.send(tile_ev(201, size=513))                             # over 512 B
+    await P.send(json.dumps({'type': 'tiles', 't': 1.0, 'song': 'ode_to_joy', 'tiles': 'not a list'}))
+    await P.send(json.dumps({'type': 'tiles', 't': 1.0, 'song': 'ode_to_joy'}))
+    await P.send(tile_ev(202, 'maybe'))
+    await P.send(json.dumps({'type': 'tile', 'id': 203}))
+    ok_snap, ok_ev = tiles_snap(204, size=4096), tile_ev(205, 'wrong', size=512)
+    await P.send(ok_snap)
+    await P.send(ok_ev)
+    await until(lambda: any(m == ok_ev for _, m in V.msgs[mark:]), 3)
+    got = [m for _, m in V.msgs[mark:] if isinstance(m, str)]
+    check(got == [ok_snap, ok_ev], 'a 4,096-byte snapshot and a 512-byte event pass; bigger ones, a snapshot without a '
+          'tiles list and an event without a hit / miss / wrong result are dropped', str([tkind(m) for m in got]))
+    c = (await status())['counts']
+    check(c.get('dropped_tiles_too_big') == 1 and c.get('dropped_tile_too_big') == 1 and c.get('dropped_bad_tiles') == 2
+          and c.get('dropped_bad_tile') == 2 and not c.get('dropped_error'), 'each is counted in /status',
+          json.dumps({k: v for k, v in c.items() if 'tile' in k}))
+
+    section('Rat Tiles: at most 12 snapshots a second per viewer; tile events are never dropped')
+    await asyncio.sleep(0.5)                                         # the per-viewer burst refills
+    mark = len(V.msgs)
+    c0 = (await status())['counts'].get('tiles_dropped_for_rate', 0)
+    N = 90
+    t0 = time.perf_counter()
+    for k in range(N):                                               # 30 snapshots a second for 3 s
+        d = t0 + k / 30 - time.perf_counter()
+        if d > 0:
+            await asyncio.sleep(d)
+        await P.send(tiles_snap(1000 + k))
+        await P.send(tile_ev(1000 + k))
+    span = time.perf_counter() - t0
+    await until(lambda: any(tkind(m) == ('tile', 1000 + N - 1) for _, m in V.msgs[mark:] if isinstance(m, str)), 3)
+    seq = [(t, tkind(m)) for t, m in V.msgs[mark:] if isinstance(m, str)]
+    evs = [k for _, (kind, k) in seq if kind == 'tile']
+    snaps = [(t, k) for t, (kind, k) in seq if kind == 'tiles']
+    check(evs == list(range(1000, 1000 + N)), f'all {N} tile events arrive, in order', f'{len(evs)}/{N}')
+    lo, hi = int(12 * span) - 2, int(12 * span + 3) + 1
+    check(lo <= len(snaps) <= hi, f'{len(snaps)} of {N} snapshots reach the viewer in {span:.2f} s (12 a second, '
+          f'plus a burst of 3)', f'allowed {lo}..{hi}')
+    win = max((sum(1 for u, _ in snaps if t <= u < t + 1.0) for t, _ in snaps), default=0)
+    check(win <= 15, 'no one-second window carries more than 12 + the burst of 3', f'max {win} in a second')
+    ks = [k for _, k in snaps]
+    order = [kind_k for _, kind_k in seq]
+    check(ks == sorted(ks) and all(order.index(('tiles', k)) + 1 == order.index(('tile', k)) for k in ks),
+          'the snapshots that pass stay in order, each straight ahead of its own tile event')
+    c = (await status())['counts']
+    check(c.get('tiles_dropped_for_rate', 0) - c0 == N - len(snaps), '/status counts the snapshots dropped for rate',
+          f"{c.get('tiles_dropped_for_rate', 0) - c0}")
+
+    section('Rat Tiles: a late joiner gets the newest snapshot (never the events), outside the state message')
+    await asyncio.sleep(0.5)
+    last_snap, last_ev = tiles_snap(500), tile_ev(500)
+    await P.send(make_frame(500))
+    await P.send(last_snap)
+    await P.send(last_ev)
+    await until(lambda: any(m == last_ev for _, m in V.msgs), 3)
+    L = await Rec('L').start()
+    closers.append(L.close)
+    await until(lambda: len(L.msgs) >= 3, 3)
+    await asyncio.sleep(0.3)
+    m = [x for _, x in L.msgs]
+    s0 = strict(m[0]) if m and isinstance(m[0], str) else {}
+    check(len(m) == 3 and s0.get('type') == 'state' and s0.get('live') is True and m[1] == make_frame(500)
+          and m[2] == last_snap, 'it gets: the state, the last frame, then the newest snapshot, verbatim',
+          str([('text', strict(x).get('type')) if isinstance(x, str) else 'frame' for x in m]))
+    check(set(s0) == {'type', 'live', 'hello', 'checkpoint', 'episode', 'history'} and s0.get('history') == rows,
+          'the state itself is unchanged: its history holds only the log rows')
+    st = await status()
+    check(st['tiles'] == {'song': 'ode_to_joy', 't': 50.0, 'speed': 0.12, 'note_i': 500, 'tiles': 4},
+          '/status shows the newest snapshot\'s song, time, speed, note and tile count', json.dumps(st['tiles']))
+
+    section('Rat Tiles: a slow viewer holds one unsent snapshot at most (the newest), in order with the events')
+    D = RawViewer('D', 'stuck', rcvbuf=4096)
+    raws.append(D)
+    D.start()
+    await until_status(lambda s: s['viewers'] == 3, 3)
+    for i in range(150):                                             # fill D's socket and the relay's send buffer
+        await P.send(make_frame(3000 + i))
+        await asyncio.sleep(0.02)
+    c0 = (await status())['counts'].get('tiles_replaced_for_slow_viewers', 0)
+    vmark = len(V.msgs)
+    sent = []
+    t0 = time.perf_counter()
+    for k in range(20):                                              # 10 Hz, as the publisher sends them
+        d = t0 + k * 0.1 - time.perf_counter()
+        if d > 0:
+            await asyncio.sleep(d)
+        s, e = tiles_snap(2000 + k), tile_ev(2000 + k)
+        await P.send(s)
+        await P.send(e)
+        sent += [s, e]
+    D.mode = 'fast'
+    want_last = tile_ev(2019)
+    await until(lambda: any(kind == 'text' and p == want_last for _, kind, p in D.msgs), 8)
+    dt = [p for _, kind, p in D.msgs if kind == 'text' and tkind(p) and tkind(p)[1] >= 2000]
+    it = iter(sent)
+    subseq = all(any(x == y for y in it) for x in dt)
+    d_snaps = [tkind(p)[1] for p in dt if tkind(p)[0] == 'tiles']
+    d_evs = [tkind(p)[1] for p in dt if tkind(p)[0] == 'tile']
+    check(d_evs == list(range(2000, 2020)), 'the slow viewer gets every tile event, in order', f'{len(d_evs)}/20')
+    check(subseq and d_snaps and d_snaps[-1] == 2019 and len(d_snaps) < 20,
+          'it gets fewer snapshots, ending on the newest, and everything in the order it was sent',
+          f'{len(d_snaps)} of 20 snapshots, last {d_snaps[-1] if d_snaps else "-"}')
+    c = (await status())['counts']
+    check(c.get('tiles_replaced_for_slow_viewers', 0) > c0 and not D.eof,
+          '/status counts the replaced snapshots; the slow viewer stays connected',
+          f"{c.get('tiles_replaced_for_slow_viewers', 0) - c0} replaced")
+    got_v = [m for _, m in V.msgs[vmark:] if isinstance(m, str)]
+    check(got_v == sent, 'the fast viewer still got all 20 snapshots and 20 events', f'{len(got_v)}/40')
+
+    section('Rat Tiles: after bye, and in the next run, no old snapshot is replayed')
+    await P.send(json.dumps({'type': 'bye'}))
+    await until(lambda: V.find_text(lambda d: d.get('type') == 'idle') is not None, 3)
+    G = await Rec('G').start()
+    closers.append(G.close)
+    await until(lambda: len(G.msgs) >= 1, 3)
+    await asyncio.sleep(0.3)
+    check(len(G.msgs) == 1 and strict(G.msgs[0][1]).get('live') is False,
+          'a viewer joining after the bye gets the state (live=false) and no snapshot')
+    await P.send(json.dumps(TILES_HELLO2))
+    await until_status(lambda s: s['hello'] == TILES_HELLO2, 3)
+    H2 = await Rec('H2').start()
+    closers.append(H2.close)
+    await until(lambda: len(H2.msgs) >= 1, 3)
+    await asyncio.sleep(0.3)
+    st = await status()
+    check(len(H2.msgs) == 1 and strict(H2.msgs[0][1]).get('live') is True and st['tiles'] is None,
+          'a new tiles run starts without the old run\'s snapshot (or frame)')
+    await P.send(tiles_snap(9000))
+    await until(lambda: any(tkind(m) == ('tiles', 9000) for _, m in H2.msgs if isinstance(m, str)), 3)
+    check(True, 'its first snapshot goes straight through')
+
+
 async def amain():
     await main_relay()
     await pons_relay()
+    await tiles_relay()
     await other_relays()
 
 

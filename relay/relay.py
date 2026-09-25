@@ -13,9 +13,11 @@
 What a viewer receives, in order:
     1. {"type":"state","live":bool,"hello":{...}|null,"checkpoint":{...}|null,"episode":{...}|null,
         "history":[the last <=300 log.jsonl rows since that hello]}
-       and, when live, the most recent binary frame straight after it. The whole state stays under STATE_MAX bytes
+       and, when live, the most recent binary frame straight after it (and, in a Rat Tiles run, the newest "tiles"
+       snapshot after that). The whole state stays under STATE_MAX bytes
        (site/js/live.js ignores text over 65,536): if 300 rows would not fit, only the newest rows that fit are sent.
-    2. then everything the publisher sends, unchanged: hello, metrics, checkpoint, episode, bye, binary frames.
+    2. then everything the publisher sends, unchanged: hello, metrics, checkpoint, episode, bye, binary frames, and in
+       a Rat Tiles run tiles / tile (see "Rat Tiles" below).
     3. {"type":"idle","reason":...} when the publisher disconnects, says bye, or sends nothing for 15 s.
     4. a fresh "state" with live=true when a publisher that went quiet starts sending again.
     5. {"type":"pong","t":<unix s>} in answer to a viewer's "ping".
@@ -41,6 +43,17 @@ skip it and the site's "Rat on pons" panel can pick it out:
       The frames are masked by the rig before they are sent; the relay cannot look inside a JPEG.
 "live" for the pons channel means: its publisher is connected, has sent a pons_hello with source "buyrig" (a test
 session, "test": true, only with RELAY_ALLOW_TEST=1), and has sent something in the last 15 s.
+
+Rat Tiles (a training run whose hello has "task":"tiles"). The training publisher also sends, on the training channel:
+    - {"type":"tiles",...}: a snapshot of the board (song, speed, cursor, every tile on screen), at most 10 a second.
+      At most TILES_MAX_TEXT bytes. It must carry a "tiles" list. Each viewer gets at most TILES_VIEWER_PER_S of them a
+      second (a burst of TILES_VIEWER_BURST); snapshots over that are dropped for that viewer, and a viewer holds at
+      most one unsent snapshot (a newer one replaces it, at the end of its outbox, so the order with the tile events
+      is kept). Only the newest snapshot is kept for late joiners: they get it after the state (and its frame) while
+      the run is live. The history and the state message never carry tiles.
+    - {"type":"tile",...}: one tile's outcome ("result": "hit" | "miss" | "wrong"), at most TILE_MAX_TEXT bytes. Never
+      dropped for rate, never replayed.
+Both are dropped unless the current hello's task is "tiles". Both are forwarded unchanged (like every training text).
 
 Run it (single process only: all state is in memory, so never use --workers > 1 or several replicas):
     uvicorn relay:app --host 0.0.0.0 --port $PORT --ws-max-size 266240 --ws-per-message-deflate false
@@ -75,8 +88,15 @@ STATE_MAX = 60_000            # a state message stays under this many bytes (sit
 VIEWER_CAP = 500
 FRAME_MAGIC = 7.0
 MIN_FRAME = 12 * 4            # the 12-float header
-TASKS = ('lever', 'cursor', 'steer')
-PUBLISHER_TYPES = ('hello', 'metrics', 'checkpoint', 'episode', 'bye')
+TASKS = ('lever', 'cursor', 'steer', 'tiles')
+PUBLISHER_TYPES = ('hello', 'metrics', 'checkpoint', 'episode', 'bye', 'tiles', 'tile')
+
+# ---- Rat Tiles (hello.task "tiles"): board snapshots and tile outcomes on the training channel -----------------------
+TILES_MAX_TEXT = 4096         # a "tiles" snapshot (UTF-8 bytes)
+TILE_MAX_TEXT = 512           # a "tile" event
+TILE_RESULTS = ('hit', 'miss', 'wrong')
+TILES_VIEWER_PER_S = 12.0     # "tiles" snapshots per viewer per second, at most (the publisher sends <= 10) ...
+TILES_VIEWER_BURST = 3.0      # ... with a burst of this many; "tile" events are never dropped for rate
 
 # ---- per-viewer fanout limits ---------------------------------------------------------------------------------------
 VIEWER_MAX_FRAMES = 16        # queued binary frames per viewer (~0.6 s at 25 fps); beyond this the OLDEST is dropped
@@ -205,7 +225,7 @@ class Viewer:
     it at most PONS_VIEWER_FPS times a second. It goes out after any queued text (so a pons_hello / pons_state
     arrives before the frames that follow it) and ahead of queued training frames (so those cannot starve it)."""
     __slots__ = ('ws', 'q', 'n_bin', 'n_text', 'dropped', 'wake', 'done', 'closed', 'kill_code', 'kill_reason',
-                 'sending_since', 'bucket', 'bucket_t', 'pons_frame', 'pons_next')
+                 'sending_since', 'bucket', 'bucket_t', 'pons_frame', 'pons_next', 'tiles_q', 'tiles_bucket', 'tiles_t')
 
     def __init__(self, ws):
         self.ws = ws
@@ -223,6 +243,9 @@ class Viewer:
         self.bucket_t = time.monotonic()
         self.pons_frame = None            # the newest pons frame not yet sent to this viewer
         self.pons_next = 0.0              # monotonic time before which no pons frame goes out (the per-viewer rate)
+        self.tiles_q = None               # the Rat Tiles snapshot (str) in this viewer's outbox, not yet sent
+        self.tiles_bucket = TILES_VIEWER_BURST
+        self.tiles_t = time.monotonic()
 
     def push_bytes(self, b):
         if self.closed:
@@ -251,6 +274,30 @@ class Viewer:
         self.n_text += 1
         self.wake.set()
 
+    def push_tiles(self, s):
+        """A Rat Tiles snapshot (a whole board): at most TILES_VIEWER_PER_S a second for this viewer (the rest are
+        dropped), and at most one in its outbox: a newer one removes the unsent older one and goes at the end, so the
+        snapshots and the tile events stay in the order the publisher sent them."""
+        if self.closed:
+            return
+        now = time.monotonic()
+        self.tiles_bucket = min(TILES_VIEWER_BURST, self.tiles_bucket + (now - self.tiles_t) * TILES_VIEWER_PER_S)
+        self.tiles_t = now
+        if self.tiles_bucket < 1.0:
+            HUB.count('tiles_dropped_for_rate')
+            return
+        self.tiles_bucket -= 1.0
+        old = self.tiles_q
+        if old is not None:
+            try:
+                self.q.remove(old)        # compared by identity first: this viewer's one queued snapshot
+                self.n_text -= 1
+                HUB.count('tiles_replaced_for_slow_viewers')
+            except ValueError:
+                pass
+        self.tiles_q = s
+        self.push_text(s)
+
     def push_pons(self, b):
         """A pons frame: replaces the one this viewer has not been sent yet (frames are whole pictures)."""
         if self.closed:
@@ -268,6 +315,7 @@ class Viewer:
         self.q.clear()
         self.n_bin = self.n_text = 0
         self.pons_frame = None
+        self.tiles_q = None
         self.wake.set()
         self.done.set()
 
@@ -307,6 +355,8 @@ class Viewer:
                         self.n_bin -= 1
                     else:
                         self.n_text -= 1
+                        if item is self.tiles_q:
+                            self.tiles_q = None
                 self.sending_since = time.monotonic()
                 if item.__class__ is bytes:
                     await ws.send_bytes(item)
@@ -387,6 +437,8 @@ class Hub:
         self.checkpoint = None
         self.episode = None
         self.last_frame = None
+        self.tiles = None                 # the newest Rat Tiles snapshot (its text, as forwarded) of this run
+        self.tiles_info = None            # a few of its fields, for /status
         self.viewers = set()
         self.pending = 0                  # viewer handshakes in progress (count toward the cap)
         self.per_ip = {}                  # per-address key -> /live sockets held (accepted or in handshake)
@@ -561,6 +613,9 @@ def on_pub_text(pub, text):
     if kind in ('hello', 'checkpoint', 'episode') and len(_compact(msg)) > MAX_PART:
         H.count('dropped_part_too_big')   # kept for the state message (as ASCII JSON), which must stay small
         return None
+    if kind in ('tiles', 'tile') and len(text.encode('utf-8')) > (TILES_MAX_TEXT if kind == 'tiles' else TILE_MAX_TEXT):
+        H.count(f'dropped_{kind}_too_big')
+        return None
 
     if kind == 'hello':
         if msg.get('source') != 'training':
@@ -579,7 +634,7 @@ def on_pub_text(pub, text):
         same = bool(prev) and all(prev.get(k) == msg.get(k) for k in ('run', 'task', 'started'))
         H.history.clear()                 # every hello starts a fresh curve; the publisher re-sends its rows after it
         if not same:                      # a new run or a new publisher session: nothing of the old one carries over
-            H.checkpoint = H.episode = H.last_frame = None
+            H.checkpoint = H.episode = H.last_frame = H.tiles = H.tiles_info = None
         H.hello = msg
         pub.in_session = True
         pub.last_rx = time.monotonic()
@@ -600,6 +655,9 @@ def on_pub_text(pub, text):
         H.set_idle(IDLE_BYE, 'the publisher said bye')
         return None
 
+    if kind in ('tiles', 'tile'):
+        return on_tiles_text(pub, msg, text, kind)
+
     if kind == 'metrics':
         row = msg.get('row')
         if not isinstance(row, dict):
@@ -614,6 +672,41 @@ def on_pub_text(pub, text):
         H.touch(pub)
         H.episode = msg
     H.dirty()
+    H.broadcast_text(text)
+    return None
+
+
+def _tiles_info(msg):
+    """The few fields of a tiles snapshot that /status shows (numbers and a short song id only)."""
+    num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None   # noqa: E731
+    song = msg.get('song')
+    return {'song': song if isinstance(song, str) and len(song) <= 64 else None, 't': num(msg.get('t')),
+            'speed': num(msg.get('speed')), 'note_i': num(msg.get('note_i')), 'tiles': len(msg['tiles'])}
+
+
+def on_tiles_text(pub, msg, text, kind):
+    """A Rat Tiles snapshot ("tiles") or tile outcome ("tile") from the training publisher, inside a session whose
+    hello has task "tiles". Snapshots go to each viewer through its rate cap (Viewer.push_tiles) and the newest is
+    kept for late joiners; tile events go to everyone, like any other text."""
+    H = HUB
+    if not (H.hello and H.hello.get('task') == 'tiles'):
+        H.count('dropped_tiles_wrong_task')
+        return None
+    if kind == 'tiles':
+        if not isinstance(msg.get('tiles'), list):
+            H.count('dropped_bad_tiles')
+            return None
+        H.touch(pub)
+        H.tiles, H.tiles_info = text, _tiles_info(msg)
+        H.count('tiles_in')
+        for v in list(H.viewers):
+            v.push_tiles(text)
+        return None
+    if msg.get('result') not in TILE_RESULTS:
+        H.count('dropped_bad_tile')
+        return None
+    H.touch(pub)
+    H.count('tile_events_in')
     H.broadcast_text(text)
     return None
 
@@ -946,6 +1039,8 @@ async def ws_live(ws: WebSocket):
         v.push_text(H.state_text())
         if H.live and H.last_frame is not None:
             v.push_bytes(H.last_frame)
+        if H.live and H.tiles is not None:  # a Rat Tiles run: the newest board snapshot (never the tile events)
+            v.push_tiles(H.tiles)
         P = PONS
         if P.has_state():                 # the pons channel, once it has had a session: its state, then its last frame
             v.push_text(P.state_text())
@@ -1011,6 +1106,7 @@ async def status():   # async: runs on the event loop, never alongside a HUB upd
         'idle_after_s': IDLE_S,
         'uptime_s': round(time.time() - H.started),
         'counts': dict(H.counts),
+        'tiles': H.tiles_info,
         'pons': pons,
     }, headers=_NO_CACHE)
 

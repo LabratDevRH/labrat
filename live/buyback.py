@@ -17,14 +17,15 @@ understand money. This code sets the rules; the rat's hits in the live view only
 WHAT COUNTS AS A HIT
   The relay's public /live stream (Origin https://lab-rat.net) forwards what live/publish_training.py sends. A hit is
   the "hits" field of an {"type":"episode","n","presses","hits","misses","fell"} message: for the cursor and steering
-  tasks a click while the cursor was on the lit target (cursor_env.CursorEnv). The lever task has no target (its "hit"
-  is a clean press, at most one per attempt), so it is NOT counted unless --tasks names it; the public rule then says
-  so. Only episodes of a live training hello are counted: hello.source "training", not a TEST
+  tasks a click while the cursor was on the lit target (cursor_env.CursorEnv); in Rat Tiles (task "tiles",
+  tiles_env.py) a tile tapped, i.e. a click on the lowest falling tile, the one lit. The lever task has no target (its
+  "hit" is a clean press, at most one per attempt), so it is NOT counted unless --tasks names it; the public rule then
+  says so. Only episodes of a live training hello are counted: hello.source "training", not a TEST
   stream (unless --accept-test-streams, DRY only), and the state message's last episode only while state.live is true
   (the relay keeps the last episode of an ended run; it is never counted). Each episode is keyed by run | task |
   hello.started | n and counted once: a reconnect, a re-sent state or a restart of this program (the journal holds the
-  keys) never counts it twice. An episode claiming more than 4 hits (1 for the lever task) or presses != hits + misses
-  is rejected and journalled. Binary frames (click flag + cursor on the lit target) only feed an unconfirmed tally of
+  keys) never counts it twice. An episode claiming more than 4 hits (1 for the lever task; TILES_MAX_HITS for Rat Tiles,
+  where an attempt is one song, at most that many notes) or presses != hits + misses is rejected and journalled. Binary frames (click flag + cursor on the lit target) only feed an unconfirmed tally of
   the attempt in progress: the publisher and the relay drop frames under load, so money never depends on them.
   Episodes the relay forwarded while this program was disconnected are missed (journalled as a gap when n jumps):
   it can undercount, never overcount.
@@ -130,9 +131,10 @@ POOL_KEY_T = '(address,address,uint24,int24,address)'
 
 RELAY_URL = 'wss://labrat-relay-production.up.railway.app/live'
 ORIGIN = 'https://lab-rat.net'
-TASKS = ('lever', 'cursor', 'steer')
-DEFAULT_TASKS = ('cursor', 'steer')   # the tasks with a lit target; the lever task only has a clean press
+TASKS = ('lever', 'cursor', 'steer', 'tiles')
+DEFAULT_TASKS = ('cursor', 'steer', 'tiles')   # the tasks with a lit target; the lever task only has a clean press
 N_TARGETS = 4                  # cursor_env.N_TARGETS: an attempt ends after 4 targets, so at most 4 hits
+TILES_MAX_HITS = 64            # tiles_env.MAX_SONG_NOTES: a Rat Tiles attempt is one song of at most 64 notes
 FRAME_MAGIC = 7.0              # live/labrat_frame.py
 DEFAULT_JOURNAL_DIR = os.path.join(ROOT, 'runs', 'buyback')
 LIVE_JOURNAL_DIR = DEFAULT_JOURNAL_DIR   # LIVE's ONE journal + lock place (--journal-dir is refused in LIVE)
@@ -806,7 +808,7 @@ class HitCounter:
             self.stats['duplicates'] += 1
             return
         self.seen.add(key)
-        cap = 1 if s['task'] == 'lever' else self.max_hits
+        cap = 1 if s['task'] == 'lever' else (TILES_MAX_HITS if s['task'] == 'tiles' else self.max_hits)
         why = None
         if vals['presses'] != vals['hits'] + vals['misses']:
             why = 'presses != hits + misses'
@@ -1626,12 +1628,14 @@ class Engine:
             public_relay = self.relay['url'] == RELAY_URL
             test_stream = bool(s and s['test'])
             lever = 'lever' in c.tasks
+            tiles = 'tiles' in c.tasks
             stopped = self.stopped_public or ('the total cap is reached: no more buybacks' if L.total_done() else None)
             return {
                 'mode': self.mode,
                 'label': LIVE_LABEL if self.mode == 'LIVE' else DRY_LABEL,
                 'rule': (f'Each target the rat hits in the live view (the newest saved training checkpoint, playing in '
-                         f'its own simulation){"; in the lever task, each clean press," if lever else ""} adds '
+                         f'its own simulation){"; in Rat Tiles, each tile it taps," if tiles else ""}'
+                         f'{"; in the lever task, each clean press," if lever else ""} adds '
                          f'{eth_str(c.per_hit_wei)} ETH to the next $LABRAT buyback, until the hourly, daily or total '
                          f'caps are reached; hits over the caps are counted but add nothing. The code sets this rule '
                          f'and the caps; the rat\'s hits only trigger it. The rat does not understand money.'),
@@ -1998,8 +2002,8 @@ def parse_args(argv=None):
     ap.add_argument('--max-gas-gwei', type=float)
     ap.add_argument('--max-gas-share-bps', type=int)
     ap.add_argument('--venue', choices=('auto', 'curve', 'pool'))
-    ap.add_argument('--tasks', help='comma list of lever,cursor,steer (default cursor,steer: the tasks with a lit '
-                                    'target; lever counts clean presses, and the public rule then says so)')
+    ap.add_argument('--tasks', help='comma list of lever,cursor,steer,tiles (default cursor,steer,tiles: the tasks '
+                                    'with a lit target; lever counts clean presses, and the public rule then says so)')
     return ap.parse_args(argv)
 
 

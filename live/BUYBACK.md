@@ -35,9 +35,11 @@ have to match.
   `{"type":"episode","n","presses","hits","misses","fell"}` message that `live/publish_training.py` sends at the end of
   each attempt.
 - **A hit is that message's `hits` field.** For the cursor and steering tasks it is a click while the cursor was on the
-  lit target (`cursor_env.CursorEnv`). The lever task has no target (its "hit" is a clean press, at most one per
-  attempt), so **by default only the cursor and steering tasks count**. `--tasks lever,cursor,steer` opts the lever task
-  in, and the public rule then says "in the lever task, each clean press".
+  lit target (`cursor_env.CursorEnv`); in Rat Tiles (`tiles_env.py`) a tile tapped (a click on the lowest falling tile,
+  the lit one). An attempt is one song there, so up to `TILES_MAX_HITS` (64) hits instead of 4. The lever task has no
+  target (its "hit" is a clean press, at most one per attempt), so **by default only the cursor, steering and Rat Tiles
+  tasks count**. `--tasks lever,cursor,steer,tiles` opts the lever task in, and the public rule then says "in the lever
+  task, each clean press".
 - **Only a live training session counts.** The hello must have `source` set to `"training"` and must not be a TEST
   stream; `--accept-test-streams` lifts that for DRY tests only, and LIVE refuses the flag. The last episode in the
   relay's `state` message counts only while `state.live` is true. The relay keeps the last episode of a run that has

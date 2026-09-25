@@ -546,7 +546,7 @@ class TestHitCounter(unittest.TestCase):
     def test_lever_presses_are_not_target_hits_by_default(self):
         """Review finding: the lever task has no lit target, so by default its clean presses are not counted as
         'targets the rat hits'; counting them is opt-in and the public rule then says so."""
-        self.assertEqual(bb.Config().tasks, ('cursor', 'steer'))
+        self.assertEqual(bb.Config().tasks, ('cursor', 'steer', 'tiles'))
         c = bb.HitCounter()
         out = c.on_text(json.dumps(dict(HELLO, task='lever')))
         self.assertEqual(out[0]['countable'], False)
@@ -559,7 +559,37 @@ class TestHitCounter(unittest.TestCase):
             self.assertNotIn('lever', e.public_status()['rule'])
             e2 = make_engine(os.path.join(tmp, 'l'), chain, cfg(tasks=bb.TASKS))
             self.assertIn('in the lever task, each clean press', e2.public_status()['rule'])
-            self.assertEqual(bb.build_config(bb.parse_args([])).tasks, ('cursor', 'steer'))
+            self.assertEqual(bb.build_config(bb.parse_args([])).tasks, ('cursor', 'steer', 'tiles'))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_rat_tiles_hits_count_like_steer_hits(self):
+        """Rat Tiles (task "tiles"): each tile tapped is a hit; an attempt is one song, so up to TILES_MAX_HITS."""
+        import tiles_env
+        songs = tiles_env.load_songs()
+        self.assertLessEqual(max(len(s['notes']) for s in songs), bb.TILES_MAX_HITS)
+        self.assertEqual(tiles_env.MAX_SONG_NOTES, bb.TILES_MAX_HITS)
+        tiles_hello = dict(HELLO, task='tiles', run='tiles_live')
+        c = bb.HitCounter()
+        out = c.on_text(json.dumps(tiles_hello))
+        self.assertEqual((out[0]['task'], out[0]['countable']), ('tiles', True))
+        self.assertEqual([e['hits'] for e in c.on_text(ep(0, 30, 4)) if e['ev'] == 'episode'], [30])
+        self.assertEqual([e['ev'] for e in c.on_text(ep(1, bb.TILES_MAX_HITS + 1))], ['rejected'])
+        self.assertEqual([e['ev'] for e in c.on_text(ep(2, 3, 1, presses=5))], ['rejected'], 'presses != hits + misses')
+        c.on_bytes(frame(True, (0.36, 0.52), (0.375, 0.5, 0.11, 0.12)))          # the cursor on the lit tile
+        c.on_bytes(frame(True, (0.60, 0.52), (0.375, 0.5, 0.11, 0.12)))          # a wrong click
+        self.assertEqual(c.attempt, {'clicks': 2, 'on_target': 1})
+        steer_only = bb.HitCounter(tasks=('cursor', 'steer'))
+        self.assertIn('tiles is not counted', steer_only.on_text(json.dumps(tiles_hello))[0]['why'])
+        chain = FakeChain()
+        tmp = tempfile.mkdtemp(prefix='buyback_test_')
+        try:
+            e = make_engine(tmp, chain)
+            self.assertIn('in Rat Tiles, each tile it taps', e.public_status()['rule'])
+            e.on_relay_text(json.dumps(tiles_hello))
+            e.on_relay_text(ep(0, 12, 2))
+            self.assertEqual(e.ledger.hits, 12)
+            self.assertEqual(e.ledger.pending, 12 * e.cfg.per_hit_wei)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

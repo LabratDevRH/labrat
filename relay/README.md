@@ -32,11 +32,12 @@ local relay started with `RELAY_ALLOW_TEST=1` lets one through. The relay holds 
 ### What a viewer receives
 
 1. `{"type":"state","live":bool,"hello":{...}|null,"checkpoint":{...}|null,"episode":{...}|null,"history":[up to 300 rows]}`.
-   If the stream is live, the newest binary frame follows straight after. The state message stays under 60,000
+   If the stream is live, the newest binary frame follows straight after (and, in a Rat Tiles run, the newest `tiles`
+   snapshot after that; see [Rat Tiles](#rat-tiles)). The state message stays under 60,000
    bytes, because `site/js/live.js` ignores text over 65,536. Real `log.jsonl` rows are about 120 to 215 bytes, so
    300 rows fit. If they don't, the state carries the newest rows that do.
-2. Everything the publisher sends, unchanged and in order: `hello`, `metrics`, `checkpoint`, `episode`, `bye` and
-   binary frames (1868 bytes each for the rat: `(12 + 65*7) * 4`).
+2. Everything the publisher sends, unchanged and in order: `hello`, `metrics`, `checkpoint`, `episode`, `bye`, binary
+   frames (1868 bytes each for the rat: `(12 + 65*7) * 4`), and in a Rat Tiles run `tiles` and `tile`.
 3. `{"type":"idle","reason":"quiet"|"bye"|"disconnected"}` when the publisher goes quiet for 15 s, says bye or
    disconnects. The last `hello` and its history are kept, and late joiners get them with `live:false`.
 4. A fresh `state` with `live:true` if a quiet publisher starts sending again (same session, no new hello).
@@ -91,6 +92,29 @@ view (`site/js/live.js`) skips it and the site's "Rat on pons" panel picks it ou
   session. A `pons_hello` with a new `session` (or `started`) clears the last step, result and frame.
 - Frames and steps sent before a `pons_hello`, or after a `pons_bye`, are dropped. Drops are counted under `pons_*`
   in `counts`.
+
+### Rat Tiles
+
+A training run whose `hello` has `"task":"tiles"` (the rat playing Rat Tiles: tiles fall down four lanes of its screen,
+and each one it taps plays the next note of a public-domain melody on the site) also sends two text messages on the
+training channel. The site's Rat Tiles panel (`site/buyback/index.html#piano`, at `/buyback#piano`) draws the board from them and plays the
+notes (`site/assets/songs.json`, the same file as `assets/songs.json`).
+
+- `{"type":"tiles","t":<sim s>,"song":<id>,"speed":<screen heights/s>,"lanes":4,"cursor":[x,y],"tiles":[[id,lane,y,h,state],...],"note_i":<int>}`:
+  a snapshot of the board, at most 10 a second. Screen units are 0..1 with y down; `y` is a tile's centre, `h` its
+  height, `state` is `up`, `hit` or `miss`. At most **4,096 bytes**, and it must carry a `tiles` list. Each viewer gets
+  at most **12 snapshots a second** (a burst of 3); the rest are dropped for that viewer (`tiles_dropped_for_rate`).
+  A viewer holds at most one unsent snapshot: a newer one replaces it at the end of its outbox, so a slow viewer skips
+  to the newest board and the order with the tile events is kept (`tiles_replaced_for_slow_viewers`).
+- `{"type":"tile","id":<int>,"lane":<int>,"result":"hit"|"miss"|"wrong","note_i":<int>,"song":<id>}`: one tile's outcome.
+  At most **512 bytes**. Never dropped for rate, never replayed.
+- A late joiner gets the newest snapshot straight after the state (and its frame) while the run is live, never the
+  tile events. The state message and the history never carry tiles. A new run (a `hello` with a different `run`,
+  `task` or `started`) clears the kept snapshot. `/status` shows the newest one's `song`, `t`, `speed`, `note_i` and
+  tile count under `tiles`.
+- Both are dropped unless the current `hello` says `"task":"tiles"` (`dropped_tiles_wrong_task`); a snapshot without a
+  `tiles` list or an event without a `hit`/`miss`/`wrong` result is dropped too (`dropped_bad_tiles`, `dropped_bad_tile`).
+  Episode messages are unchanged (`hits` = tiles hit), so `live/buyback.py` counts them as before.
 
 ### Caps
 
@@ -172,6 +196,11 @@ To try the live view without a training run, start this local relay with `$env:R
 publish an old run: `python live/publish_training.py --run runs/steer_v1 --assume-live-for-test --relay
 ws://localhost:4720/publish`. Its label starts with `TEST`, and the page shows a TEST STREAM badge, never LIVE.
 
+To try the Rat Tiles panel the same way: `python relay/tiles_demo.py --relay ws://localhost:4720/publish --duration 90`,
+then open `http://localhost:4720/buyback/#piano`. It is a scripted TEST stream (the recorded replay's poses with a
+scripted cursor, hits, misses and off-tile presses, not the rat's brain), refused by any relay without
+`RELAY_ALLOW_TEST=1`, and it only connects to a relay on localhost.
+
 ## Test
 
 ```
@@ -193,9 +222,13 @@ next to a training publisher. It checks:
 - that refused publisher handshakes are logged at most 3 times a minute
 - the idle timer (the real 15 s), resuming, publisher replacement and bye
 - refusing replay and test streams, and `RELAY_ALLOW_TEST=1`
+- Rat Tiles: `tiles` / `tile` only in a run whose hello says `"task":"tiles"`, forwarded verbatim and in order at
+  10 Hz, the 4 KB / 512 B caps and junk, at most 12 snapshots a second per viewer while every tile event gets through,
+  the newest snapshot (and never an event) for a late joiner, one queued snapshot at most for a slow viewer, and no
+  old snapshot after a bye or in the next run
 - the pons channel: its own slot and token check, forwarding with `"channel":"pons"` and the `PJPG` prefix, the
   training stream unchanged next to it, the 256 KB cap and junk frames, dropping any text with a `0x` string (even
   JSON-escaped), at most 5 pons frames a second per viewer with the newest winning, late joiners, bye, a new
   session, disconnects, the 15 s idle timer, resuming, replacement, and refusing other sources and test sessions
 
-It takes about a minute and a half (140 checks) and only stops the relay processes it started.
+It takes about two minutes (162 checks) and only stops the relay processes it started.
