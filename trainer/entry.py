@@ -3,7 +3,8 @@ training does not need the owner's PC. Built by trainer/Dockerfile, run on Railw
 
 The job comes from environment variables (on Railway: the service's Variables; every change redeploys it):
 
-    TRAIN_TASK             lever | cursor | steer. Empty or "none": idle (nothing runs, near-zero CPU).
+    TRAIN_TASK             lever | cursor | steer | tiles (Rat Tiles, tiles_env.py). Empty or "none": idle (nothing
+                           runs, near-zero CPU).
     TRAIN_NAME             the run's name; its files go to runs/<TRAIN_NAME>/ on the volume.
     TRAIN_STEPS            environment steps THIS job trains (60000, 2e6, 5M), on top of the start checkpoint's own
                            count. (train.py's --steps is a running total; this script adds the two.)
@@ -35,7 +36,7 @@ exit, so Railway does not restart it. SIGTERM (Railway stopping or redeploying t
 train.py (and its workers) and the publisher (which says bye), then it exits with 0.
 
     python trainer/entry.py              run (or idle)
-    python trainer/entry.py --selftest   check the image: imports, CPU torch, both networks, the three envs
+    python trainer/entry.py --selftest   check the image: imports, CPU torch, both networks, the four envs
 """
 import hashlib
 import json
@@ -62,7 +63,8 @@ DEFAULT_DATA = '/data'
 DEFAULT_RELAY = 'wss://labrat-relay-production.up.railway.app/publish'
 TOKEN_ENV = 'LABRAT_PUBLISH_TOKEN'
 JOB_FILE = 'trainer_job.json'
-TASKS = ('lever', 'cursor', 'steer')
+TASKS = ('lever', 'cursor', 'steer', 'tiles')
+STEERING_TASKS = ('steer', 'tiles')                # the steering network (5 outputs); the others: 38 outputs
 IDLE_WORDS = ('', 'none', 'off', 'idle', 'no', '0', 'false')
 ENTRY_FLAGS = ('--task', '--name', '--steps', '--resume', '--workers', '--envs-per-worker')   # set by this script
 NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')
@@ -277,7 +279,7 @@ def read_job(env):
     if task in IDLE_WORDS:
         return None
     if task not in TASKS:
-        raise JobError(f'TRAIN_TASK must be lever, cursor, steer or none (got {task!r})')
+        raise JobError(f'TRAIN_TASK must be lever, cursor, steer, tiles or none (got {task!r})')
     name = env.get('TRAIN_NAME', '').strip()
     if not NAME_RE.match(name) or name == 'final' or '.prev-' in name or '..' in name:
         raise JobError(f'TRAIN_NAME must be 1-64 letters, digits, "_", "-" or ".", not "final" (got {name!r})')
@@ -328,7 +330,7 @@ def ck_info(path):
 
 def check_compatible(task, path):
     steps, out, obs = ck_info(path)
-    want = 5 if task == 'steer' else 38
+    want = 5 if task in STEERING_TASKS else 38
     if out != want or (task == 'lever' and obs > 200):
         raise JobError(f'{path} ({obs} inputs, {out} outputs) is not a {task} network')
     return steps
@@ -770,21 +772,26 @@ def _selftest():
     from env import LeverEnv
     from cursor_env import CursorEnv
     from steer_env import SteerEnv
+    from tiles_env import TilesEnv, load_songs
     import labrat_frame as lf
+    songs = load_songs()                              # assets/songs.json: Rat Tiles' melodies
+    log(f'songs: {len(songs)} ({", ".join(s["id"] for s in songs)})')
     for name, env, ck in (('lever', LeverEnv(0), load(press_path)), ('cursor', CursorEnv(0), load(press_path)),
-                          ('steer', SteerEnv(0, press_net=press_path), load(steer_path))):
-        pol = NumpyPolicy(ck, env.obs_dim)
+                          ('steer', SteerEnv(0, press_net=press_path), load(steer_path)),
+                          ('tiles', TilesEnv(0, press_net=press_path), load(steer_path))):
+        pol = NumpyPolicy(ck, env.obs_dim)            # tiles: the steering network, widened for the tile features
         obs = env.reset()
         for _ in range(5):
             obs, _r, _done, _info = env.step(pol(obs).astype(np.float64))
         assert np.all(np.isfinite(obs)), f'{name}: non-finite observation'
-        inner = env.e if name == 'steer' else env
+        inner = env.e if name in STEERING_TASKS else env
         frame = lf.pack(float(inner.d.time), 0, inner.lever_angle(), False, None, None,
                         lf.PoseReader(inner.m)(inner.d.qpos))
         assert len(frame) == lf.FRAME_BYTES, f'{name}: frame is {len(frame)} bytes'
         log(f'env {name}: {env.obs_dim} inputs, 5 steps, one {len(frame)}-byte frame')
     import publish_training
     assert publish_training.infer_task(sk) == 'steer' and publish_training.infer_task(pk) == 'lever'
+    assert 'tiles' in publish_training.TASKS
     log('live/publish_training.py imports')
 
 

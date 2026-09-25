@@ -16,15 +16,16 @@ tini -> entry.py -> train.py + its workers   (CPU)
 ## What is in the image
 
 `trainer/Dockerfile` builds from the repo root. The root `.dockerignore` lets only these files into the build:
-`train.py policy.py env.py cursor_env.py steer_env.py ptload.py`, `assets/` (the scene), `runs/final/policy.pt`,
-`runs/final/steer.pt`, `live/publish_training.py`, `live/labrat_frame.py`, `live/assets/rat.json` and `trainer/`.
+`train.py policy.py env.py cursor_env.py steer_env.py tiles_env.py ptload.py`, `assets/` (the scene, and
+`songs.json`: Rat Tiles' melodies), `runs/final/policy.pt`, `runs/final/steer.pt`, `live/publish_training.py`,
+`live/labrat_frame.py`, `live/assets/rat.json` and `trainer/`.
 `.env`, `.env.*`, `launch_journal.json`, old runs, `site/`, `relay/`, `build/`, `shots/` and videos never reach it,
-and the root `.railwayignore` keeps them out of the `railway up` upload as well (19 files, about 6.4 MB).
+and the root `.railwayignore` keeps them out of the `railway up` upload as well (21 files, about 6.4 MB).
 
 Python 3.13 (slim), the **CPU** build of torch, MuJoCo, numpy and websockets, all pinned in
 `trainer/requirements.txt`. The build ends with `python trainer/entry.py --selftest`: the imports, both final
-networks (read with ptload and loaded by torch the way `train.py --resume` loads them) and a few steps of all three
-environments. A broken image fails the build instead of a job.
+networks (read with ptload and loaded by torch the way `train.py --resume` loads them), the songs, and a few steps of
+all four environments (lever, cursor, steer, tiles). A broken image fails the build instead of a job.
 
 No wallet key is needed or present. The trainer has nothing to do with launching coins; if a variable that looks
 like a key is set on the service, `entry.py` names it in the log (never its value) and passes it to nobody.
@@ -44,7 +45,7 @@ Every change to a service variable redeploys the service. That is how a job star
 
 | variable | |
 |---|---|
-| `TRAIN_TASK` | `lever`, `cursor` or `steer`. Empty or `none`: **idle**. Nothing runs and the publisher is not started |
+| `TRAIN_TASK` | `lever`, `cursor`, `steer` or `tiles` (Rat Tiles, `tiles_env.py`). Empty or `none`: **idle**. Nothing runs and the publisher is not started |
 | `TRAIN_NAME` | the run's name. Its files go to `/data/runs/<TRAIN_NAME>/`. Not `final` |
 | `TRAIN_STEPS` | environment steps **this job** trains, for example `2000000` (or `2e6`, `2M`). They are added to the start checkpoint's own count, because `train.py --steps` is a running total |
 | `TRAIN_RESUME` | optional: the checkpoint to start from, for example `runs/final/steer.pt` |
@@ -68,6 +69,17 @@ TRAIN_ARGS=--curriculum
 TRAIN_WORKERS=7
 ```
 
+Rat Tiles (`tiles_env.py`) the same way, from the final steering network (its first layer is widened for the tile
+features; the publisher then plays whole songs and sends the board and every tile's outcome):
+
+```
+TRAIN_TASK=tiles
+TRAIN_NAME=tiles_rw1
+TRAIN_STEPS=3000000
+TRAIN_RESUME=runs/final/steer.pt
+TRAIN_ARGS=--curriculum
+```
+
 - **Start:** set the variables. The deploy log shows `new job runs/steer_rw1`, `publisher started`, `train.py`'s
   JSON rows, then `publishing steer_rw1 ... connected to wss://...`. The relay's `/status` shows `"live": true`
   once the first checkpoint is saved (every 5 PPO iterations).
@@ -85,7 +97,8 @@ A restart or redeploy never trains a job from zero again:
 - `runs/<name>/policy_last.pt` exists: the job resumes from it, towards the same total (recorded in
   `runs/<name>/trainer_job.json`). At most the last 5 PPO iterations are lost. `--init-std` is not applied again,
   because it resets the exploration noise and is meant for a job's start. Note that `train.py --resume` itself
-  starts the `--curriculum` difficulty and `--lr-end` annealing over from their initial values.
+  starts the `--curriculum` difficulty and `--lr-end` annealing over from their initial values (a tiles job goes on
+  at the difficulty saved in its checkpoint).
 - `TRAIN_FORCE`: to train a finished job again, set `TRAIN_FORCE` to any value that job was not trained with (`1`,
   then `2` the time after). The old run directory is kept as `runs/<name>.prev-<time>`. The value is recorded, so
   a later restart with the same `TRAIN_FORCE` does not train it again.

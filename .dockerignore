@@ -6,6 +6,7 @@
 !env.py
 !cursor_env.py
 !steer_env.py
+!tiles_env.py
 !ptload.py
 !assets/
 !runs/final/policy.pt

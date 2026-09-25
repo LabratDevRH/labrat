@@ -27,14 +27,30 @@ would be refused the same way.
 "presses" counts presses that registered (lever task: a clean press; cursor tasks: every click), "hits" the
 clean presses / on-target clicks, "misses" the off-target clicks.
 
+Rat Tiles (task "tiles", tiles_env.py): the live view plays WHOLE SONGS, the songs of assets/songs.json in turn (training
+plays EP_TILES-note phrases; the rest is as training builds it), one song per episode, and also sends
+    {"type":"tiles","t":sim_time,"song":id,"speed":screen_heights_per_s,"lanes":4,"cursor":[x,y],
+     "tiles":[[id,lane,y_center,h,state],...],"note_i":int}       every 3rd frame (<= 10 Hz; droppable like a frame)
+    {"type":"tile","id":int,"lane":int,"result":"hit"|"miss"|"wrong","note_i":int,"song":id}   once per outcome
+"tiles" lists every tile on screen (state "up" | "hit": a tapped tile scrolls on, grey; y_center and h in screen
+heights, y down, a tile may reach past the top edge while it slides in); note_i is the lowest untapped tile's note
+(the next note to play; the song's length when none is left). A "tile" message says a tile was tapped ("hit": play
+note_i of the song), passed the bottom untapped ("miss"), or that a click landed anywhere but on the lowest tile
+("wrong": id and note_i are the lowest tile's, lane is the lane the click landed in). The binary frame's target is the
+on-screen part of the lowest untapped tile. Episode messages as for the other tasks: hits = tiles tapped, misses =
+wrong clicks, one episode per song. After every press, and after a fall, tiles_env puts the rat back in its standing
+start pose (a new trial, as the launch rig does between steps; the frames show it); a fall does not end the song, so
+"fell" says it fell at least once during the song.
+
 LIVE only while training: a run is live while its log.jsonl was written in the last --silence s (90). When it
 goes silent the script sends bye; --run then exits, --watch waits for the next run whose log.jsonl is written.
 --watch logs and skips a run it cannot publish (e.g. an unknown network shape) until that run stops training.
 --assume-live-for-test streams an old run anyway (for tests): hello.label then starts with "TEST".
 --dry-print sends nothing: stdout gets "TEXT <json>" and "FRAME n=.. t=.. ... b64=<the frame>" lines (logs go
 to stderr), through the same queue and resync logic as a relay connection.
-Task (lever | cursor | steer) comes from the checkpoint's shapes (5 outputs = steer; 38 outputs on a 200-input
-network = lever, wider = cursor) unless --task says so.
+Task (lever | cursor | steer | tiles) comes from the checkpoint ("task", which train.py saves for tiles) or its shapes
+(5 outputs = steer, or tiles on tiles_env.OBS_DIM inputs; 38 outputs on a 200-input network = lever, wider = cursor)
+unless --task says so.
 
 Light on the machine: one process, one env, 25 fps, one BLAS thread, never blocks on the network (a bounded
 send queue drops the oldest frames when the relay is slow; reconnects back off 1 s .. 30 s), and it holds
@@ -79,15 +95,18 @@ from env import CTRL_DT  # noqa: E402
 from ptload import load as pt_load, NumpyPolicy  # noqa: E402
 import labrat_frame as lf  # noqa: E402
 
-TASKS = ('lever', 'cursor', 'steer')
+TASKS = ('lever', 'cursor', 'steer', 'tiles')
 TASK_TEXT = {
     'lever': 'pressing the lever with the whole body',
     'cursor': 'moving a cursor with its head and clicking with a lever press, whole body',
     'steer': 'steering a cursor with its head and clicking with a lever press',
+    'tiles': 'playing Rat Tiles: steering the cursor onto the falling tile with its head and tapping it with a lever '
+             'press',
 }
 TOKEN_ENV = 'LABRAT_PUBLISH_TOKEN'
 POLL_S = 1.0                 # how often the run's files are checked
 AUTH_CLOSE_CODES = (4401, 4403)
+TILES_MAX_HZ = 10            # Rat Tiles board snapshots per second, at most
 
 
 def log(*parts):
@@ -182,8 +201,11 @@ class Checkpoints:
 def infer_task(ck):
     out = int(ck['net']['pi.6.weight'].shape[0])
     obs = int(len(ck['mean']))
+    if ck.get('task') in TASKS:
+        return ck['task']
     if out == 5:
-        return 'steer'
+        from tiles_env import OBS_DIM as TILES_OBS
+        return 'tiles' if obs == TILES_OBS else 'steer'
     if out == 38:
         return 'lever' if obs <= 200 else 'cursor'
     raise ValueError(f'unknown checkpoint shape: {obs} inputs, {out} outputs')
@@ -233,12 +255,16 @@ class Player:
         import train                              # train.make_env: the env exactly as training builds it
         self.task = task
         self.env = train.make_env(task, seed, False)
-        self.inner = self.env.e if task == 'steer' else self.env     # SteerEnv wraps a CursorEnv
+        if task == 'tiles':
+            self.env.full_songs = True            # the live view plays whole songs (training: phrases of them)
+        # SteerEnv (and TilesEnv, a SteerEnv) wraps a CursorEnv
+        self.inner = self.env.e if task in ('steer', 'tiles') else self.env
         self.m, self.d = self.inner.m, self.inner.d
         self.pose = lf.PoseReader(self.m)
         self.pol = None
         self.episode = -1
         self.obs = None
+        self.events = []                          # Rat Tiles: tile outcomes not yet sent
 
     def set_policy(self, ck):
         self.pol = NumpyPolicy(ck, self.env.obs_dim)
@@ -255,6 +281,8 @@ class Player:
 
     def lit_target(self):
         e = self.inner
+        if self.task == 'tiles':
+            return e.visible_active_rect()        # the on-screen part of the lowest untapped tile
         if self.task == 'lever' or e.hold != 0:
             return None
         return (float(e.tc[0]), float(e.tc[1]), float(e.th[0]), float(e.th[1]))
@@ -264,6 +292,8 @@ class Player:
         before = self.lit_target()
         a = self.pol(self.obs).astype(np.float64)
         obs, _r, done, info = self.env.step(a)
+        if self.task == 'tiles':
+            self.events.extend(self.env.drain_events())
         if not np.all(np.isfinite(obs)):
             log('the simulation went unstable (non-finite observation); new episode')
             self.fell = True
@@ -288,6 +318,16 @@ class Player:
         self.click = False
         self.click_target = None
         return b
+
+    def tiles_msg(self):
+        """Rat Tiles: the board now ({"type":"tiles"}), or None for the other tasks."""
+        if self.task != 'tiles' or self.inner.game is None:
+            return None
+        return self.inner.snapshot(float(self.d.time))
+
+    def drain_events(self):
+        ev, self.events = self.events, []
+        return ev
 
     def episode_msg(self):
         if self.task == 'lever':
@@ -381,6 +421,17 @@ class Link:
         with self.cv:
             self._put('t', msg)
 
+    def board(self, msg):
+        """A Rat Tiles board snapshot: like a frame, only the newest matters, so one not yet sent is replaced (and it
+        is never part of a resync)."""
+        with self.cv:
+            for i, (kind, _p) in enumerate(self.q):
+                if kind == 'e':
+                    del self.q[i]
+                    self.stats['boards_replaced'] += 1
+                    break
+            self._put('e', msg)
+
     def frame(self, b):
         with self.cv:
             if self.nframes >= self.MAX_FRAMES:
@@ -397,7 +448,7 @@ class Link:
     def _put(self, kind, msg):
         if len(self.q) - self.nframes >= self.MAX_TEXTS:
             for i, (k, _p) in enumerate(self.q):
-                if k == 't':
+                if k in ('t', 'e'):
                     del self.q[i]
                     break
             self.stats['texts_dropped'] += 1
@@ -614,6 +665,7 @@ def publish(run_dir, a, token, stop):
         player.reset(difficulty)
 
         steps_per_frame = 1.0 / (a.fps * CTRL_DT)
+        board_every = max(1, math.ceil(a.fps / TILES_MAX_HZ))     # Rat Tiles board snapshots: every n-th frame
         cpu0 = time.process_time()
         t_start = time.monotonic()
         t0 = t_start
@@ -634,6 +686,12 @@ def publish(run_dir, a, token, stop):
                         done = True               # the rest of this frame's sim time is dropped, not carried over
                         break
                 link.frame(player.frame())
+                for ev in player.drain_events():  # Rat Tiles: each tile's outcome, after the frame it happened in
+                    link.text(ev)
+                if k % board_every == 0:
+                    board = player.tiles_msg()
+                    if board is not None:
+                        link.board(board)
             except Exception as e:                    # never let one bad step end the stream
                 log(f'simulation error ({type(e).__name__}: {e}); new episode')
                 done = True
