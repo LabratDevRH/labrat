@@ -44,7 +44,7 @@ WHAT COUNTS (hits, misses, wrong clicks)
 THE HOUR (Config below; the HARD ceilings cannot be raised from the command line)
   At the end of each hour window the engine journals a 'window' record: its hits, misses, wrong clicks, attempts and
   hit rate, the budget used (or the preview amount), and the buy it books. The buy is floor(budget x hits / (hits +
-  misses + wrong)) rounded down to 0.00000001 ETH (the precision the buy rig types into pons), cut to the per-buy,
+  misses + wrong)) rounded down to 0.000001 ETH (what pons's review dialog displays), cut to the per-buy,
   per-hour-window, rolling-day and total caps. An hour with no attempts, no hits, or whose buy would be under min_buy
   buys nothing (recorded). The booked buy is tried at once; a passing problem (gas price over the cap, a chain read
   that failed, a failed attempt) retries until the next hour closes, which replaces it ('buy_expired'); a final one
@@ -191,7 +191,9 @@ LIVE_FIRST_NONCE = 1           # the launch wallet's nonce after its one transac
 DROP_CONFIRM_S = 120.0         # a tx is marked dropped only when every RPC agrees twice, at least this far apart
 STATUS_REWRITE_S = 10.0        # status.json is rewritten at least this often (its "updated" shows it is alive)
 HOUR_S = 3600                  # one buy per hour window, aligned to the UTC hour
-AMOUNT_STEP_WEI = 10 ** 10     # buys are whole multiples of 0.00000001 ETH: the 8 decimals the buy rig types into pons
+AMOUNT_STEP_WEI = 10 ** 12     # buys are whole multiples of 0.000001 ETH (6 decimals): pons's Review dialog shows the
+                               # amount to 6 decimals, and the rig refuses a review that differs from the booked amount
+                               # (the 18:00 UTC 2026-09-25 buy of 0.09927461 ETH was refused as '0.099274 ETH')
 BUDGET_RULE = 'hourly budget x hit rate'
 FUNDING = 'a separate buyback wallet, funded by hand'
 # LIVE below signs from the launch wallet and pays from its claimed creator fees; the buys are now paid from the

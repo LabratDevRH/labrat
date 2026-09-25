@@ -543,7 +543,7 @@ class Base(unittest.TestCase):
         for r in records(engine, 'buy'):
             self.assertLessEqual(r['amount_wei'], c.max_buy_wei)
             self.assertGreaterEqual(r['amount_wei'], c.min_buy_wei)
-            self.assertEqual(r['amount_wei'] % bb.AMOUNT_STEP_WEI, 0, 'at most 8 decimals (what the buy rig types)')
+            self.assertEqual(r['amount_wei'] % bb.AMOUNT_STEP_WEI, 0, "at most 6 decimals (what pons's review shows)")
         # each closed hour bought at most once
         wins = [r['window'] for r in records(engine, 'buy') if r.get('window') is not None]
         self.assertEqual(len(wins), len(set(wins)), 'an hour bought twice')
@@ -622,8 +622,12 @@ class TestEncoding(unittest.TestCase):
         self.assertEqual(bb.hit_rate(3, 1, 0), 0.75)
         self.assertEqual(bb.hit_rate(6, 1, 1), 0.75)
         self.assertEqual(bb.hour_amount(10 ** 15, 3, 1, 0), 75 * 10 ** 13)
-        self.assertEqual(bb.hour_amount(10 ** 15, 1, 2, 0), 333_330_000_000_000, 'rounded DOWN to 8 decimals')
-        self.assertEqual(bb.eth_str(bb.hour_amount(10 ** 15, 1, 2, 0)), '0.00033333')
+        self.assertEqual(bb.hour_amount(10 ** 15, 1, 2, 0), 333_000_000_000_000, 'rounded DOWN to 6 decimals')
+        # the 18:00 UTC 2026-09-25 hour: 0.1 ETH x 1916/(1916+7+7) must book an amount pons displays unchanged
+        a = bb.hour_amount(10 ** 17, 1916, 7, 7)
+        self.assertEqual(a, 99_274_000_000_000_000)
+        self.assertEqual(bb.eth_str(a), '0.099274')
+        self.assertEqual(bb.eth_str(bb.hour_amount(10 ** 15, 1, 2, 0)), '0.000333')
         self.assertEqual(bb.hour_amount(10 ** 15, 0, 5, 5), 0)
         self.assertEqual(bb.hour_amount(10 ** 15, 0, 0, 0), 0)
 

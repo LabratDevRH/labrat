@@ -4,7 +4,7 @@
 misses and wrong clicks, and books that hour's $LABRAT buy: the hourly budget x the hit rate, cut to the caps.**
 
     hit rate = hits / (hits + misses + wrong clicks)
-    the hour's buy = hourly budget x hit rate   (rounded down to 0.00000001 ETH, cut to the per-buy, hourly, daily
+    the hour's buy = hourly budget x hit rate   (rounded down to 0.000001 ETH, cut to the per-buy, hourly, daily
                                                  and total caps; under the 0.0001 ETH minimum it buys nothing)
 
 The owner asked for this: buying at every tile would spend most of each tiny buy on gas, so the engine buys once an
@@ -85,7 +85,8 @@ handling for it. Only the buy rig can sign for it, and only with live bookings s
 - **Restarts.** The open hour survives a restart, because its attempts are rebuilt from the journal. An hour that ended
   while the engine was down is closed on the restart. Only the hour that just ended can still buy; an older one closes
   late without a buy ("closed late; the engine was not running at the hour").
-- **The rounding** is down to 8 decimals (0.00000001 ETH), which is what the buy rig types into pons.
+- **The rounding** is down to 6 decimals (0.000001 ETH): pons's Review dialog displays the amount to 6 decimals, and
+  the buy rig refuses to sign when that display differs from the booked amount.
 - **Previews** (budget not set) are cut to the per-buy cap only. They never use up the hourly, daily or total cap or
   the gas caps, so the caps are intact when the budget is set.
 - **A journal from before the hourly rule** replays. Its hits and buys still count, and its pending per-hit amount is
