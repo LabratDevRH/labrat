@@ -40,6 +40,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -48,6 +49,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 from types import SimpleNamespace
 
@@ -61,8 +63,8 @@ import buyback as bb  # noqa: E402
 from eth_abi import decode  # noqa: E402
 from eth_utils import keccak, to_checksum_address  # noqa: E402
 
-MOCK_RELAY_PORT = 4752
-STATUS_PORT = 4753
+MOCK_RELAY_PORT = int(os.environ.get('BUYBACK_TEST_RELAY_PORT') or 4752)      # the env overrides keep a parallel
+STATUS_PORT = int(os.environ.get('BUYBACK_TEST_STATUS_PORT') or 4753)         # session's ports free
 REAL_STATUS_PORT = 4750
 FAKE_RELAY_PORT = 4751
 POOL_MANAGER = '0x8366a39CC670B4001A1121B8F6A443A643e40951'
@@ -209,9 +211,12 @@ class FakeChain:
         self.nonce = 1
         self.log = []                                         # (method, to, selector)
         self.sent, self.receipts, self.pending_txs = [], {}, {}
+        self.mined = {}                                       # tx hash -> the transaction (eth_getTransactionByHash)
         self.on_send = None
         self.auto_mine = True
         self.forget = False
+        self.accept_signed = False     # real signed transactions: only from a key a test made itself (buyrig_test)
+        self.reject_sends = None       # a JSON-RPC error every eth_sendRawTransaction gets (e.g. insufficient funds)
 
     def __call__(self, method, params, all_rpcs_on_error=False):
         to = params[0].get('to') if params and isinstance(params[0], dict) else None
@@ -240,6 +245,8 @@ class FakeChain:
         if method == 'eth_getTransactionReceipt':
             return self.receipts.get(params[0]), None
         if method == 'eth_getTransactionByHash':
+            if params[0] in self.mined:
+                return self.mined[params[0]], None
             return (None if self.forget else self.pending_txs.get(params[0])), None
         return None, {'code': -32601, 'message': f'fake chain: {method} not supported'}
 
@@ -247,6 +254,27 @@ class FakeChain:
         """The buyback wallet has its own balance; any other address has the launch wallet's (as before)."""
         a = to_checksum_address(addr) if addr else None
         return self.buyback_balance if a == bb.BUYBACK_WALLET else self.balance
+
+    def _debit(self, addr, wei):
+        if to_checksum_address(addr) == bb.BUYBACK_WALLET:
+            self.buyback_balance -= wei
+        else:
+            self.balance -= wei
+
+    @staticmethod
+    def decode_raw(raw):
+        """A raw transaction -> its fields (with 'from'): MockSigner's JSON, or a real signed EIP-1559 transaction."""
+        b = bytes.fromhex(raw[2:])
+        if b.startswith(b'MOCK'):
+            return json.loads(b[4:])
+        from eth_account import Account
+        from eth_account.typed_transactions import TypedTransaction
+        from hexbytes import HexBytes
+        d = TypedTransaction.from_bytes(HexBytes(b)).as_dict()
+        return {'chainId': d['chainId'], 'nonce': d['nonce'], 'to': to_checksum_address(d['to']), 'value': d['value'],
+                'data': '0x' + bytes(d['data']).hex(), 'gas': d['gas'], 'maxFeePerGas': d['maxFeePerGas'],
+                'maxPriorityFeePerGas': d['maxPriorityFeePerGas'], 'type': 2,
+                'from': Account.recover_transaction(b)}
 
     def _call(self, c, override, log=True):
         to, data, sel = to_checksum_address(c['to']), c['data'], c['data'][:10]
@@ -316,11 +344,13 @@ class FakeChain:
     def _send(self, raw):
         self.sent.append(raw)
         b = bytes.fromhex(raw[2:])
-        assert b.startswith(b'MOCK'), 'only MockSigner transactions reach the fake chain'
-        tx = json.loads(b[4:])
+        assert b.startswith(b'MOCK') or self.accept_signed, 'only MockSigner transactions reach the fake chain'
+        tx = self.decode_raw(raw)
         txh = '0x' + keccak(b).hex()
         if self.on_send:
             self.on_send(raw, txh)
+        if self.reject_sends is not None:
+            return None, self.reject_sends
         if txh in self.receipts or txh in self.pending_txs:
             return txh, None
         if tx['nonce'] != self.nonce + len(self.pending_txs):
@@ -335,6 +365,7 @@ class FakeChain:
         tx = tx or self.pending_txs.pop(txh)
         self.pending_txs.pop(txh, None)
         to = to_checksum_address(tx['to'])
+        frm = to_checksum_address(tx.get('from') or bb.WALLET)     # MockSigner's older transactions carry no from
         logs, status = [], 1
         gas_used = {bb.ROUTER: 156_061, bb.FEE_ESCROW: 41_000, bb.CURVE: 120_000}.get(to, 50_000)
         if to == bb.FEE_ESCROW:
@@ -344,19 +375,22 @@ class FakeChain:
             logs.append({'address': bb.FEE_ESCROW, 'topics': [bb.CLAIMED_TOPIC, '0x' + bb.pad_addr(bb.WALLET)],
                          'data': W(amt)})
         elif to == bb.ROUTER:
-            amount, min_out, _dl = decode_router(tx['data'])
+            amount, min_out, deadline = decode_router(tx['data'])
             out = amount * self.rate
-            if out < min_out:
+            if out < min_out or deadline < self.ts:
                 status = 0
             else:
-                self.balance -= int(tx['value'])
+                self._debit(frm, int(tx['value']))
                 logs.append({'address': bb.TOKEN, 'topics': [bb.TRANSFER_TOPIC, '0x' + bb.pad_addr(POOL_MANAGER),
-                                                             '0x' + bb.pad_addr(bb.WALLET)], 'data': W(out)})
-        self.balance -= gas_used * self.gas_price
+                                                             '0x' + bb.pad_addr(frm)], 'data': W(out)})
+        self._debit(frm, gas_used * self.gas_price)
         self.nonce += 1
         self.block += 1
         self.receipts[txh] = {'transactionHash': txh, 'status': hex(status), 'gasUsed': hex(gas_used),
-                              'effectiveGasPrice': hex(self.gas_price), 'blockNumber': hex(self.block), 'logs': logs}
+                              'effectiveGasPrice': hex(self.gas_price), 'blockNumber': hex(self.block), 'logs': logs,
+                              'from': frm.lower(), 'to': to.lower()}
+        self.mined[txh] = {'hash': txh, 'from': frm.lower(), 'to': to.lower(), 'value': hex(int(tx['value'])),
+                           'input': tx['data'], 'nonce': hex(int(tx['nonce'])), 'blockNumber': hex(self.block)}
 
     def calls(self, method='eth_call'):
         return [(to, sel) for m, to, sel in self.log if m == method]
@@ -376,14 +410,18 @@ class Lagging:
 
 
 class MockSigner:
-    """The launch wallet's ADDRESS and no key: its 'raw transactions' are JSON that only FakeChain reads."""
+    """A wallet's ADDRESS (the launch wallet's by default) and no key: its 'raw transactions' are JSON that only
+    FakeChain reads (with a 'from' when the address is not the launch wallet's)."""
     address = bb.WALLET
 
-    def __init__(self):
+    def __init__(self, address=None):
         self.signed = []
+        if address is not None:
+            self.address = to_checksum_address(address)
 
     def sign_transaction(self, tx):
-        raw = b'MOCK' + json.dumps(tx, sort_keys=True).encode()
+        body = dict(tx) if self.address == bb.WALLET else {**tx, 'from': self.address}
+        raw = b'MOCK' + json.dumps(body, sort_keys=True).encode()
         self.signed.append(tx)
         return SimpleNamespace(raw_transaction=raw, hash=keccak(raw))
 
@@ -1820,6 +1858,379 @@ class TestLiveExecutorOnTheFakeChain(Base):
             e.executor._send('buy', bb.ROUTER, data, 2 * 10 ** 14, 160_000, {}, e._book)
         self.assertEqual(self.signer.signed, [])
         self.assertEqual(self.chain.sent, [])
+
+
+# ---------------------------------------------------------------------------------------------------- live bookings
+def bookings_engine(tmp, chain, clock, c=None):
+    """The engine in LIVE BOOKINGS, as main() builds it: mode LIVE, BookingExecutor, a read-only RPC."""
+    c = c or cfg(hourly_budget_wei=10 ** 15)
+    journal = bb.Journal(os.path.join(tmp, bb.BOOKINGS_JOURNAL), clock=clock)
+    rpc = bb.ReadRpc(chain)
+    sim = bb.Sim(rpc, c, clock=clock, buyer=bb.BUYBACK_WALLET)
+    return bb.Engine(c, 'LIVE', journal, rpc, bb.BookingExecutor(sim, c), sim, clock=clock, live_bookings=True)
+
+
+def rig_buy(chain, amount, frm=None, to=bb.ROUTER, value=None, min_out=None, deadline=None, data=None):
+    """What the buy rig puts on chain for a booking: a router buy of `amount` from `frm` (MockSigner, no key), mined.
+    -> its hash."""
+    s = MockSigner(frm or bb.BUYBACK_WALLET)
+    q = amount * chain.rate
+    data = data or bb.cd_router_buy(amount, q * 99 // 100 if min_out is None else min_out,
+                                    chain.ts + 1200 if deadline is None else deadline)
+    tx = {'chainId': bb.CHAIN_ID, 'nonce': chain.nonce + len(chain.pending_txs), 'to': to,
+          'value': amount if value is None else value, 'data': data, 'gas': 200_000, 'maxFeePerGas': 10 ** 8,
+          'maxPriorityFeePerGas': 0, 'type': 2}
+    txh, err = chain._send('0x' + bytes(s.sign_transaction(tx).raw_transaction).hex())
+    assert err is None, err
+    return txh
+
+
+def report(e, window_t, tx, eth=None, **extra):
+    b = e.ledger.bookings[window_t]
+    return e.add_pons_session({'window': bb.iso(window_t), 'eth_in': eth or bb.eth_str(b['amount_wei'], 18), 'tx': tx,
+                               **extra})
+
+
+class TestLiveBookings(Base):
+    """LIVE BOOKINGS: the switch (flag AND environment), a booked (not bought) hour, the on-chain verification of the
+    rig's report, the caps on verified spend plus outstanding bookings, expiry, stops, DRY unchanged. The engine never
+    signs or sends: its RPC only reads; the 'rig' transactions here come from MockSigner (no key) on the fake chain."""
+    live_test = True                     # the rig's transactions reach the fake chain (never through the engine)
+
+    def setUp(self):
+        super().setUp()
+        self.chain.buyback_balance = 10 ** 18
+
+    def booked(self, clock=None, hits=12, misses=0, e=None):
+        clock = clock or getattr(self, 'clock', None) or Clock()
+        self.clock = clock
+        e = e or bookings_engine(self.tmp, self.chain, clock)
+        feed(e, [(min(4, hits - 4 * i), 0) for i in range(-(-hits // 4))] + ([(0, misses)] if misses else []))
+        self.chain.ts = int(clock.t)
+        close_hour(e, clock)
+        self.chain.ts = int(clock.t)            # the chain's clock follows the test's (the rig buys after the booking)
+        return e
+
+    def test_the_switch_needs_the_flag_and_the_environment(self):
+        def gate(args, env):
+            a = bb.parse_args(args)
+            return bb.bookings_gate(a, bb.build_config(a), environ=env)
+        on = {bb.LIVE_BOOKINGS_ENV: '1'}
+        B = ['--hourly-budget-eth', '0.1', '--max-buy-eth', '0.1', '--max-hour-eth', '0.1', '--max-day-eth', '2.4',
+             '--max-total-eth', '5']
+        self.assertFalse(gate(B, {}))
+        self.assertFalse(gate(B + ['--live-bookings'], {}))                          # the flag alone: DRY
+        self.assertFalse(gate(B, on))                                                # the environment alone: DRY
+        self.assertFalse(gate(B + ['--live-bookings'], {bb.LIVE_BOOKINGS_ENV: 'yes'}))
+        self.assertTrue(gate(B + ['--live-bookings'], on))
+        for extra, why in ((['--hourly-budget-eth', 'unset'], 'preview'), (['--window-s', '2'], 'once per UTC hour'),
+                           (['--accept-test-streams'], 'DRY tests only'),
+                           (['--relay', f'ws://127.0.0.1:{MOCK_RELAY_PORT}/live'], 'public relay'),
+                           (['--origin', 'https://evil.example'], 'public relay'), (['--live'], 'paused'),
+                           (['--confirm', 'LABRAT'], 'paused'), (['--clear-stop'], 'paused'),
+                           (['--venue', 'curve'], 'pool only')):
+            with self.subTest(extra=extra):
+                with self.assertRaises(SystemExit) as cm:
+                    gate(B + ['--live-bookings'] + extra, on)
+                self.assertIn(why, str(cm.exception.code))
+        with self.assertRaises(bb.LiveRefused):          # the engine itself refuses a half-built live bookings
+            e = make_engine(self.tmp, self.chain)
+            bb.Engine(e.cfg, 'DRY', e.journal, e.rpc, e.executor, e.sim, live_bookings=True)
+        rpc = bb.LiveRpc(self.chain, _gate=bb._GATE_PASSED, nodes=[self.chain])
+        with self.assertRaises(bb.LiveRefused):          # bookings never get a send-capable RPC
+            bb.BookingExecutor(bb.Sim(rpc, cfg(), buyer=bb.BUYBACK_WALLET), cfg())
+
+    def test_main_runs_live_bookings_only_with_both(self):
+        """main() with the fake chain: the flag AND the environment -> mode LIVE, its own journal; either alone -> DRY."""
+        class NoRelay:                        # live bookings listen only to the public relay: not in a mocked test
+            def __init__(self, *a):
+                self.thread = threading.Thread(target=lambda: None)
+
+            def start(self):
+                self.thread.start()
+                return self
+        old = (bb.launcher.rpc, bb.RelayListener, os.environ.get(bb.LIVE_BOOKINGS_ENV))
+        bb.launcher.rpc, bb.RelayListener = self.chain, NoRelay
+        args = ['--journal-dir', self.tmp, '--duration', '1.5', '--status-port', str(STATUS_PORT), '--tick', '0.2',
+                '--hourly-budget-eth', '0.1', '--max-buy-eth', '0.1', '--max-hour-eth', '0.1', '--max-day-eth', '2.4',
+                '--max-total-eth', '5']
+        seen = {}
+
+        def run(argv, env_on, key):
+            if env_on:
+                os.environ[bb.LIVE_BOOKINGS_ENV] = '1'
+            else:
+                os.environ.pop(bb.LIVE_BOOKINGS_ENV, None)
+            t = threading.Thread(target=lambda: seen.setdefault(key + '_rc', bb.main(argv)))
+            t.start()
+            for _ in range(20):
+                time.sleep(0.1)
+                try:
+                    with urllib.request.urlopen(f'http://127.0.0.1:{STATUS_PORT}/status', timeout=2) as r:
+                        seen[key] = json.loads(r.read())
+                        break
+                except OSError:
+                    pass
+            t.join(10)
+        try:
+            run(args + ['--live-bookings'], True, 'both')
+            run(args + ['--live-bookings'], False, 'flag_only')
+            run(args, True, 'env_only')
+        finally:
+            bb.launcher.rpc, bb.RelayListener = old[0], old[1]
+            if old[2] is None:
+                os.environ.pop(bb.LIVE_BOOKINGS_ENV, None)
+            else:
+                os.environ[bb.LIVE_BOOKINGS_ENV] = old[2]
+        self.assertEqual((seen['both']['mode'], seen['both']['label']), ('LIVE', bb.LIVE_BOOKINGS_LABEL))
+        self.assertIs(seen['both']['buys']['simulated'], False)
+        self.assertEqual(seen['both']['buys']['booked'], 0)
+        for k in ('flag_only', 'env_only'):
+            self.assertEqual((seen[k]['mode'], seen[k]['label']), ('DRY', bb.DRY_LABEL), k)
+            self.assertNotIn('booked', seen[k]['buys'])
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, bb.BOOKINGS_JOURNAL)))
+        with _real_open(os.path.join(self.tmp, bb.BOOKINGS_JOURNAL), encoding='utf-8') as f:
+            self.assertTrue(all(json.loads(l)['mode'] == 'LIVE' for l in f))
+        self.assertFalse({m for m, _t, _s in self.chain.log} - bb.READ_METHODS, 'the engine only reads')
+
+    def test_an_hour_is_booked_not_bought(self):
+        e = self.booked(hits=12, misses=4)                     # 12 / 16 = 75 % of 0.001 ETH
+        amt = 75 * 10 ** 13
+        bk, = records(e, 'booking')
+        self.assertEqual((bk['amount_wei'], bk['state'], bk['simulated'], bk['mode']), (amt, 'booked', False, 'LIVE'))
+        self.assertEqual(bk['signable_until'], bk['window'] + 2 * HOUR)
+        self.assertEqual(records(e, 'buy'), [], 'a booked hour is not a buy')
+        st = e.public_status()
+        self.assertEqual((st['mode'], st['label']), ('LIVE', bb.LIVE_BOOKINGS_LABEL))
+        self.assertEqual((st['buys']['count'], st['buys']['booked'], st['buys']['simulated']), (0, 1, False))
+        r, = st['buys']['recent']
+        self.assertEqual((r['simulated'], r['state'], r['eth_in'], r['window'], r['labrat_out']),
+                         (False, 'booked', '0.00075', bb.iso(bk['window']), None))
+        self.assertEqual(st['last_window']['buy']['state'], 'booked')
+        self.assertEqual(e.ledger.reserved, {bk['window']: amt})
+        self.assertEqual(e.ledger.cap_bought, 0)
+        # the route was simulated from the buyback wallet (balance override), as DRY does; nothing was sent
+        self.assertIn((bb.ROUTER, bb.SEL['execute'], bb.BUYBACK_WALLET, [bb.BUYBACK_WALLET]), self.chain.froms)
+        self.assertFalse({m for m, _t, _s in self.chain.log} - bb.READ_METHODS)
+        self.assertNotRegex(json.dumps(st), r'0x[0-9a-fA-F]{3,}')
+        # a restart keeps it booked (and still reserved)
+        e2 = bookings_engine(self.tmp, self.chain, self.clock)
+        self.assertEqual(e2.ledger.reserved, {bk['window']: amt})
+        self.assertEqual(e2.public_status()['buys']['recent'][0]['state'], 'booked')
+
+    def test_a_verified_report_executes_the_booking(self):
+        e = self.booked()
+        bk, = records(e, 'booking')
+        amt, w = bk['amount_wei'], bk['window']
+        self.clock.t += 90
+        self.chain.ts = int(self.clock.t)
+        txh = rig_buy(self.chain, amt)
+        rec = report(e, w, txh, labrat_out='1', session_at=bb.iso(self.clock.t), proof='ab' * 32, replay='MATCH',
+                     targets_hit=6, misses=2, checks_passed=16, checks_total=16, simulation='ok')
+        self.assertEqual((rec['ev'], rec['tx'], rec['amount_wei']), ('executed', txh, amt))
+        self.assertEqual(rec['tokens_wei'], amt * self.chain.rate, 'LABRAT out comes from the chain, not the report')
+        st = e.public_status()
+        r, = st['buys']['recent']
+        self.assertEqual((r['state'], r['tx'], r['simulated']), ('executed', txh, False))
+        self.assertEqual(r['labrat_out'], bb.token_str(amt * self.chain.rate))
+        self.assertEqual((r['pons']['label'], r['pons']['clicked_by_rat'], r['pons']['checks']),
+                         (bb.EXECUTED_LABEL, True, '16/16'))
+        self.assertEqual((st['buys']['count'], st['buys']['booked'], st['buys']['eth_in']), (1, 0, bb.eth_str(amt)))
+        self.assertEqual(st['last_window']['buy']['state'], 'bought')
+        self.assertEqual(st['last_window']['buy']['tx'], txh)
+        self.assertEqual((e.ledger.reserved, e.ledger.cap_bought), ({}, amt))
+        # the only 0x strings in the public status are this transaction's hash; no address at all
+        s = json.dumps(st)
+        self.assertEqual(set(re.findall(r'0x[0-9a-fA-F]+', s)), {txh})
+        for a in (bb.WALLET, bb.BUYBACK_WALLET, bb.ROUTER, bb.TOKEN):
+            self.assertNotIn(a[2:].lower(), s.lower())
+        # the same report again: idempotent; another tx for that window: refused
+        self.assertTrue(report(e, w, txh)['already'])
+        with self.assertRaises(bb.PonsRefused) as cm:
+            report(e, w, rig_buy(self.chain, amt))
+        self.assertEqual(cm.exception.status, 409)
+        self.assertEqual(len(records(e, 'executed')), 1)
+        # a restart replays it
+        e2 = bookings_engine(self.tmp, self.chain, self.clock)
+        self.assertEqual(e2.public_status()['buys']['recent'][0]['tx'], txh)
+        self.assertEqual((e2.ledger.cap_bought, e2.ledger.reserved), (amt, {}))
+        self.assertTrue(report(e2, w, txh)['already'])
+
+    def test_the_http_endpoint_takes_executed_buys(self):
+        e = self.booked()
+        bk, = records(e, 'booking')
+        txh = rig_buy(self.chain, bk['amount_wei'])
+        tok = 'rig-token-' + 'x' * 24
+        srv = bb.serve_status(e, '127.0.0.1', STATUS_PORT, tok)
+        base = f'http://127.0.0.1:{STATUS_PORT}'
+        body = {'window': bb.iso(bk['window']), 'eth_in': bb.eth_str(bk['amount_wei'], 18), 'tx': txh}
+
+        def post(b, token=tok):
+            req = urllib.request.Request(base + '/pons_session', data=json.dumps(b).encode(), method='POST', headers={
+                'Content-Type': 'application/json', 'Authorization': f'Bearer {token}'})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as err:
+                return err.code, json.loads(err.read() or b'{}')
+        try:
+            self.assertEqual(post(body, 'wrong-' + 'y' * 24)[0], 401)
+            self.assertEqual(post(dict(body, tx='0x' + '12' * 32))[0], 503)          # not on chain (yet)
+            code, resp = post(body)
+            self.assertEqual((code, resp['tx'], resp['label'], resp['already']), (200, txh, bb.EXECUTED_LABEL, False))
+            code, resp = post(body)
+            self.assertEqual((code, resp['already']), (200, True))
+            with urllib.request.urlopen(base + '/status', timeout=5) as r:
+                st = json.loads(r.read())
+            self.assertEqual(st['buys']['recent'][0]['state'], 'executed')
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_unverified_reports_are_refused(self):
+        e = self.booked()
+        bk, = records(e, 'booking')
+        amt, w = bk['amount_wei'], bk['window']
+        ch = self.chain
+        cases = [
+            ('unknown tx (no receipt yet)', lambda: '0x' + '34' * 32, {}, 503, 'no receipt'),
+            ('from the launch wallet', lambda: rig_buy(ch, amt, frm=bb.WALLET), {}, 422, 'from (not'),
+            ('to another contract', lambda: rig_buy(ch, amt, to=bb.QUOTER), {}, 422, 'to (not'),
+            ('value twice the amount', lambda: rig_buy(ch, amt, value=2 * amt), {}, 422, 'value (not'),
+            ('reverted', lambda: rig_buy(ch, amt, min_out=amt * ch.rate + 1), {}, 422, 'status (not 1'),
+            ('another amount', lambda: rig_buy(ch, amt // 2), {}, 422, 'calldata (another amount)'),
+            ('eth_in not the booked amount', lambda: rig_buy(ch, amt), {'eth': '0.0001'}, 400, 'booked amount'),
+            ('tx not a hash', lambda: '0x' + 'AB' * 32, {}, 400, 'transaction hash'),
+            ('unknown field', lambda: rig_buy(ch, amt), {'extra': {'foo': 1}}, 400, 'unknown field'),
+        ]
+        for name, make, kw, status, words in cases:
+            with self.subTest(name):
+                txh = make()
+                body = {'window': bb.iso(w), 'eth_in': kw.get('eth') or bb.eth_str(amt, 18), 'tx': txh,
+                        **kw.get('extra', {})}
+                with self.assertRaises(bb.PonsRefused) as cm:
+                    e.add_pons_session(body)
+                self.assertEqual(cm.exception.status, status, str(cm.exception))
+                self.assertIn(words, str(cm.exception))
+        with self.assertRaises(bb.PonsRefused) as cm:                   # no booking for that window
+            e.add_pons_session({'window': bb.iso(w - HOUR), 'eth_in': '0.001', 'tx': rig_buy(ch, amt)})
+        self.assertEqual(cm.exception.status, 404)
+        with self.assertRaises(bb.PonsRefused) as cm:                   # not an hour
+            e.add_pons_session({'window': bb.iso(w + 60), 'eth_in': '0.001', 'tx': '0x' + '12' * 32})
+        self.assertEqual(cm.exception.status, 400)
+        old = ch.ts                                                     # mined before the booking
+        txh = rig_buy(ch, amt)
+        ch.ts = int(bk['t']) - 3600
+        with self.assertRaises(bb.PonsRefused) as cm:
+            report(e, w, txh)
+        ch.ts = old
+        self.assertEqual(cm.exception.status, 422)
+        self.assertIn('time', str(cm.exception))
+        self.assertEqual(records(e, 'executed'), [])
+        self.assertEqual(e.public_status()['buys']['recent'][0]['state'], 'booked')
+        self.assertEqual(e.ledger.cap_bought, 0)
+        # a transaction counted for one window is never counted for another
+        good = rig_buy(ch, amt)
+        report(e, w, good)
+        self.clock.t += 60
+        feed(e, [(4, 0)] * 3, start_n=100)
+        close_hour(e, self.clock)
+        w2 = max(e.ledger.bookings)
+        self.assertGreater(w2, w)
+        with self.assertRaises(bb.PonsRefused) as cm:
+            report(e, w2, good)
+        self.assertEqual(cm.exception.status, 409)
+
+    def test_caps_count_verified_buys_and_outstanding_bookings(self):
+        """A booking holds its amount against the caps until it is executed (then it counts as bought) or can no
+        longer execute (then it is released). A booking lives about 2.4 hours, so at most two are outstanding."""
+        c = cfg(hourly_budget_wei=10 ** 15, max_buy_wei=10 ** 15, max_hour_wei=10 ** 15, max_day_wei=15 * 10 ** 14,
+                max_total_wei=3 * 10 ** 15)
+        clock = Clock()
+        self.clock = clock
+        e = bookings_engine(self.tmp, self.chain, clock, c)
+        L = e.ledger
+
+        def hour(n):
+            n = feed(e, [(4, 0)] * 3, start_n=n)
+            self.chain.ts = int(clock.t)
+            close_hour(e, clock)
+            self.chain.ts = int(clock.t)
+            return n, records(e, 'window')[-1]
+        n, w = hour(0)
+        self.assertEqual(w['amount_wei'], 10 ** 15)
+        w1 = w['start_t']
+        n, w = hour(n)                             # the first booking is outstanding: the daily cap cuts this one
+        self.assertEqual((w['amount_wei'], w['cap']), (5 * 10 ** 14, 'daily'))
+        w2 = w['start_t']
+        self.assertEqual(L.reserved, {w1: 10 ** 15, w2: 5 * 10 ** 14})
+        self.assertEqual(L.cap_bought, 0)
+        # the first executes (verified): it moves from held to bought
+        report(e, w1, rig_buy(self.chain, 10 ** 15))
+        self.assertEqual((L.cap_bought, L.reserved), (10 ** 15, {w2: 5 * 10 ** 14}))
+        n, w = hour(n)                             # 1e15 bought + 5e14 held: the daily cap is full
+        self.assertEqual((w['amount_wei'], w['cap']), (0, 'daily'))
+        # the second can no longer execute: released when its time is up
+        clock.t = w2 + bb.BOOKING_DEAD_S
+        e.tick()
+        self.assertEqual(L.reserved, {})
+        self.assertEqual(L.bookings[w2]['state'], 'expired')
+        self.assertEqual([r.get('state') for r in e.public_status()['buys']['recent']], ['expired', 'executed'])
+        n, w = hour(n)                             # the daily cap - the verified buy of the last day
+        self.assertEqual((w['amount_wei'], w['cap']), (5 * 10 ** 14, 'daily'))
+        self.assertEqual(len(records(e, 'booking')), 3)
+        # the total cap counts outstanding bookings too
+        wn = bb.window_start(clock.t) + 10 * HOUR
+        L.buys.clear()                             # a day later: nothing verified in the rolling day
+        self.assertEqual(sum(L.reserved.values()), 5 * 10 ** 14)
+        self.assertEqual(L.room(clock.t + 86400, wn), (10 ** 15, 'per-buy'))
+        L.cap_bought = 22 * 10 ** 14               # more verified ever: 3e15 - 2.2e15 - 5e14 held = 3e14
+        self.assertEqual(L.room(clock.t + 86400, wn), (3 * 10 ** 14, 'total'))
+
+    def test_a_late_execution_still_counts(self):
+        e = self.booked()
+        bk, = records(e, 'booking')
+        self.clock.t = bk['window'] + bb.BOOKING_DEAD_S + 5
+        e.tick()
+        self.assertEqual(e.ledger.bookings[bk['window']]['state'], 'expired')
+        self.assertEqual(e.ledger.reserved, {})
+        self.assertEqual(e.public_status()['buys']['recent'][0]['state'], 'expired')
+        self.chain.ts = int(self.clock.t)
+        txh = rig_buy(self.chain, bk['amount_wei'])          # it did execute after all: the chain is the truth
+        report(e, bk['window'], txh)
+        self.assertEqual(e.ledger.cap_bought, bk['amount_wei'])
+        self.assertEqual(e.public_status()['buys']['recent'][0]['state'], 'executed')
+
+    def test_a_stop_survives_a_restart_and_clears_by_its_id(self):
+        clock = Clock()
+        e = bookings_engine(self.tmp, self.chain, clock)
+        e._stop('the chain no longer matches the pinned coin', 'stopped')
+        sid = records(e, 'stop')[-1]['id']
+        e2 = bookings_engine(self.tmp, self.chain, clock)
+        self.assertTrue(e2.stopped)
+        self.assertFalse(e2.clear_stop('00000000'))
+        self.assertTrue(e2.stopped)
+        self.assertTrue(e2.clear_stop(sid))
+        self.assertIsNone(e2.stopped)
+        e3 = bookings_engine(self.tmp, self.chain, clock)
+        self.assertIsNone(e3.stopped)
+        self.assertFalse(e3.clear_stop(sid), 'a cleared stop id clears nothing again')
+
+    def test_dry_is_unchanged(self):
+        """Without the switch: the same simulated buys, no booking, the DRY report endpoint for simulated sessions."""
+        clock = Clock()
+        e = make_engine(self.tmp, self.chain, cfg(hourly_budget_wei=10 ** 15), clock)
+        feed(e, [(4, 0)] * 3)
+        close_hour(e, clock)
+        self.assertEqual(records(e, 'booking'), [])
+        b, = records(e, 'buy')
+        self.assertTrue(b['simulated'])
+        st = e.public_status()
+        self.assertEqual((st['mode'], st['label'], st['buys']['simulated']), ('DRY', bb.DRY_LABEL, True))
+        self.assertNotIn('booked', st['buys'])
+        self.assertEqual(e.ledger.reserved, {})
+        with self.assertRaises(bb.PonsRefused):                  # a DRY engine takes no executed-buy report
+            e.add_pons_session({'window': bb.iso(b['window']), 'eth_in': '0.001', 'tx': '0x' + '12' * 32})
 
 
 # ---------------------------------------------------------------------------------------------------- real run

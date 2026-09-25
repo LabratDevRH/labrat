@@ -52,6 +52,12 @@
 .bbk-pill{font:600 12px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:#000;background:var(--warm);
   padding:8px 12px;border-radius:999px;white-space:nowrap}
 .bbk-banner p{margin:0;color:var(--dim);font-size:15.5px;line-height:1.5;flex:1 1 380px}
+.bbk-banner.live .bbk-pill{color:#fff;background:var(--live-d);border:1px solid #ff3b3b}
+.bbk-banner.live .bbk-pill::before{content:"";display:inline-block;width:7px;height:7px;margin:0 8px 1px 0;border-radius:50%;
+  background:#fff;vertical-align:middle}
+.bb-list a.bb-tx{color:var(--goldy);text-decoration:none;border-bottom:1px solid rgba(252,240,16,.35);white-space:nowrap}
+.bb-list a.bb-tx:hover,.bbl-buy a.bb-tx:hover{border-bottom-color:var(--goldy)}
+.bbl-buy a.bb-tx{color:inherit;text-decoration:none;border-bottom:1px solid rgba(252,240,16,.35);white-space:nowrap}
 .bbk-wallet{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin:0 0 22px;padding:14px 18px;border-radius:var(--r);
   background:var(--glass);border:1px solid var(--line-soft)}
 .bbk-k{font:600 11.5px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
@@ -138,9 +144,10 @@
     <p class="eyebrow"><span class="dot"></span>Buyback &middot; Subject R-01 &middot; $LABRAT</p>
     <h1 class="trial-h">The better it plays, the bigger the buyback.</h1>
     <p class="trial-lead">R-01 plays Rat Tiles live below. Its hits and misses are counted each hour; on the hour, its hit rate sets the size of one $LABRAT buyback, and the rat clicks that buy through itself on the real pons page.</p>
-    <div class="bbk-banner" role="status">
-      <span class="bbk-pill">Buybacks start soon</span>
-      <p>The hourly budget is announced when it's ready. Until then, every hour is still counted, and each hourly buy session below runs on the real pons page and is simulated: checked on the live chain, not sent.</p>
+    <!-- site.js sets this from the buyback engine's status: mode DRY keeps the text below, mode LIVE says "Buybacks live" -->
+    <div class="bbk-banner" id="bbk-banner" role="status">
+      <span class="bbk-pill" id="bbk-pill">Buybacks start soon</span>
+      <p id="bbk-banner-t">The hourly budget is announced when it's ready. Until then, every hour is still counted, and each hourly buy session below runs on the real pons page and is simulated: checked on the live chain, not sent.</p>
     </div>
     <div class="bbk-wallet" id="wallet">
       <span class="bbk-k">Buyback wallet</span>
@@ -337,7 +344,7 @@
       <li><b>Hits and misses are counted each hour</b><span>A tile pressed in time is a hit. A tile that slides past, or a press with no tile on the button, counts against it.</span></li>
       <li><b>On the hour, the hit rate sets the buy</b><span>Hourly budget &times; that hour's hit rate, within fixed caps. One buy an hour instead of one per tile keeps gas low. The budget is announced when it's ready.</span></li>
       <li><b>The rat clicks the buy through on pons</b><span>The rig opens the real $LABRAT page and lights one button at a time; the rat's head moves the cursor and its lever press clicks: the amount, Buy LABRAT, then Confirm.</span></li>
-      <li><b>Checked, then sent from the buyback wallet</b><span>Before anything is sent, the rig checks the transaction: the right coin, the right amount, nothing extra. Then it goes out from the buyback wallet above.</span></li>
+      <li><b>Checked, then sent from the buyback wallet</b><span>Before anything is sent, the rig checks the transaction: the right coin, the right amount, nothing extra. Then it goes out from the buyback wallet above, and each buy is verified on chain before it counts.</span></li>
     </ol>
     <p class="bbk-fine">The rat's brain is two trained artificial neural networks driving a simulated body, not a real rat. The same brain launched $LABRAT, and its fingerprint is on-chain.</p>
   </div>

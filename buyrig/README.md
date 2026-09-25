@@ -1,9 +1,9 @@
 # labrat buy rig (container notes, not deployed)
 
 For each simulated buyback batch the buyback engine books, the rat clicks through pons's own BUY flow on the real
-$LABRAT coin page, and the website streams it. Everything is **simulated**: pons builds the buy transaction, the rig
-checks it, simulates it with `eth_call` and answers pons with a refusal (EIP-1193 4001, "Simulated buy: not signed").
-Nothing is signed or sent. The owner has not asked for real buys.
+$LABRAT coin page, and the website streams it. By default everything is **simulated**: pons builds the buy transaction,
+the rig checks it, simulates it with `eth_call` and answers pons with a refusal (EIP-1193 4001, "Simulated buy: not
+signed"). Nothing is signed or sent. Real buys exist behind switches that are off (see "LIVE" at the end).
 
 ```
 labrat-buyback (Railway)         labrat-buyrig (this image, NOT deployed)                labrat-relay        site
@@ -70,7 +70,19 @@ forget which batches ran, and the runner would take the listed buys as history a
 record. `captured_tx.json` and `events.jsonl` hold the session's throwaway address and pons's raw calldata. They stay
 on the volume and are not published.
 
-## Before going live with real buys
+## LIVE (real buys): switched off
 
-This image cannot buy: `buyrig.py` has no LIVE path, and the engine takes no pons report from a LIVE engine. Real buys
-would need a separate, gated path like the launch rig's, and the owner has not asked for one.
+The image now carries the LIVE path (`live/buyrig_live.py`), and it stays off until these three variables are set on
+this service: `BUYRIG_LIVE=1`, `BUYRIG_CONFIRM=LABRAT` and `BUYBACK_RH_KEY` (the key of the buyback wallet
+`0x17852f35b597554732C706A8A9FAA534C10e1E23`, nothing else is accepted). With any of them missing, every session runs
+exactly as above. LIVE also refuses to run without a mounted volume at `/data` (its journal, `buyrig/live_journal.jsonl`,
+and one lock file per window make a second transaction for a window impossible). The engine must be in live bookings
+for there to be anything to buy. The steps, the order and how to stop are in `live/BUYBACK.md`, "Going live".
+
+| variable (LIVE only) | |
+|---|---|
+| `BUYRIG_LIVE` | `1` switches LIVE on (with the two below) |
+| `BUYRIG_CONFIRM` | `LABRAT` |
+| `BUYBACK_RH_KEY` | the buyback wallet's private key. Use a sealed variable. Only the runner and a LIVE session's own process get it; it leaves the session's environment before Chromium starts, and a simulated session or the replay never gets it |
+| `BUYRIG_CLEAR_STOP` | after LIVE stopped itself: the stop's id, once an operator checked why (`python live/buyrig_live.py --status` shows it) |
+| `BUYRIG_ANCHOR_NONCE` | after a transaction was sent from the wallet outside the rig: the wallet's current nonce |

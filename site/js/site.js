@@ -560,7 +560,8 @@ function onMetrics(rows, info) {
    over); if the 3D view cannot start, or is torn down, this panel opens a socket of its own.
    Rules this panel keeps:
    - hidden until there is something to show: a session on the relay, or a session the buyback engine recorded;
-   - every buy is labelled "Simulated" (the rig has no path that signs; only an explicit, all-round LIVE would differ);
+   - every buy is labelled "Simulated", except a LIVE buy that was executed: the rig's session says signed and sent
+     (not "Simulated") and the engine is LIVE, or the engine verified it on chain (state executed, a tx hash);
    - a test session (local relays only) is shown as a recording, never as live;
    - the copy is fixed here: from the stream only numbers, known target keys, short plain names and fixed status words
      are used, and any text that looks like an address ("0x...") or a balance is dropped. The frames are masked by the
@@ -605,7 +606,8 @@ const PONS = (function ratOnPons() {
     done: 'Done',
   };
   const REASON = { checks_failed: 'a transaction check did not pass', simulation_failed: 'the simulation did not go through',
-    quote_failed: 'pons could not price the buy', timeout: 'the session ran out of time', aborted: 'the session was stopped' };
+    quote_failed: 'pons could not price the buy', timeout: 'the session ran out of time', aborted: 'the session was stopped',
+    balance_low: 'the buyback wallet could not cover the buy', not_settled: 'the buy did not go through on chain' };
   const STALL_MS = 8000;              // live, but no frame for this long: say so on the picture
   const BB_STALE_S = 90;              // the buyback status is rewritten every 10 s; older = not running (as its panel says)
   const NOTE = /^[a-z][a-z ;.-]{0,59}$/;
@@ -672,15 +674,18 @@ const PONS = (function ratOnPons() {
         : own(REASON, r.reason) || 'the session ended without a buy',
     };
   }
-  // the latest simulated buy the buyback engine recorded as clicked by the rat on pons (when the relay has none)
+  // the latest buy the buyback engine recorded as clicked by the rat on pons (when the relay has none): a simulated
+  // one, or (LIVE) one the engine verified on chain (state executed, a transaction hash); anything else is simulated
   function bbPonsOf(j) {
     const b = obj(j && j.buys), recent = b && Array.isArray(b.recent) ? b.recent : [];
+    const live = !!j && j.mode === 'LIVE';
     for (const e of recent) {
       const p = obj(e) && obj(e.pons);
       if (p && p.clicked_by_rat === true) {
         const m = typeof p.checks === 'string' && /^(\d{1,3})\/(\d{1,3})$/.exec(p.checks);
-        return { at: iso(p.at), eth: dec(p.eth_in), out: fmtTok(p.labrat_out), hits: int(p.targets_hit, 0, 99),
-                 misses: int(p.misses, 0, 100000), checks: m ? m[1] + ' of ' + m[2] + ' passed' : '' };
+        const executed = live && e.simulated === false && e.state === 'executed' && /^0x[0-9a-f]{64}$/.test(e.tx || '');
+        return { at: iso(p.at) || iso(e.at), eth: dec(p.eth_in), out: fmtTok(p.labrat_out), hits: int(p.targets_hit, 0, 99),
+                 misses: int(p.misses, 0, 100000), checks: m ? m[1] + ' of ' + m[2] + ' passed' : '', sim: !executed };
       }
     }
     return null;
@@ -688,6 +693,7 @@ const PONS = (function ratOnPons() {
 
   function simulated() {
     const h = S.hello, r = S.result, bb = S.bb;
+    if (!h && S.bbPons) return S.bbPons.sim;          // no session on the relay: the engine's record says which
     return !(h && h.simulated === false && h.label !== 'Simulated' && r && r.sent === true && r.signed === true &&
              bb && bb.mode === 'LIVE');
   }
@@ -700,7 +706,7 @@ const PONS = (function ratOnPons() {
   }
   function nextLine() {
     const j = S.bb;
-    if (!j || j.mode === 'LIVE' || (typeof j.stopped === 'string' && j.stopped)) return '';
+    if (!j || (typeof j.stopped === 'string' && j.stopped)) return '';
     const upd = typeof j.updated === 'string' ? Date.parse(j.updated) : NaN;
     const age = Number.isFinite(upd) ? Math.max(0, (Date.now() - upd) / 1000) : Infinity;
     if (age > BB_STALE_S) return '';
@@ -764,7 +770,7 @@ const PONS = (function ratOnPons() {
       target = res ? (res.ok ? buyLine(sim, res.eth, res.out) : 'No buy this session: ' + res.why) : 'The session ended before a result';
     } else if (bbp) {
       k = 'Last session' + (hhmm(bbp.at) ? ' · ' + hhmm(bbp.at) : '');
-      target = buyLine(true, bbp.eth, bbp.out);
+      target = buyLine(bbp.sim, bbp.eth, bbp.out);
     }
     put(E.k, k); put(E.target, target); put(E.phase, phase);
     // on narrow screens (CSS) the current step also rides on the picture
@@ -1951,7 +1957,11 @@ const TILES = (function ratTiles() {
    An engine without these fields (the older one) still shows its totals and its next buy.
    Every figure carries its mode: anything not executed on-chain is labelled "Simulated" and never called a buy; a
    preview amount (while the budget is not set) is marked as one; a test stream is never called live; a stale status
-   is shown as stale; no address-like string is ever shown. */
+   is shown as stale; no address-like string is ever shown.
+   LIVE (the engine's live bookings: mode "LIVE", buys.simulated false): the banner says "Buybacks live". Each hour's
+   buy is booked (state "booked": not executed yet, never shown as bought) and executed by the rat on pons; only an
+   entry the engine verified on chain (state "executed", its 0x + 64-hex tx hash) is shown as a buy, with its explorer
+   link and "clicked by the rat on pons". The tx hash is used only in that link's href, checked character by character. */
 (function buybacks() {
   const C = window.LABRAT_BUYBACK, wrap = $('#bb-wrap');
   if (!wrap || !C || typeof C !== 'object' || C.enabled !== true || typeof C.statusUrl !== 'string' || !C.statusUrl) return;
@@ -1989,6 +1999,16 @@ const TILES = (function ratTiles() {
               hits: $('#bb-hits'), buysK: $('#bb-buys-k'), buys: $('#bb-buys'), outK: $('#bb-out-k'), out: $('#bb-out'),
               list: $('#bb-list'), note: $('#bb-note') };
   if (Object.values(E).some(x => !x)) return;
+  // the banner at the top of /buyback (optional: another page may not have it)
+  const BN = { box: $('#bbk-banner'), pill: $('#bbk-pill'), text: $('#bbk-banner-t') };
+  const BANNER_DRY = BN.pill && BN.text ? { pill: BN.pill.textContent, text: BN.text.textContent } : null;
+  const BANNER_LIVE = { pill: 'Buybacks live',
+    text: 'Every hour, the rat clicks that hour’s $LABRAT buyback through on the real pons page. The rig checks ' +
+          'the transaction before it is sent from the buyback wallet below, and every buy is verified on chain and ' +
+          'linked to its transaction on the explorer.' };
+  const TX = /^0x[0-9a-f]{64}$/;                           // a transaction hash, and nothing else, becomes a link
+  const TX_URL = 'https://robinhoodchain.blockscout.com/tx/';
+  const txLink = h => TX.test(h) ? '<a class="bb-tx" href="' + TX_URL + h + '" target="_blank" rel="noopener">View transaction</a>' : '';
   const STALE_S = 90;          // the engine rewrites its status at least every 10 s; older than this = not running
   const NOTE = /^[a-z][a-z ;.-]{0,59}$/;   // short fixed phrases from the engine
   // an engine note shown as text: plain words only, nothing address- or number-heavy
@@ -2017,9 +2037,18 @@ const TILES = (function ratTiles() {
     if (E.next.textContent !== t) E.next.textContent = t;
   }
 
+  function banner(live) {
+    if (!BANNER_DRY) return;
+    const b = live ? BANNER_LIVE : BANNER_DRY;
+    if (BN.pill.textContent !== b.pill) BN.pill.textContent = b.pill;
+    if (BN.text.textContent !== b.text) BN.text.textContent = b.text;
+    BN.box.classList.toggle('live', live);
+  }
+
   function render(j) {
     last = j;
     const live = j.mode === 'LIVE';
+    banner(live);
     E.mode.textContent = live ? 'LIVE' : 'Simulated';
     E.mode.classList.toggle('dry', !live);
     const rl = j.relay || {}, src = j.source || {};
@@ -2075,23 +2104,28 @@ const TILES = (function ratTiles() {
       const lr = rateOf(lw);
       E.lastStats.textContent = [int(lw.hits) !== null ? fmtN(lw.hits) + ' hits' : '', int(lw.misses) !== null ? fmtN(lw.misses) + ' missed' : '',
         int(lw.wrong) !== null ? fmtN(lw.wrong) + ' off-tile' : '', 'hit rate ' + pctTxt(lr)].filter(Boolean).join(' · ');
-      // its buy: {state: due | simulated | bought | none | expired, note, eth_in, labrat_out, simulated, preview}
+      // its buy: {state: due | simulated | booked | bought | none | expired, note, eth_in, labrat_out, simulated,
+      // preview, tx (LIVE, once verified)}
       const lb = obj(lw.buy) || {};
       const why = [lb.note, lw.note].map(safeNote).find(Boolean) || '';
       const prev = lb.preview === true || lw.preview === true;
-      const sim = !live || lb.simulated !== false || lb.state !== 'bought';
+      const bought = live && lb.simulated === false && lb.state === 'bought' && TX.test(lb.tx || '');
+      const sim = !bought;
       const eth = dec(lb.eth_in) || dec(lw.amount_eth);
       const tok = dec(lb.labrat_out) && Number(lb.labrat_out) > 0 ? fmtTok(lb.labrat_out) : '';
       const kind = prev ? 'simulated preview buy' : sim ? 'simulated buy' : 'buy';
       let line = '';
-      if (lb.state === 'simulated' || lb.state === 'bought') line = kind[0].toUpperCase() + kind.slice(1) + ': ' + (eth ? eth + ' ETH' : '') + (tok ? ' → ' + tok + ' LABRAT' : '');
+      if (bought) line = 'Buy: ' + (eth ? eth + ' ETH' : '') + (tok ? ' → ' + tok + ' LABRAT' : '');
+      else if (lb.state === 'simulated') line = kind[0].toUpperCase() + kind.slice(1) + ': ' + (eth ? eth + ' ETH' : '') + (tok ? ' → ' + tok + ' LABRAT' : '');
+      else if (live && lb.state === 'booked') line = (eth ? 'Buy of ' + eth + ' ETH booked' : 'Buy booked') + ': the rat clicks it through on pons, not executed yet';
       else if (lb.state === 'due') line = (eth ? kind[0].toUpperCase() + kind.slice(1) + ' of ' + eth + ' ETH booked' : 'Buy booked') + ': the rat clicks it through on pons next';
-      else if (lb.state === 'expired') line = 'The hour’s buy was not completed in time' + (why ? ': ' + why : '');
+      else if (lb.state === 'expired') line = (live ? 'The hour’s buy was not executed in time' : 'The hour’s buy was not completed in time') + (why ? ': ' + why : '');
       else if (lb.state === 'none' || (!eth && Object.keys(lb).length)) line = 'No buy this hour' + (why ? ': ' + why : '');
-      else if (eth) line = kind[0].toUpperCase() + kind.slice(1) + ': ' + eth + ' ETH' + (tok ? ' → ' + tok + ' LABRAT' : '');
+      else if (eth && !live) line = kind[0].toUpperCase() + kind.slice(1) + ': ' + eth + ' ETH' + (tok ? ' → ' + tok + ' LABRAT' : '');
       const p = obj(lb.pons);
-      if (line && p && p.clicked_by_rat === true) line += ' · clicked through by the rat on pons';
-      E.lastBuy.textContent = line; E.lastBuy.hidden = !line;
+      if (line && p && p.clicked_by_rat === true && (bought || lb.simulated !== false)) line += ' · clicked through by the rat on pons';
+      E.lastBuy.innerHTML = esc(line) + (bought ? ' · ' + txLink(lb.tx) : '');
+      E.lastBuy.hidden = !line;
     }
 
     // totals
@@ -2105,15 +2139,23 @@ const TILES = (function ratTiles() {
     E.list.innerHTML = recent.map(r => {
       if (!r || typeof r !== 'object') return '';
       const sim = !live || r.simulated !== false;
+      // LIVE: a buy only once the engine verified it on chain (state executed, with its transaction hash)
+      const executed = !sim && r.state === 'executed' && TX.test(r.tx || '');
       const at = txt(r.at) && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(r.at) ? r.at.slice(11, 16) + ' UTC' : '';
       const venue = r.venue === 'pool' ? 'pool' : r.venue === 'curve' ? 'curve' : '';
       const rr = typeof r.hit_rate === 'number' && isFinite(r.hit_rate) && r.hit_rate >= 0 && r.hit_rate <= 1 ? r.hit_rate : null;
+      const rate = rr !== null ? ' <em>(hit rate ' + esc(pctTxt(rr)) + ')</em>' : '';
+      if (!sim && !executed) {             // LIVE, booked or expired: never shown as bought
+        const what = r.state === 'expired' ? 'not executed' : 'booked, not executed yet';
+        return '<li><span class="bb-t">' + esc(at) + '</span><span>' + esc(fmtEth(r.eth_in)) + ' buy ' + what + rate +
+          '</span></li>';
+      }
       return '<li><span class="bb-t">' + esc(at) + '</span><span>' + (sim ? 'simulated buy' : 'buy') + ': ' +
-        esc(fmtEth(r.eth_in)) + ' &rarr; ' + esc(fmtTok(r.labrat_out)) + ' LABRAT' +
-        (rr !== null ? ' <em>(hit rate ' + esc(pctTxt(rr)) + ')</em>' : '') +
+        esc(fmtEth(r.eth_in)) + ' &rarr; ' + esc(fmtTok(r.labrat_out)) + ' LABRAT' + rate +
         (r.preview === true ? ' <em>preview amount</em>' : '') +
         (venue ? ' <em>' + venue + '</em>' : '') +
-        (sim && obj(r.pons) && r.pons.clicked_by_rat === true ? ' <em>clicked by the rat on pons</em>' : '') +
+        (obj(r.pons) && r.pons.clicked_by_rat === true ? ' <em>clicked by the rat on pons</em>' : '') +
+        (executed ? ' ' + txLink(r.tx) : '') +
         '</span></li>';
     }).join('');
 
@@ -2127,7 +2169,8 @@ const TILES = (function ratTiles() {
     E.note.textContent = (stale ? 'This status has not updated since ' + updTxt + ': the counter may not be running. ' : '') +
       (test ? 'These counts come from a test stream. ' : '') +
       (stopped ? 'Buys stopped: ' + stopped + '. ' : '') +
-      (simulated ? 'Buybacks shown are simulated against the live chain: checked, not sent. ' : '') +
+      (simulated ? 'Buybacks shown are simulated against the live chain: checked, not sent. '
+                 : 'A buy counts only once its transaction is verified on chain: sent from the buyback wallet, to the pons pool, for the booked amount, with the LABRAT received. ') +
       'Hits, misses and off-tile presses are counted as each training attempt ends; one buy an hour, on the hour (UTC).';
     tick();
   }

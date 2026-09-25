@@ -15,6 +15,7 @@
 !live/ponsbot.py
 !live/buyback.py
 !live/buyrig.py
+!live/buyrig_live.py
 !live/buyrig_runner.py
 !buyrig/
 

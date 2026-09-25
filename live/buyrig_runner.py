@@ -1,4 +1,4 @@
-"""The buy rig's runner: one rat session on pons per simulated buyback batch. DRY ONLY.
+"""The buy rig's runner: one rat session on pons per buyback batch. DRY (simulated) unless LIVE is switched on below.
 
     python live/buyrig_runner.py [--status-url https://labrat-buyback-production.up.railway.app/status]
                                  [--report-url <engine>/pons_session] [--relay wss://<relay>/publish]
@@ -19,6 +19,18 @@ On its first start it takes the buys already listed as history (none of them is 
 runs against an engine whose status is not DRY / simulated, never reads .env, never signs and never sends: the session
 itself refuses to sign (live/buyrig.py). Tokens: LABRAT_PUBLISH_TOKEN (relay) and BUYBACK_RIG_TOKEN (engine), both from
 the process environment.
+
+LIVE (switched OFF): only when the process environment holds the same gates as the rig (BUYRIG_LIVE=1,
+BUYRIG_CONFIRM=LABRAT, BUYBACK_RH_KEY of the pinned buyback wallet; live/buyrig_live.py env_gate). Then, besides the
+DRY behaviour above (a DRY engine still gets simulated sessions, whose process gets no key), an engine in LIVE BOOKINGS
+(status mode LIVE, buys.simulated false) is served: each booked real buy in buys.recent (simulated false, state
+"booked", its window and exact eth_in) runs once, while its window can still be signed, as
+`buyrig.py --amount <eth_in> --live --window <window>` (the session re-checks every gate and signs at most one
+transaction for the window). Every poll first resolves the rig's unfinished windows (receipt, or the identical signed
+bytes again) and reports every buy the rig's journal shows as mined and not yet reported: POST /pons_session with the
+window, eth_in and the tx hash (plus the session's proof and counts when it has them). The engine verifies it on chain
+before counting it; a 503 (no receipt there yet) is retried at the next poll. A LIVE session that ended without a buy
+and without a record in the rig's journal is booked there as one failed buy (two in a row stop LIVE).
 """
 import argparse
 import hashlib
@@ -77,7 +89,7 @@ def batch_seed(key):
 
 def valid_batch(r):
     """A recent-buy entry of the engine's public status that the rig can run: a simulated buy with a UTC time and a
-    batch amount the rig accepts (0.00001 .. 0.01 ETH)."""
+    batch amount the rig accepts (0.00001 .. 0.1 ETH)."""
     import buyback
     if not isinstance(r, dict) or r.get('simulated') is not True:
         return False
@@ -90,6 +102,39 @@ def valid_batch(r):
     except ValueError:
         return False
     return 10 ** 13 <= wei <= buyback.HARD['max_buy_wei']
+
+
+def valid_live_batch(r):
+    """A booked REAL buy of an engine in live bookings: simulated false, state "booked", the booked UTC hour (window),
+    its booking time and an amount the rig accepts (0.00001 .. 0.1 ETH)."""
+    import buyback
+    if not isinstance(r, dict) or r.get('simulated') is not False or r.get('state') != 'booked':
+        return False
+    if not isinstance(r.get('window'), str) or not buyback.WINDOW_ID_RE.match(r['window']):
+        return False
+    if not isinstance(r.get('at'), str) or not buyback.ISO_RE.match(r['at']):
+        return False
+    if not isinstance(r.get('eth_in'), str) or not buyback.DEC_RE.match(r['eth_in']):
+        return False
+    try:
+        wei = buyback.parse_eth(r['eth_in'])
+    except ValueError:
+        return False
+    return 10 ** 13 <= wei <= buyback.HARD['max_buy_wei']
+
+
+def live_key(r):
+    return f"live|{r['window']}|{r['eth_in']}"
+
+
+def child_env(live=False, environ=None):
+    """The environment of a child process: the buyback wallet's key only for a LIVE session, never for anything else
+    (a DRY session, the replay)."""
+    import buyrig_live
+    env = dict(os.environ if environ is None else environ)
+    if not live:
+        env.pop(buyrig_live.ENV_KEY, None)
+    return env
 
 
 def fetch_json(url, timeout=20):
@@ -125,9 +170,22 @@ def report_body(r, res):
 
 
 def reportable(res):
-    """-> None when the session may be reported, else why not."""
+    """-> None when the session may be reported, else why not. A LIVE session is reportable when it signed and sent a
+    buy that was mined with LABRAT received (ok): money moved, so it is reported whatever else happened (the engine
+    verifies it on chain)."""
     if not isinstance(res, dict):
         return 'no result'
+    if res.get('mode') == 'LIVE':
+        import buyrig_live
+        if res.get('dev_oracle'):
+            return 'a scripted cursor is never LIVE'
+        if not (res.get('signed') and res.get('sent')):
+            return f"the LIVE session did not sign and send a buy (verdict {res.get('verdict')}: {res.get('error')})"
+        if not isinstance(res.get('tx'), str) or not buyrig_live.HASH_RE.match(res['tx']):
+            return 'no transaction hash'
+        if not res.get('ok') or not res.get('labrat_out'):
+            return f"the buy was sent but not mined with LABRAT received (verdict {res.get('verdict')})"
+        return None
     if not res.get('ok'):
         return f"the session did not pass (verdict {res.get('verdict')}, failed {res.get('failed_checks')})"
     if res.get('mask_breach') or res.get('dev_oracle') or res.get('signed') or res.get('sent'):
@@ -139,16 +197,78 @@ def reportable(res):
     return None
 
 
+def live_report_body(ex, session=None):
+    """The LIVE report (buyback.LIVE_REPORT_KEYS) of one executed buy from the rig's journal (ex: buyrig_live
+    State.executed()), with the session's facts when the runner has them."""
+    import buyback
+    body = {'window': ex['window'], 'eth_in': buyback.eth_str(ex['amount_wei'], 18), 'tx': ex['tx'],
+            'labrat_out': buyback.eth_str(ex['labrat_out_wei'], 18)}
+    s = session or {}
+    for k in ('buy_at', 'session_at', 'proof'):
+        if isinstance(s.get(k), str) and s[k]:
+            body[k] = s[k]
+    if s.get('replay') == 'MATCH':
+        body['replay'] = 'MATCH'
+    for k in ('targets_hit', 'misses', 'checks_passed', 'checks_total'):
+        if isinstance(s.get(k), int) and not isinstance(s.get(k), bool):
+            body[k] = s[k]
+    if s.get('simulation') == 'ok':
+        body['simulation'] = 'ok'
+    return body
+
+
+class LiveHooks:
+    """The runner's LIVE side: the rig's journal (buyrig_live) and its gated RPC. Built only when the env gates hold.
+    It never signs: resolve() finishes unfinished windows (receipt, or the identical signed bytes again)."""
+
+    def __init__(self, rpc, journal, log_fn=log):
+        import buyrig_live
+        self.L, self.rpc, self.journal, self.log = buyrig_live, rpc, journal, log_fn
+
+    def resolve(self):
+        st = self.journal.state()
+        if not st.unresolved():
+            return None
+        return self.L.resolve(self.journal, self.rpc, self.log)
+
+    def stopped(self):
+        return self.journal.state().stop
+
+    def executed(self):
+        return self.journal.state().executed()
+
+    def signable(self, window, now):
+        return self.L.signable(window, now, self.L.SESSION_MARGIN_S)
+
+    def settle(self, window, res):
+        """A LIVE session that ended without a record of its own in the journal (it crashed, timed out, or ran DRY
+        because a gate failed in the child): one failed buy. A signed window is left to its receipt."""
+        st = self.journal.state()
+        w = st.windows.get(window)
+        if w and (w['failed'] or w['signed'] or w['receipt'] or w['expired']):
+            return None
+        if st.stop:
+            return None
+        if isinstance(res, dict) and res.get('mode') == 'LIVE' and res.get('refusal_kind') == 'blocked':
+            return None                     # refused before anything was attempted (stopped, unresolved...): not a buy
+        why = ((res or {}).get('error') or (res or {}).get('verdict') or 'the session ended without a result')
+        if isinstance(res, dict) and res.get('mode') != 'LIVE':
+            why = f'the session ran simulated (a LIVE gate did not hold in the session: {why})'
+        return self.L.record_failure(self.journal, window, str(why)[:300], self.log)
+
+
 class Runner:
     """The polling logic, with every side effect injectable (tests): fetch(url) -> status dict, launch(batch, seed)
     -> the session's result dict (buyrig_result.json) or None, replay(run_dir) -> bool (MATCH), report(body) ->
-    (status, response) or None when reporting is off."""
+    (status, response) or None when reporting is off. live: a LiveHooks (LIVE switched on) or None (DRY only); a LIVE
+    session is launch(batch, seed, live=True)."""
 
     def __init__(self, status_url, state_path, launch, replay, report, fetch=fetch_json, clock=time.time,
-                 max_age_s=3600.0, catch_up=0):
+                 max_age_s=3600.0, catch_up=0, live=None):
         self.status_url, self.state_path = status_url, Path(state_path)
         self.launch, self.replay, self.report, self.fetch, self.clock = launch, replay, report, fetch, clock
         self.max_age_s, self.catch_up = float(max_age_s), int(catch_up)
+        self.live = live
         self.state = self._load()
         self.last_refusal = None
         self.sessions = 0
@@ -199,8 +319,13 @@ class Runner:
         if not isinstance(st, dict):
             return self.refuse('the engine status is not a JSON object')
         buys = st.get('buys') if isinstance(st.get('buys'), dict) else {}
+        if self.live is not None and st.get('mode') == 'LIVE' and buys.get('simulated') is False:
+            return self._poll_live(buys)
+        if self.live is not None:
+            self._live_upkeep()                 # a signed buy is resolved and reported whatever the engine says now
         if st.get('mode') != 'DRY' or buys.get('simulated') is not True:
-            return self.refuse('the engine is not simulated (mode DRY): the buy rig runs only for simulated buys')
+            return self.refuse('the engine is not simulated (mode DRY): the buy rig runs only for simulated buys'
+                               if self.live is None else 'the engine is neither simulated (DRY) nor in live bookings')
         recent = buys.get('recent') if isinstance(buys.get('recent'), list) else []
         batches = [r for r in reversed(recent) if valid_batch(r)]          # oldest first
         self.last_refusal = None
@@ -274,10 +399,120 @@ class Runner:
         log(f"batch {k}: done ({res['labrat_out']} LABRAT, simulated; replay MATCH); engine {code}"
             + ('' if ok else f': {str(resp)[:160]}'))
 
+    # ---- LIVE (only with LiveHooks: the env gates held at start) --------------------------------------------------------
+    def _live_upkeep(self):
+        """Every LIVE poll: finish the rig's unfinished windows (never a new transaction), then report every buy its
+        journal shows as mined and not yet reported."""
+        try:
+            self.live.resolve()
+        except Exception as e:
+            log(f'LIVE: resolving unfinished windows failed for now ({type(e).__name__})')
+        self._report_live()
+
+    def _live_state(self, window):
+        live = self.state.setdefault('live', {})
+        while len(live) > KEEP_KEYS:
+            live.pop(next(iter(live)))
+        return live.setdefault(window, {})
+
+    def _report_live(self):
+        try:
+            executed = self.live.executed()
+        except Exception as e:
+            log(f'LIVE: the rig journal could not be read ({type(e).__name__})')
+            return
+        for ex in executed:
+            ent = self._live_state(ex['window'])
+            if ent.get('reported') or ent.get('report_final'):
+                continue
+            body = live_report_body(ex, ent.get('session'))
+            try:
+                out = self.report(body)
+            except Exception as e:
+                out = ('error', f'{type(e).__name__}: {str(e)[:160]}')
+            if out is None:
+                if ent.get('why') != 'reporting is off':
+                    ent.update(tx=ex['tx'], why='reporting is off')
+                    self._save()
+                    log(f"LIVE: the buy for {ex['window']} ({ex['tx']}) is not reported: reporting is off")
+                continue
+            code, resp = out
+            ent.update(tx=ex['tx'], report_status=code, report_error=None if code == 200 else str(resp)[:200],
+                       reported=code == 200, at=iso(self.clock()))
+            # 503 (no receipt on the engine's RPC yet), 500 or a network error: retried at the next poll; any other
+            # refusal is final (and loud: a real buy the engine does not count)
+            if code not in (200, 500, 503, 'error'):
+                ent['report_final'] = True
+            self._save()
+            log(f"LIVE: reported the buy for {ex['window']} ({ex['tx']}): engine {code}"
+                + ('' if code == 200 else f': {str(resp)[:200]}' + ('' if ent.get('report_final') else ' (retried)')))
+
+    def _poll_live(self, buys):
+        self.last_refusal = None
+        self._live_upkeep()
+        recent = buys.get('recent') if isinstance(buys.get('recent'), list) else []
+        batches = [r for r in reversed(recent) if valid_live_batch(r)]          # oldest first
+        handled = []
+        for r in batches:
+            k = live_key(r)
+            if k in self.state['seen']:
+                continue
+            handled.append(k)
+            now = self.clock()
+            if not self.live.signable(r['window'], now):
+                self._mark(k, 'skipped', why='too late: a window is signed at most one hour after it ends',
+                           window=r['window'])
+                log(f'LIVE batch {k}: too late to execute, skipped')
+                continue
+            stop = self.live.stopped()
+            if stop:
+                self._mark(k, 'skipped', why=f"LIVE is stopped ({str(stop.get('why'))[:160]}; stop id {stop.get('id')})",
+                           window=r['window'])
+                log(f"LIVE batch {k}: skipped, LIVE is stopped (stop id {stop.get('id')})")
+                continue
+            self._run_live_batch(k, r)
+        return handled
+
+    def _run_live_batch(self, k, r):
+        seed = batch_seed(k)
+        w = r['window']
+        self._mark(k, 'started', seed=seed, window=w, live=True)    # before anything runs: never twice
+        self.sessions += 1
+        log(f"LIVE batch {k}: the rat buys {r['eth_in']} ETH of LABRAT on pons for the window {w}, seed {seed}")
+        try:
+            res = self.launch(r, seed, live=True)
+        except Exception as e:
+            res = None
+            log(f'LIVE batch {k}: the session failed to run ({type(e).__name__}: {str(e)[:160]})')
+        try:
+            self.live.settle(w, res)
+        except Exception as e:
+            log(f'LIVE batch {k}: the rig journal could not be updated ({type(e).__name__})')
+        res = res if isinstance(res, dict) else {}
+        match = False
+        if res.get('run_dir') and res.get('session_proof'):
+            try:
+                match = bool(self.replay(res['run_dir']))
+            except Exception as e:
+                log(f'LIVE batch {k}: replay failed to run ({type(e).__name__})')
+        session = {'buy_at': r['at'], 'session_at': res.get('session_at'), 'proof': res.get('session_proof'),
+                   'replay': 'MATCH' if match else None, 'targets_hit': res.get('targets_hit'),
+                   'misses': res.get('misses'), 'checks_passed': res.get('checks_passed'),
+                   'checks_total': res.get('checks_total'), 'simulation': res.get('simulation'),
+                   'run_dir': res.get('run_dir'), 'verdict': res.get('verdict'), 'tx': res.get('tx')}
+        self._live_state(w)['session'] = session
+        why = reportable(res)
+        self._mark(k, 'done' if why is None else 'failed', seed=seed, window=w, run_dir=res.get('run_dir'),
+                   verdict=res.get('verdict'), tx=res.get('tx'), why=None if why is None else why[:200],
+                   replay='MATCH' if match else None)
+        log(f"LIVE batch {k}: " + (f"bought ({res.get('labrat_out')} LABRAT, {res.get('tx')})" if why is None
+                                   else f'no buy: {why}'))
+        self._report_live()
+
 
 # ---------------------------------------------------------------------------------------------------- side effects
 def make_launch(relay=None, out_root=None, python=sys.executable):
-    def launch(r, seed):
+    def launch(r, seed, live=False):
         fd, res_path = tempfile.mkstemp(prefix='buyrig_result_', suffix='.json')
         os.close(fd)
         try:
@@ -289,8 +524,11 @@ def make_launch(relay=None, out_root=None, python=sys.executable):
                 cmd += ['--relay', relay]
             if out_root:
                 cmd += ['--out-root', str(out_root)]
+            if live:
+                cmd += ['--live', '--window', r['window']]
             p = subprocess.run(cmd, cwd=str(ROOT), timeout=SESSION_TIMEOUT_S, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
+                               stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace',
+                               env=child_env(live))
             tail = [ln for ln in (p.stdout or '').splitlines() if ln.startswith('BUYRIG_RESULT ')]
             log(f'session exit {p.returncode}: ' + (tail[-1][:300] if tail else '(no result line)'))
             try:
@@ -310,7 +548,7 @@ def make_replay(python=sys.executable):
     def replay(run_dir):
         p = subprocess.run([python, str(ROOT / 'replay_session.py'), str(ROOT / run_dir)], cwd=str(ROOT),
                            timeout=REPLAY_TIMEOUT_S, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                           encoding='utf-8', errors='replace')
+                           encoding='utf-8', errors='replace', env=child_env(False))
         lines = (p.stdout or '').strip().splitlines()
         return p.returncode == 0 and bool(lines) and lines[-1].strip() == 'MATCH'
     return replay
@@ -329,8 +567,28 @@ def default_report_url(status_url):
     return base.rstrip('/') + '/pons_session'
 
 
+def live_hooks(environ=None, log_fn=log):
+    """-> (LiveHooks, '') when the LIVE env gates hold (buyrig_live.env_gate), else (None, why): DRY only. The runner
+    keeps no key: the account is used here only to open the gated RPC (resolve() re-broadcasts, never signs)."""
+    import buyrig_live
+    acct, why = buyrig_live.env_gate(environ)
+    if acct is None:
+        return None, why
+    try:
+        if buyrig_live.VOLUME is not None and not os.path.ismount(str(buyrig_live.VOLUME)):
+            return None, f'{buyrig_live.VOLUME} is not a mounted volume (the LIVE journal must survive a redeploy)'
+        rpc = buyrig_live.open_rpc(acct, environ=environ)
+    except buyrig_live.LiveRefused as e:
+        return None, str(e)
+    finally:
+        acct = None
+    journal = buyrig_live.Journal()
+    buyrig_live.apply_operator_env(journal, rpc, environ, log_fn)
+    return LiveHooks(rpc, journal, log_fn), ''
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description='one simulated rat buy on pons per buyback batch (DRY only)')
+    ap = argparse.ArgumentParser(description='one rat buy on pons per buyback batch (simulated unless LIVE is on)')
     ap.add_argument('--status-url', default=STATUS_URL)
     ap.add_argument('--report-url', help='default: <status-url without /status>/pons_session')
     ap.add_argument('--relay', help=f'stream each session to <relay>?channel=pons ({RELAY_TOKEN_ENV} from the environment)')
@@ -349,8 +607,11 @@ def main(argv=None):
     report_url = a.report_url or default_report_url(a.status_url)
     if not token:
         log(f'{RIG_TOKEN_ENV} is not set: sessions run and are recorded, but not reported to the engine')
+    hooks, why = live_hooks()
+    log('LIVE: on (booked real buys are executed; every session re-checks every gate)' if hooks else
+        f'LIVE: off ({why}); simulated sessions only')
     runner = Runner(a.status_url, a.state, make_launch(a.relay, a.out_root), make_replay(),
-                    make_report(report_url, token), max_age_s=a.max_age, catch_up=a.catch_up)
+                    make_report(report_url, token), max_age_s=a.max_age, catch_up=a.catch_up, live=hooks)
     log(f'watching {a.status_url} every {a.poll:g} s; state {a.state}'
         + (f"; streaming to {a.relay.split('?')[0]} (pons channel)" if a.relay else ''))
     try:

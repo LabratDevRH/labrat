@@ -7,6 +7,16 @@
                                                    #   streamed to a LOCAL relay (127.0.0.1:4771), recorded, replayed
     python live/buyrig_test.py --only-real [--frames-out DIR]
 
+LIVE (switched off in the product; here with mocks only): every gate falls back to DRY, the key leaves the environment,
+the page wallet is an address only, one transaction per window (journal + lock file) across restarts, 'reserved' before
+signing and 'signed' (raw bytes) before the broadcast, a crash between signing and broadcasting (the identical bytes go
+out on the next start, nothing is signed again), a signed buy that never landed (expired, its nonce reused), a nonce used
+elsewhere (LIVE stops), tampered from / to / value / token / amount (refused, nothing signed, LIVE stops), a short balance
+and the two-failures stop, the runner's LIVE batches (run once with --live --window, reported, verified by the engine,
+retried on 503, recovered after a crash), and the key never in any output. The signer is buyback_test.MockSigner (an
+address, no key), except in two tests that sign with a key made in the test itself (Account.create(), never funded)
+against the in-memory fake chain: the real transaction format, and the key-leak scan.
+
 NOTHING here reads .env, holds a funded key, signs or sends a transaction (buyback_test's traps):
   * opening any file named .env raises and is recorded; launcher.read_env_file / launcher.config are tripwires
   * LocalAccount.sign_transaction / unsafe_sign_hash / sign_message / sign_typed_data are tripwires: no account signs
@@ -61,14 +71,21 @@ import buyrig  # noqa: E402  (first: brainrig sets the thread stacks before any 
 import brainrig  # noqa: E402
 import buyback as bb  # noqa: E402
 import buyback_test as bt  # noqa: E402  (the sandbox traps and the fake chain)
+import buyrig_live as bl  # noqa: E402
 import buyrig_runner as rn  # noqa: E402
 import launcher  # noqa: E402
 import ponsbot  # noqa: E402
 from eth_abi import encode  # noqa: E402
-from eth_utils import to_checksum_address  # noqa: E402
+from eth_account import Account  # noqa: E402
+from eth_account.signers.local import LocalAccount  # noqa: E402
+from eth_utils import keccak, to_checksum_address  # noqa: E402
 
-STATUS_PORT = 4772
-RELAY_PORT = 4771
+# the real signing function, saved before the traps replace it: used ONLY with a key a test creates itself
+# (Account.create(), never funded, never the buyback wallet's), against the in-memory fake chain
+_REAL_SIGN_TX = LocalAccount.sign_transaction
+
+STATUS_PORT = int(os.environ.get('BUYRIG_TEST_STATUS_PORT') or 4772)
+RELAY_PORT = int(os.environ.get('BUYRIG_TEST_RELAY_PORT') or 4771)
 AMOUNT = '0.0001'
 AMOUNT_WEI = 10 ** 14
 PAGE_WALLET = to_checksum_address('0x' + 'ab' * 20)
@@ -246,10 +263,14 @@ class TestTxChecks(bt.Base):
         for m in SEND_METHODS:
             with self.assertRaises(bb.SendRefused):
                 rpc.raw(m, [{}])
+        # the signing code lives only in live/buyrig_live.py (switched off by default); buyrig.py has none of it
         src = (LIVE_DIR / 'buyrig.py').read_text(encoding='utf-8')
         for bad in ('sign_transaction', 'send_raw', 'LiveRpc', 'LiveLaunch', 'read_env_file', 'launcher.config(',
-                    'unsafe_sign_hash', "'LIVE'"):
+                    'unsafe_sign_hash', 'from_key', 'os.environ.get(buyrig_live.ENV_KEY'):
             self.assertNotIn(bad, src, f'buyrig.py mentions {bad}')
+        live_src = (LIVE_DIR / 'buyrig_live.py').read_text(encoding='utf-8')
+        for bad in ('read_env_file', 'launcher.config(', 'unsafe_sign_hash', 'sign_message', 'sign_typed_data'):
+            self.assertNotIn(bad, live_src, f'buyrig_live.py mentions {bad}')
 
 
 # ---------------------------------------------------------------------------------------------------- tests: signing
@@ -408,10 +429,12 @@ class TestNeverSigns(bt.Base):
             self.assertEqual((x.mode, x.live_mode), ('DRY', False))
         self.assertIsInstance(r.bot, SimpleNamespace)
         self.assertFalse(issubclass(buyrig.BuyBot, ponsbot.LiveLaunch))
-        for bad in ('0', '-0.0001', '0.000001', '0.02', 'abc', 'NaN', '0.000012345'):
+        # the hard per-buy ceiling is 0.1 ETH (buyback.HARD, the owner's budget of 2026-09-25)
+        for bad in ('0', '-0.0001', '0.000001', '0.2', '0.10000001', 'abc', 'NaN', '0.000012345'):
             with self.assertRaises(ValueError):
                 buyrig.parse_amount(bad)
         self.assertEqual(buyrig.parse_amount('0.00047'), ('0.00047', 47 * 10 ** 13))
+        self.assertEqual(buyrig.parse_amount('0.1'), ('0.1', 10 ** 17))
 
 
 # ---------------------------------------------------------------------------------------------------- tests: the mask
@@ -1093,6 +1116,739 @@ class TestRunner(bt.Base):
         finally:
             srv.shutdown()
             srv.server_close()
+
+
+# ---------------------------------------------------------------------------------------------------- LIVE (mocked)
+LIVE_WEI = AMOUNT_WEI                      # 0.0001 ETH, the booked amount in these tests
+
+
+class Crash(BaseException):
+    """The process dying at a given line (a BaseException: no `except Exception` in the code catches it)."""
+
+
+def live_window(now=None, hours_ahead=0):
+    """The hour that ended last (signable now: from its end until an hour later)."""
+    t = (time.time() if now is None else now) + 3600 * hours_ahead
+    return bb.iso(bb.window_start(t) - 3600)
+
+
+def key_env(key_hex):
+    return {bl.ENV_LIVE: '1', bl.ENV_CONFIRM: 'LABRAT', bl.ENV_KEY: '0x' + key_hex}
+
+
+class LiveBase(bt.Base):
+    """A temp LIVE journal, the fake chain as the buyback wallet's chain (nonce 0, 1 ETH), a MockSigner (no key)."""
+    live_test = True
+
+    def setUp(self):
+        super().setUp()
+        self._saved = (bl.JOURNAL_PATH, bl.VOLUME, bl.WALLET, buyrig.TOAST_WAIT_S)
+        bl.VOLUME = None                        # tests have no /data volume
+        bl.JOURNAL_PATH = Path(self.tmp) / 'buyrig' / 'live_journal.jsonl'
+        buyrig.TOAST_WAIT_S = 0.1
+        self.chain.buyback_balance = 10 ** 18
+        self.chain.nonce = bl.FIRST_NONCE       # the buyback wallet has sent nothing yet
+        self.journal = bl.Journal(bl.JOURNAL_PATH)
+        self.window = live_window()
+        self.signer = bt.MockSigner(bl.WALLET)
+        self.logs = []
+
+    def tearDown(self):
+        bl.JOURNAL_PATH, bl.VOLUME, bl.WALLET, buyrig.TOAST_WAIT_S = self._saved
+        super().tearDown()
+
+    def rpc(self, chain=None):
+        ch = chain or self.chain
+        return bl.open_rpc(SimpleNamespace(address=bl.WALLET), ch, [ch], environ={})
+
+    def buyer(self, window=None, amount=LIVE_WEI, signer=None, journal=None, **kw):
+        kw.setdefault('sleep', lambda s: None)
+        kw.setdefault('receipt_wait_s', 0.3)
+        return bl.LiveBuyer(signer or self.signer, self.rpc(), journal or self.journal, window or self.window, amount,
+                            log=self.logs.append, **kw)
+
+    def data(self, amount=LIVE_WEI, deadline=None, min_out=None):
+        q = amount * self.chain.rate
+        return bb.cd_router_buy(amount, q * 99 // 100 if min_out is None else min_out,
+                                int(time.time()) + 1200 if deadline is None else deadline)
+
+    def recs(self, ev=None, journal=None):
+        recs, _bad = (journal or self.journal).records()
+        return [r for r in recs if ev is None or r['ev'] == ev]
+
+
+def new_live_run(tmp, buyer, link=None):
+    """A LIVE BuyRun inside a running loop, with no browser (the page wallet stub has the buyback wallet's address)."""
+    buyrig.configure(7)
+    r = buyrig.BuyRun(AMOUNT, 7, link=link, out_root=tmp, buyer=buyer)
+    r.out = StubOut()
+    r.out.shot_idle = asyncio.Event()
+    r.out.shot_idle.set()
+    r.bot = SimpleNamespace(armed=False, address=bl.WALLET, page=None, signatures=[], refusals=[],
+                            arm=lambda: setattr(r.bot, 'armed', True))
+    r.commit = hashlib.sha256(b'brain').hexdigest()
+    r.review = GOOD_REVIEW
+    return r
+
+
+def live_tx(case, **kw):
+    """pons's buy from the buyback wallet (TxCase's, with from = the wallet)."""
+    return case.tx(**{'from': bl.WALLET, **kw})
+
+
+async def live_send(r, tx):
+    r.bot.arm()
+    resp = await r.on_send(tx)
+    if r.receipt_task:
+        await r.receipt_task
+    if r.rejection_task:
+        await r.rejection_task
+    return resp
+
+
+class TestLiveGates(LiveBase):
+    def decide(self, env, live=True, window='default', dev_oracle=False, chain=None):
+        ch = chain or self.chain
+        return buyrig.decide_live(live, self.window if window == 'default' else window, LIVE_WEI, dev_oracle,
+                                  environ=env, gate_rpc=bb.ReadRpc(ch), log=self.logs.append, transport=ch, nodes=[ch],
+                                  journal=self.journal, sleep=lambda s: None, receipt_wait_s=0.3)
+
+    def test_every_gate_else_the_session_runs_dry(self):
+        acct = Account.create()                      # a key made here: never funded, never the buyback wallet's
+        key = bytes(acct.key).hex()
+        other = bytes(Account.create().key).hex()
+        good = key_env(key)
+        bl.WALLET = acct.address                     # this test's stand-in for the pinned wallet
+        wrong_chain = bt.FakeChain()
+        wrong_chain.chain_id = 1
+        cases = [
+            ('no --live, no --window', dict(good), dict(live=False, window=None), 'not asked for'),
+            ('--window without --live', dict(good), dict(live=False), '--live was not given'),
+            ('--live without --window', dict(good), dict(window=None), '--window was not given'),
+            ('a window that is not an hour', dict(good), dict(window='2026-09-25T20:30:00Z'), 'UTC hour'),
+            ('BUYRIG_LIVE missing', {k: v for k, v in good.items() if k != bl.ENV_LIVE}, {}, 'BUYRIG_LIVE is not 1'),
+            ('BUYRIG_LIVE=0', dict(good, **{bl.ENV_LIVE: '0'}), {}, 'BUYRIG_LIVE is not 1'),
+            ('BUYRIG_CONFIRM missing', {k: v for k, v in good.items() if k != bl.ENV_CONFIRM}, {}, 'BUYRIG_CONFIRM'),
+            ('BUYRIG_CONFIRM=labrat', dict(good, **{bl.ENV_CONFIRM: 'labrat'}), {}, 'BUYRIG_CONFIRM'),
+            ('no key', {k: v for k, v in good.items() if k != bl.ENV_KEY}, {}, 'is not set'),
+            ('a key that does not parse', dict(good, **{bl.ENV_KEY: 'not-a-key'}), {}, 'does not parse'),
+            ('the key of another wallet', dict(good, **{bl.ENV_KEY: other}), {}, 'not the key of the pinned'),
+            ('chain id 1', dict(good), dict(chain=wrong_chain), 'chain id 1'),
+            ('the scripted cursor', dict(good), dict(dev_oracle=True), 'scripted cursor'),
+        ]
+        for name, env, kw, why in cases:
+            with self.subTest(name):
+                buyer, refusal, got = self.decide(env, **kw)
+                self.assertIsNone(buyer)
+                self.assertIsNone(refusal)
+                self.assertIn(why, got)
+                self.assertNotIn(bl.ENV_KEY, env, 'the key leaves the environment whatever the outcome')
+                self.assertNotIn(key, got.lower())
+                self.assertNotIn(other, got.lower())
+        # every gate holds: LIVE, and the key has left the environment
+        env = dict(good)
+        buyer, refusal, why = self.decide(env)
+        self.assertIsInstance(buyer, bl.LiveBuyer)
+        self.assertIsNone(refusal)
+        self.assertNotIn(bl.ENV_KEY, env)
+        self.assertEqual((buyer.window, buyer.amount_wei, buyer.address), (self.window, LIVE_WEI, acct.address))
+        # every gate holds but LIVE is stopped: the session is refused (nothing runs), not quietly DRY
+        bl.stop(self.journal, 'an operator must look', self.window, 'check', log=self.logs.append)
+        buyer, refusal, why = self.decide(dict(good))
+        self.assertIsNone(buyer)
+        self.assertEqual(refusal.kind, 'blocked')
+        self.assertIn('LIVE is stopped', str(refusal))
+        # RATBRAIN_RPC: LIVE only through the pinned public RPCs
+        with self.assertRaises(bl.LiveRefused):
+            bl.open_rpc(acct, self.chain, [self.chain], environ={'RATBRAIN_RPC': 'http://127.0.0.1:8545'})
+        self.assertEqual(self.chain.sent, [])
+
+    def test_the_page_wallet_is_the_address_only_with_its_real_balance(self):
+        with self.assertRaises(ValueError):
+            buyrig.BuyBot(ponsbot.throwaway_account(), live=True)       # never a key in LIVE's page wallet
+        bot = buyrig.BuyBot(bl.AddressOnly(bl.WALLET), live=True)
+        self.assertFalse(bot.dry)
+        self.assertEqual(bot.address, bl.WALLET)
+        done = []
+
+        class Route:
+            def __init__(self, body):
+                self.request = SimpleNamespace(method='POST', post_data=json.dumps(body))
+
+            async def abort(self):
+                done.append('abort')
+
+            async def continue_(self):
+                done.append('continue')
+
+            async def fetch(self, **kw):
+                done.append('fetch')                  # DRY's balance override rewrites the body: never in LIVE
+
+        async def go():
+            call = {'id': 1, 'method': 'eth_call', 'params': [{'to': bb.ROUTER, 'data': '0x'}, 'latest']}
+            await bot._route_rpc(Route(call))
+            await bot._route_rpc(Route({'id': 2, 'method': 'eth_getBalance', 'params': [bl.WALLET, 'latest']}))
+            await bot._route_rpc(Route({'id': 3, 'method': 'eth_sendRawTransaction', 'params': ['0x02']}))
+            return [await bot._eth_sign('personal_sign', ['0x68656c6c6f', bot.address]),
+                    await bot._eth_sign_typed('eth_signTypedData_v4', [bot.address, '{}'])]
+        signs = asyncio.run(go())
+        self.assertEqual(done, ['continue', 'continue', 'abort'])
+        self.assertEqual(signs, [{'error': {'code': 4001, 'message': buyrig.REFUSAL_LIVE}}] * 2)
+        self.assertNotIn('DRY', buyrig.REFUSAL_LIVE)
+
+
+class TestLiveBuyer(LiveBase):
+    def test_one_transaction_journalled_before_it_is_broadcast(self):
+        journal_path = self.journal.path
+        seen = {}
+
+        def on_send(raw, txh):                        # at the broadcast: 'reserved' and 'signed' are already on disk
+            with open(journal_path, encoding='utf-8') as f:
+                lines = [json.loads(l) for l in f]
+            seen['evs'] = [r['ev'] for r in lines]
+            seen['signed'] = [r for r in lines if r['ev'] == 'signed']
+            seen['raw'], seen['txh'] = raw, txh
+        self.chain.on_send = on_send
+        b = self.buyer()
+        self.assertEqual(b.preflight(), {'nonce': 0})
+        data, deadline = self.data(), int(time.time()) + 1200
+        sent = b.sign_and_send(data, deadline)
+        self.assertEqual(seen['evs'], ['reserved', 'signed'], 'reserved, then signed, then the broadcast')
+        s, = seen['signed']
+        self.assertEqual((s['raw'], s['tx']), (seen['raw'], seen['txh']))
+        self.assertEqual((sent['tx'], sent['broadcast'], sent['error']), (seen['txh'], True, None))
+        self.assertEqual([r['ev'] for r in self.recs()], ['reserved', 'signed', 'sent'])
+        self.assertTrue(self.journal.lock_path(self.window).exists())
+        tx, = self.signer.signed                      # ONE transaction, exactly what was checked
+        gp = self.chain.gas_price
+        self.assertEqual(tx, {'chainId': 4663, 'nonce': 0, 'to': bb.ROUTER, 'value': LIVE_WEI, 'data': data,
+                              'gas': -(-161_654 * 5 // 4), 'maxFeePerGas': min(2 * gp, bl.MAX_FEE_CAP_WEI),
+                              'maxPriorityFeePerGas': 0, 'type': 2})
+        info = b.wait_receipt()
+        self.assertTrue(info['ok'])
+        self.assertEqual(info['labrat_out_wei'], LIVE_WEI * self.chain.rate)
+        rc, = self.recs('receipt')
+        self.assertEqual((rc['tx'], rc['ok'], rc['block']), (sent['tx'], True, self.chain.block))
+        st = self.journal.state()
+        self.assertTrue(st.bought(self.window))
+        self.assertEqual((st.expected_nonce(), st.failures), (1, 0))
+        self.assertEqual(st.executed(), [{'window': self.window, 'tx': sent['tx'], 'amount_wei': LIVE_WEI,
+                                          'labrat_out_wei': LIVE_WEI * self.chain.rate, 'block': self.chain.block}])
+        with self.assertRaises(bl.LiveRefused):          # this session had its one buy
+            b.sign_and_send(data, deadline)
+        self.assertEqual(len(self.signer.signed), 1)
+
+    def test_one_transaction_per_window_across_restarts(self):
+        b = self.buyer()
+        b.sign_and_send(self.data(), int(time.time()) + 1200)
+        b.wait_receipt()
+        for name in ('the next process', 'another one'):
+            with self.subTest(name):
+                with self.assertRaises(bl.LiveRefused) as cm:          # a restart: a new journal object, same file
+                    self.buyer(journal=bl.Journal(self.journal.path)).preflight()
+                self.assertIn('already has its transaction', str(cm.exception))
+                self.assertEqual(cm.exception.kind, 'blocked')
+        # the lock file alone refuses (a journal line lost), and the journal line alone refuses (a lock file lost)
+        w2 = live_window(hours_ahead=1)
+        clock2 = lambda: time.time() + 3600           # noqa: E731  (an hour later: w2 is the signable window)
+        j2 = bl.Journal(Path(self.tmp) / 'j2' / 'live_journal.jsonl')
+        j2.lock_dir.mkdir(parents=True)
+        j2.lock_path(w2).write_text('{}', encoding='utf-8')
+        with self.assertRaises(bl.LiveRefused) as cm:
+            bl.LiveBuyer(self.signer, self.rpc(), j2, w2, LIVE_WEI, clock=clock2).preflight()
+        self.assertIn('already has its transaction', str(cm.exception))
+        j3 = bl.Journal(Path(self.tmp) / 'j3' / 'live_journal.jsonl')
+        j3.append({'ev': 'reserved', 'window': w2, 'amount_wei': LIVE_WEI})
+        with self.assertRaises(bl.LiveRefused) as cm:
+            bl.LiveBuyer(self.signer, self.rpc(), j3, w2, LIVE_WEI, clock=clock2).preflight()
+        self.assertIn('already has its transaction', str(cm.exception))
+        # two processes past the preflight at once: the exclusive lock lets only one reserve
+        j4 = bl.Journal(Path(self.tmp) / 'j4' / 'live_journal.jsonl')
+        j4.reserve(w2, {'amount_wei': LIVE_WEI})
+        with self.assertRaises(bl.LiveRefused):
+            j4.reserve(w2, {'amount_wei': LIVE_WEI})
+        self.assertEqual(len(self.signer.signed), 1)
+        self.assertEqual(len(self.chain.sent), 1)
+
+    def test_a_crash_between_signing_and_broadcasting(self):
+        """The process dies after 'signed' is on disk and before eth_sendRawTransaction: the next start sends the
+        IDENTICAL bytes (resolve), never signs again, and the window is never signed twice."""
+        b = self.buyer()
+        rpc = b.rpc
+
+        def die(raw):
+            raise Crash('killed at the broadcast')
+        rpc.send_raw = die
+        with self.assertRaises(Crash):
+            b.sign_and_send(self.data(), int(time.time()) + 1200)
+        self.assertEqual([r['ev'] for r in self.recs()], ['reserved', 'signed'])
+        self.assertEqual(self.chain.sent, [], 'nothing left the machine')
+        signed_raw = self.recs('signed')[0]['raw']
+        # the restart: a new journal object and RPC; the window's preflight resolves first
+        j = bl.Journal(self.journal.path)
+        with self.assertRaises(bl.LiveRefused) as cm:
+            self.buyer(journal=j).preflight()                     # re-broadcast now; resolved on the next look
+        self.assertIn('not resolved yet', str(cm.exception))
+        self.assertEqual(self.chain.sent, [signed_raw], 'the identical signed bytes, nothing else')
+        out = bl.resolve(j, self.rpc(), self.logs.append)
+        self.assertEqual(out['resolved'], [self.window])
+        st = j.state()
+        self.assertTrue(st.bought(self.window))
+        self.assertEqual(st.unresolved(), {})
+        self.assertEqual(len(self.signer.signed), 1, 'never signed again')
+        self.assertEqual([r['ev'] for r in self.recs(journal=j)],
+                         ['reserved', 'signed', 'rebroadcast', 'receipt'])
+        with self.assertRaises(bl.LiveRefused):
+            self.buyer(journal=j).preflight()                     # and the window is used for good
+
+    def test_a_crash_after_the_broadcast_is_finished_by_its_receipt(self):
+        self.chain.auto_mine = False
+        b = self.buyer()
+        sent = b.sign_and_send(self.data(), int(time.time()) + 1200)   # in the mempool; the process dies here
+        out = bl.resolve(self.journal, self.rpc(), self.logs.append)
+        self.assertEqual(out['pending'], [self.window], 'still in the mempool: wait')
+        self.chain.mine(sent['tx'])
+        out = bl.resolve(self.journal, self.rpc(), self.logs.append)
+        self.assertEqual(out['resolved'], [self.window])
+        self.assertEqual(len(self.chain.sent), 1, 'no re-broadcast was needed')
+        self.assertTrue(self.journal.state().bought(self.window))
+
+    def test_a_signed_buy_that_never_landed_expires_and_its_nonce_is_reused(self):
+        self.chain.reject_sends = {'code': -32000, 'message': 'insufficient funds for gas * price + value'}
+        b = self.buyer()
+        sent = b.sign_and_send(self.data(), int(time.time()) + 1200)
+        self.assertIs(sent['broadcast'], False)
+        self.assertIsNone(b.wait_receipt(0))
+        out = bl.resolve(self.journal, self.rpc(), self.logs.append)          # deadline not passed: the same bytes
+        self.assertEqual(out['pending'], [self.window])
+        self.assertEqual(self.chain.sent[0], self.chain.sent[1])
+        self.chain.ts = int(time.time()) + 1200 + bl.EXPIRE_MARGIN_S + 5       # its router deadline has passed
+        out = bl.resolve(self.journal, self.rpc(), self.logs.append)
+        self.assertEqual(out['resolved'], [self.window])
+        st = self.journal.state()
+        self.assertEqual((st.unresolved(), st.failures, st.expected_nonce()), ({}, 1, 0))
+        self.assertTrue(st.windows[self.window]['expired'])
+        # the next window's transaction takes the free nonce 0
+        self.chain.reject_sends = None
+        self.chain.ts = int(time.time())
+        w2 = live_window(hours_ahead=1)
+        b2 = self.buyer(window=w2, clock=lambda: time.time() + 3600)
+        self.assertEqual(b2.preflight(), {'nonce': 0})
+        b2.sign_and_send(self.data(), int(time.time()) + 1200)
+        self.assertEqual(self.signer.signed[-1]['nonce'], 0)
+        self.assertTrue(b2.wait_receipt()['ok'])
+
+    def test_a_nonce_used_elsewhere_stops_live_until_an_operator_acts(self):
+        self.chain.auto_mine = False
+        b = self.buyer()
+        b.sign_and_send(self.data(), int(time.time()) + 1200)
+        self.chain.pending_txs.clear()            # the chain dropped it, and the owner sent a transaction by hand
+        self.chain.nonce = 1
+        out = bl.resolve(self.journal, self.rpc(), self.logs.append)
+        self.assertIn('used nonce 0 for another transaction', out['stopped'])
+        st = self.journal.state()
+        self.assertEqual(st.stop['kind'], 'nonce')
+        with self.assertRaises(bl.LiveRefused):
+            self.buyer(window=live_window(hours_ahead=1), clock=lambda: time.time() + 3600).preflight()
+        # the operator checked: abandon it (every RPC agrees), clear the stop, anchor the nonce
+        self.assertTrue(bl.abandon(self.journal, self.window, nodes=[self.chain], log=self.logs.append))
+        self.assertEqual(self.journal.state().unresolved(), {})
+        self.assertTrue(bl.clear_stop(self.journal, st.stop['id'], log=self.logs.append))
+        b2 = self.buyer(window=live_window(hours_ahead=1), clock=lambda: time.time() + 3600)
+        with self.assertRaises(bl.LiveRefused) as cm:
+            b2.preflight()
+        self.assertIn(f'{bl.ENV_ANCHOR}=1', str(cm.exception))
+        bl.apply_operator_env(self.journal, self.rpc(), {bl.ENV_ANCHOR: '1'}, self.logs.append)
+        self.assertEqual(b2.preflight(), {'nonce': 1})
+
+    def test_preflight_refusals(self):
+        def refused(b, kind, words, stage='start'):
+            with self.assertRaises(bl.LiveRefused) as cm:
+                b.preflight(stage)
+            self.assertEqual(cm.exception.kind, kind, str(cm.exception))
+            self.assertIn(words, str(cm.exception))
+        now = time.time()
+        refused(self.buyer(window=bb.iso(bb.window_start(now))), 'check', 'has not ended')
+        old = bb.iso(bb.window_start(now) - 3 * 3600)
+        refused(self.buyer(window=old), 'blocked', 'too late')
+        refused(self.buyer(window=old), 'failure', 'too late', stage='sign')
+        self.chain.pending_txs['0xab'] = {'nonce': 0}            # a transaction of the wallet that is not the rig's
+        refused(self.buyer(), 'failure', 'pending transaction')
+        self.chain.pending_txs.clear()
+        self.chain.nonce = 3                                      # the journal accounts for 0
+        refused(self.buyer(), 'blocked', 'accounts for 0')
+        self.chain.nonce = 0
+        # the rig's own caps (2.4 ETH signed a day, 5 ETH ever)
+        j = bl.Journal(Path(self.tmp) / 'caps' / 'live_journal.jsonl')
+        for i in range(3):
+            w = bb.iso(bb.window_start(now) - (i + 5) * 3600)
+            j.append({'ev': 'signed', 'window': w, 'tx': '0x' + f'{i:02x}' * 32, 'raw': '0x', 'nonce': i,
+                      'value': 8 * 10 ** 17})
+            j.append({'ev': 'receipt', 'window': w, 'tx': '0x' + f'{i:02x}' * 32, 'ok': True, 'status': 1})
+        self.chain.nonce = 3
+        refused(self.buyer(journal=j), 'check', "the rig's own caps")
+        self.chain.nonce = 0
+        # a damaged journal line refuses everything
+        self.journal.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.journal.path, 'a', encoding='utf-8') as f:
+            f.write('{"ev": "sig\n')
+        refused(self.buyer(), 'blocked', 'unreadable line')
+        with self.assertRaises(bl.LiveRefused):
+            bl.LiveBuyer(self.signer, self.rpc(), self.journal, self.window, 2 * 10 ** 17)    # over 0.1 ETH
+        with self.assertRaises(bl.LiveRefused):
+            bl.LiveBuyer(bt.MockSigner(bb.WALLET), self.rpc(), self.journal, self.window, LIVE_WEI)
+        with self.assertRaises(bl.LiveRefused):
+            bl.LiveBuyer(self.signer, bb.ReadRpc(self.chain), self.journal, self.window, LIVE_WEI)
+        self.assertEqual((self.signer.signed, self.chain.sent), ([], []))
+
+    def test_the_real_transaction_format(self):
+        """The dict LiveBuyer signs, signed OFFLINE with a key made here (never funded): an EIP-1559 transaction on
+        chain 4663 to the pons router with exactly the checked calldata. Nothing is sent anywhere."""
+        from eth_account.typed_transactions import TypedTransaction
+        from hexbytes import HexBytes
+        acct = Account.create()
+        data = self.data()
+        tx = bl.build_tx(7, data, LIVE_WEI, 202_068, 71_656_000)
+        signed = _REAL_SIGN_TX(acct, tx)
+        raw = bytes(signed.raw_transaction)
+        self.assertEqual(raw[0], 2, 'EIP-1559 (type 2)')
+        d = TypedTransaction.from_bytes(HexBytes(raw)).as_dict()
+        self.assertEqual((d['chainId'], d['nonce'], to_checksum_address(d['to']), d['value'], d['gas'],
+                          d['maxFeePerGas'], d['maxPriorityFeePerGas'], '0x' + bytes(d['data']).hex()),
+                         (4663, 7, bb.ROUTER, LIVE_WEI, 202_068, 71_656_000, 0, data))
+        self.assertEqual(Account.recover_transaction(raw), acct.address)
+        self.assertEqual(bytes(signed.hash), keccak(raw), 'the hash the journal keeps is the transaction hash')
+        self.assertEqual(self.chain.sent, [])
+
+
+class TestLiveSession(LiveBase):
+    """BuyRun's LIVE path after the rat's Confirm (no browser: the page stub has the buyback wallet's address)."""
+
+    def run_send(self, tx, buyer=None, link=None):
+        async def go():
+            r = new_live_run(self.tmp, buyer or self.buyer(), link=link)
+            resp = await live_send(r, tx)
+            return r, resp
+        return asyncio.run(go())
+
+    def test_a_live_buy_on_the_fake_chain(self):
+        c = TxCase(self.chain)
+        link = FakeLink()
+        r, resp = self.run_send(live_tx(c), link=link)
+        txh = self.recs('signed')[0]['tx']
+        self.assertEqual(resp, {'result': txh}, 'pons gets the hash')
+        self.assertTrue(r.inspection['ok'], r.inspection['failed'])
+        self.assertEqual(set(r.inspection['checks']), set(buyrig.PUBLIC_CHECKS_ALL))
+        self.assertFalse(r.inspection['facts']['override'], 'LIVE simulates from the real balance')
+        self.assertEqual(len(self.signer.signed), 1)
+        self.assertEqual([x['ev'] for x in self.recs()], ['reserved', 'signed', 'sent', 'receipt'])
+        lf = r._live_facts()
+        self.assertEqual((lf['signed'], lf['sent'], lf['bought'], lf['tx']), (True, True, True, txh))
+        self.assertEqual(lf['labrat_out'], bb.token_str(LIVE_WEI * self.chain.rate))
+        out = r._outcome()
+        self.assertEqual((out['mode'], out['tx'], out['signed'], out['sent']), ('live_bought', txh, True, True))
+        r.run_dir.mkdir(parents=True, exist_ok=True)
+        r._write_result(out, {'hits_forwarded': 3, 'misses_masked': 1, 'frames_saved': [], 'stream': {}})
+        res = r.result
+        self.assertEqual((res['ok'], res['mode'], res['window'], res['tx'], res['block'], res['signed'], res['sent']),
+                         (True, 'LIVE', self.window, txh, self.chain.block, True, True))
+        self.assertEqual(res['labrat_out'], bb.token_str(LIVE_WEI * self.chain.rate))
+        self.assertIsNone(rn.reportable(res))
+        # the stream: "Live", not simulated, signed and sent, and never a 0x string (the hash is not streamed)
+        hello, done = r._hello_msg(), r._done_msg()
+        self.assertEqual((hello['label'], hello['simulated']), ('Live', False))
+        self.assertEqual((done['ok'], done['outcome'], done['signed'], done['sent'], done['simulated']),
+                         (True, 'bought', True, True, False))
+        txm = [m for m in link.msgs if m.get('kind') == 'tx']
+        self.assertEqual(txm[-1]['status'], 'bought')
+        for m in link.msgs + [hello, done]:
+            buyrig.public_json(m)
+            self.assertNotIn(txh[2:], json.dumps(m))
+
+    def test_tampered_buys_are_refused_nothing_signed_and_live_stops(self):
+        key = bb.pool_key()
+        cases = [
+            ('from another address', lambda c: c.tx(**{'from': OTHER})),
+            ('to another contract', lambda c: live_tx(c, to=bb.QUOTER)),
+            ('value over the booked amount', lambda c: live_tx(c, value=hex(2 * AMOUNT_WEI))),
+            ('another token (pool key)', lambda c: live_tx(c, data=c.data(key=(key[0], OTHER, key[2], key[3], key[4])))),
+            ('another amount (amountIn = value = settle)', lambda c: live_tx(
+                c, value=hex(2 * AMOUNT_WEI), data=c.data(amount=2 * AMOUNT_WEI,
+                                                          min_out=2 * AMOUNT_WEI * self.chain.rate * 99 // 100))),
+            # 97.5 %: passes DRY's 97 % floor, fails LIVE's 98 %
+            ('min out 97.5% of the quote', lambda c: live_tx(c, data=c.data(min_out=c.quote * 975 // 1000))),
+            ('a deadline a day away', lambda c: live_tx(c, data=c.data(deadline=int(c.now) + 86400))),
+        ]
+        for i, (name, make) in enumerate(cases):
+            with self.subTest(name):
+                self.journal = bl.Journal(Path(self.tmp) / f'case{i}' / 'live_journal.jsonl')
+                n_sent = len(self.chain.sent)
+                r, resp = self.run_send(make(TxCase(self.chain)))
+                self.assertEqual(resp, {'error': {'code': 4001, 'message': buyrig.REFUSAL_LIVE}})
+                self.assertEqual(self.signer.signed, [], 'nothing signed')
+                self.assertEqual(len(self.chain.sent), n_sent, 'nothing sent')
+                self.assertFalse(r.inspection['ok'])
+                if name.startswith('min out'):
+                    self.assertEqual(r.inspection['failed'], ['min_out_live'], 'the LIVE floor is the tighter one')
+                self.assertEqual((r.live_kind, r.live_verdict), ('check', 'live_refused_checks'))
+                evs = [x['ev'] for x in self.recs()]
+                self.assertNotIn('reserved', evs)
+                self.assertEqual(self.journal.state().stop['kind'], 'check', 'a check failure stops LIVE')
+                with self.assertRaises(bl.LiveRefused):
+                    self.buyer().preflight()
+
+    def test_a_short_balance_is_a_failed_buy_and_two_in_a_row_stop_live(self):
+        self.chain.buyback_balance = 0
+        c = TxCase(self.chain)
+        r, resp = self.run_send(live_tx(c))
+        self.assertEqual(resp['error']['code'], 4001)
+        self.assertEqual((r.live_kind, r.fail_reason), ('failure', 'balance_low'))
+        self.assertEqual(r._done_msg()['reason'] if r.result else r._live_reason(r._numbers()), 'balance_low')
+        st = self.journal.state()
+        self.assertEqual((st.failures, st.stop), (1, None), 'one failed buy: not stopped yet')
+        # the next hour's buy fails the same way: two in a row stop LIVE
+        w2 = live_window(hours_ahead=1)
+        b2 = self.buyer(window=w2, clock=lambda: time.time() + 3600)
+        r2, _ = self.run_send(live_tx(TxCase(self.chain)), buyer=b2)
+        st = self.journal.state()
+        self.assertEqual((st.failures, st.stop['kind']), (2, 'failures'))
+        with self.assertRaises(bl.LiveRefused) as cm:
+            self.buyer(window=live_window(hours_ahead=2), clock=lambda: time.time() + 7200).preflight()
+        self.assertIn('LIVE is stopped', str(cm.exception))
+        self.assertEqual(self.signer.signed, [])
+        # the operator funds the wallet and clears the stop: a mined buy resets the count
+        self.assertTrue(bl.clear_stop(self.journal, st.stop['id'], log=self.logs.append))
+        self.chain.buyback_balance = 10 ** 18
+        b3 = self.buyer(window=live_window(hours_ahead=2), clock=lambda: time.time() + 7200)
+        r3, resp3 = self.run_send(live_tx(TxCase(self.chain)), buyer=b3)
+        self.assertIn('result', resp3)
+        self.assertEqual(self.journal.state().failures, 0)
+        # a session that never reached pons's request (e.g. the rat timed out) is a failed buy too
+        w4 = live_window(hours_ahead=3)
+        b4 = self.buyer(window=w4, clock=lambda: time.time() + 3 * 3600)
+
+        async def ended():
+            r4 = new_live_run(self.tmp, b4)
+            await r4.loop.run_in_executor(None, r4._live_settle, {'mode': 'ended', 'reason': 'the rat did not hit it'})
+            return r4
+        asyncio.run(ended())
+        self.assertEqual(self.journal.state().windows[w4]['failed']['why'], 'the rat did not hit it')
+
+    def test_the_key_never_appears_in_any_output(self):
+        """The whole LIVE path with a key made here (never funded) in the environment: gate, signer, a real signature,
+        the fake chain, the receipt, the result, the stream, the journal, the runner's report. The key's hex appears
+        nowhere, and a log line that somehow held it is redacted."""
+        acct = Account.create()
+        key = bytes(acct.key).hex()
+        bl.WALLET = acct.address
+        self.chain.accept_signed = True
+        env = key_env(key)
+        trap = LocalAccount.sign_transaction
+        out_buf, err_buf = io.StringIO(), io.StringIO()
+        old_out, old_err = sys.stdout, sys.stderr
+        LocalAccount.sign_transaction = _REAL_SIGN_TX
+        link = FakeLink()
+        try:
+            sys.stdout, sys.stderr = out_buf, err_buf
+            buyer, refusal, why = buyrig.decide_live(
+                True, self.window, LIVE_WEI, environ=env, gate_rpc=bb.ReadRpc(self.chain), transport=self.chain,
+                nodes=[self.chain], journal=self.journal, sleep=lambda s: None, receipt_wait_s=0.3)
+            self.assertIsNotNone(buyer, why)
+            self.assertNotIn(bl.ENV_KEY, env)
+
+            async def go():
+                r = new_live_run(self.tmp, buyer, link=link)
+                resp = await live_send(r, TxCase(self.chain).tx(**{'from': acct.address}))
+                r.log(f'a line that somehow holds the key {key} and 0x{key.upper()}')
+                r.log_ts(f'from a thread: {key}')
+                await asyncio.sleep(0.05)
+                r.run_dir.mkdir(parents=True, exist_ok=True)
+                r._write_result(r._outcome(), {'hits_forwarded': 3, 'misses_masked': 1, 'frames_saved': [],
+                                               'stream': {}})
+                return r, resp
+            r, resp = asyncio.run(go())
+            self.assertIn('result', resp)
+            report = rn.live_report_body(self.journal.state().executed()[0])
+            print(buyer, repr(buyer), r.result)
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
+            LocalAccount.sign_transaction = trap
+        self.assertTrue(r.result['ok'])
+        texts = {'stdout': out_buf.getvalue(), 'stderr': err_buf.getvalue(),
+                 'journal': self.journal.path.read_text(encoding='utf-8'),
+                 'locks': ' '.join(p.read_text(encoding='utf-8') for p in self.journal.lock_dir.iterdir()),
+                 'result': json.dumps(r.result), 'capture': json.dumps(r.capture, default=str),
+                 'events': json.dumps(r.out.events, default=str), 'stream': json.dumps(link.msgs),
+                 'report': json.dumps(report), 'logs': json.dumps(self.logs, default=str),
+                 'result_file': (r.run_dir / 'buyrig_result.json').read_text(encoding='utf-8')}
+        for where, text in texts.items():
+            self.assertNotIn(key, text.lower(), f'the key is in the {where}')
+        self.assertIn('<redacted>', texts['stdout'])
+        self.assertIn(r.result['tx'], texts['journal'])
+
+
+class TestLiveRunner(LiveBase):
+    """The runner in LIVE against a real engine in live bookings (over HTTP on the loopback), with a fake session that
+    does what buyrig.py --live does (a LiveBuyer: sign with the MockSigner, broadcast, receipt)."""
+
+    def setUp(self):
+        super().setUp()
+        now = time.time()
+        self.eclock = bt.Clock(bb.window_start(now) - 3600 + 60)       # the engine books the hour that just ended
+        self.engine = bt.bookings_engine(self.tmp, self.chain, self.eclock)
+        bt.feed(self.engine, [(4, 0)] * 3)
+        self.chain.ts = int(now)
+        bt.close_hour(self.engine, self.eclock)
+        self.booking, = bt.records(self.engine, 'booking')
+        self.tok = 'rig-token-' + 'z' * 24
+        self.srv = bb.serve_status(self.engine, '127.0.0.1', STATUS_PORT, self.tok)
+        self.url = f'http://127.0.0.1:{STATUS_PORT}/status'
+        self.launched = []
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        super().tearDown()
+
+    def fake_session(self, crash_at_broadcast=False):
+        def launch(r, seed, live=False):
+            self.launched.append((r['window'], r['eth_in'], live))
+            if not live:
+                return None
+            b = self.buyer(window=r['window'], amount=bb.parse_eth(r['eth_in']))
+            b.preflight()
+            if crash_at_broadcast:
+                def die(raw):
+                    raise Crash('the child died at the broadcast')
+                b.rpc.send_raw = die
+                try:
+                    b.sign_and_send(self.data(bb.parse_eth(r['eth_in'])), int(time.time()) + 1200)
+                except Crash:
+                    return None                                     # the child is gone: no result
+            sent = b.sign_and_send(self.data(bb.parse_eth(r['eth_in'])), int(time.time()) + 1200)
+            info = b.wait_receipt()
+            return {'ok': bool(info and info['ok']), 'mode': 'LIVE', 'verdict': 'live_bought', 'window': r['window'],
+                    'tx': sent['tx'], 'signed': True, 'sent': True, 'block': info['block'],
+                    'labrat_out': bb.token_str(info['labrat_out_wei']), 'session_at': bb.iso(), 'targets_hit': 3,
+                    'misses': 1, 'checks_passed': 16, 'checks_total': 16, 'simulation': 'ok',
+                    'session_proof': hashlib.sha256(b'live').hexdigest(), 'run_dir': 'runs/buyrig_live_x'}
+        return launch
+
+    def runner(self, launch, report=None, state='runner.json'):
+        return rn.Runner(self.url, os.path.join(self.tmp, state), launch, lambda d: True,
+                         report or rn.make_report(rn.default_report_url(self.url), self.tok), fetch=rn.fetch_json,
+                         live=rn.LiveHooks(self.rpc(), self.journal, self.logs.append))
+
+    def test_a_booked_buy_runs_once_live_and_is_verified_by_the_engine(self):
+        run = self.runner(self.fake_session())
+        handled = run.poll_once()
+        w = bb.iso(self.booking['window'])
+        self.assertEqual(handled, [f'live|{w}|0.001'])
+        self.assertEqual(self.launched, [(w, '0.001', True)], 'run with --live and its window')
+        st = rn.fetch_json(self.url)
+        row = st['buys']['recent'][0]
+        txh = self.recs('signed')[0]['tx']
+        self.assertEqual((row['state'], row['tx'], row['simulated']), ('executed', txh, False))
+        self.assertEqual(row['pons']['label'], bb.EXECUTED_LABEL)
+        self.assertEqual((row['pons']['replay'], row['pons']['checks']), ('MATCH', '16/16'))
+        self.assertTrue(run.state['live'][w]['reported'])
+        self.assertEqual(run.state['seen'][f'live|{w}|0.001']['state'], 'done')
+        for _ in range(2):
+            self.assertEqual(run.poll_once(), [])
+        run2 = self.runner(self.fake_session())                       # a restart: the same state file
+        self.assertEqual(run2.poll_once(), [])
+        self.assertEqual(len(self.launched), 1)
+        self.assertEqual(len(self.signer.signed), 1)
+
+    def test_a_report_the_engine_cannot_verify_yet_is_retried(self):
+        answers = []
+        real = rn.make_report(rn.default_report_url(self.url), self.tok)
+
+        def report(body):
+            answers.append(body['tx'])
+            if len(answers) == 1:
+                return 503, {'error': 'the chain has no receipt for that transaction yet; report it again'}
+            return real(body)
+        run = self.runner(self.fake_session(), report=report)
+        run.poll_once()
+        w = bb.iso(self.booking['window'])
+        self.assertFalse(run.state['live'][w]['reported'])
+        self.assertEqual(rn.fetch_json(self.url)['buys']['recent'][0]['state'], 'booked')
+        run.poll_once()
+        self.assertTrue(run.state['live'][w]['reported'])
+        self.assertEqual(rn.fetch_json(self.url)['buys']['recent'][0]['state'], 'executed')
+        self.assertEqual(len(set(answers)), 1, 'the same transaction, reported again')
+
+    def test_a_crashed_session_is_resolved_and_reported(self):
+        run = self.runner(self.fake_session(crash_at_broadcast=True))
+        run.poll_once()
+        w = bb.iso(self.booking['window'])
+        self.assertEqual(self.journal.state().failures, 0, 'a signed window is decided by its receipt, not counted')
+        self.assertEqual(rn.fetch_json(self.url)['buys']['recent'][0]['state'], 'booked')
+        for _ in range(3):                         # resolve: the identical bytes again, then the receipt, the report
+            run.poll_once()
+        self.assertEqual(rn.fetch_json(self.url)['buys']['recent'][0]['state'], 'executed')
+        self.assertTrue(run.state['live'][w]['reported'])
+        self.assertEqual(len(self.signer.signed), 1, 'never signed again')
+        self.assertEqual(len(self.launched), 1, 'never run again')
+
+    def test_a_failed_session_counts_and_a_stopped_live_skips(self):
+        run = self.runner(lambda r, seed, live=False: self.launched.append(r['window']) or None)
+        run.poll_once()
+        w = bb.iso(self.booking['window'])
+        st = self.journal.state()
+        self.assertEqual((st.failures, st.windows[w]['failed']['consecutive']), (1, 1))
+        # the next hour's booking, with LIVE stopped meanwhile: skipped, not run
+        bl.stop(self.journal, 'a check failed', w, 'check', log=self.logs.append)
+        bt.feed(self.engine, [(4, 0)] * 3, start_n=50)
+        self.eclock.t = bb.window_start(time.time()) + 60
+        self.chain.ts = int(time.time())
+        bt.close_hour(self.engine, self.eclock)          # books the current hour
+        run.clock = lambda: time.time() + 3600           # an hour later: the current hour's buy is the signable one
+        handled = run.poll_once()
+        self.assertEqual(len(handled), 1)
+        self.assertEqual(len(self.launched), 1, 'not run')
+        skipped = run.state['seen'][handled[0]]
+        self.assertEqual(skipped['state'], 'skipped')
+        self.assertIn('LIVE is stopped', skipped['why'])
+
+    def test_child_processes_and_the_launch_command(self):
+        env = {**key_env('11' * 32), 'PATH': 'x'}
+        self.assertNotIn(bl.ENV_KEY, rn.child_env(False, env), 'a simulated session never gets the key')
+        self.assertEqual(rn.child_env(True, env)[bl.ENV_KEY], '0x' + '11' * 32)
+        calls = []
+        real_run = rn.subprocess.run
+
+        def fake_run(cmd, **kw):
+            calls.append((cmd, kw.get('env')))
+            return SimpleNamespace(returncode=2, stdout='BUYRIG_RESULT {}')
+        rn.subprocess.run = fake_run
+        old_key = os.environ.get(bl.ENV_KEY)
+        os.environ[bl.ENV_KEY] = '0x' + '22' * 32
+        try:
+            launch = rn.make_launch()
+            row = {'at': bb.iso(), 'eth_in': '0.001', 'window': self.window, 'hits_covered': 12}
+            launch(row, 5, live=True)
+            launch(row, 5)
+        finally:
+            rn.subprocess.run = real_run
+            if old_key is None:
+                os.environ.pop(bl.ENV_KEY, None)
+            else:
+                os.environ[bl.ENV_KEY] = old_key
+        (live_cmd, live_env), (dry_cmd, dry_env) = calls
+        self.assertEqual(live_cmd[-3:], ['--live', '--window', self.window])
+        self.assertNotIn('--live', dry_cmd)
+        self.assertEqual(live_env[bl.ENV_KEY], '0x' + '22' * 32)
+        self.assertNotIn(bl.ENV_KEY, dry_env)
+
+    def test_reportable_takes_a_live_buy_that_was_signed_and_sent(self):
+        good = {'mode': 'LIVE', 'ok': True, 'signed': True, 'sent': True, 'tx': '0x' + 'ab' * 32, 'labrat_out': '3.49',
+                'verdict': 'live_bought'}
+        self.assertIsNone(rn.reportable(good))
+        for over in ({'signed': False}, {'sent': False}, {'tx': None}, {'ok': False}, {'dev_oracle': True}):
+            self.assertIsNotNone(rn.reportable({**good, **over}), over)
+        self.assertIsNotNone(rn.reportable({**good, 'mode': 'DRY'}), 'a DRY session never signs')
 
 
 # ---------------------------------------------------------------------------------------------------- the real session

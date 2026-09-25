@@ -86,6 +86,28 @@ THE RAT ON PONS (DRY only; live/buyrig.py, live/buyrig_runner.py)
   passed, the simulation ok, only decimals / times / a sha256 / small counts), journalled as 'pons_session', and
   shown on that buy as "Simulated buy · clicked by the rat on pons". It never changes a cap, the pending amount or any engine figure.
 
+LIVE BOOKINGS (switched OFF: real buys from the buyback wallet, executed by the buy rig; live/BUYBACK.md "Going live")
+  Only with BOTH the --live-bookings flag AND the process environment's BUYBACK_LIVE_BOOKINGS=1 (either alone: DRY,
+  exactly as above). It also needs a set --hourly-budget-eth, real hour windows, the public relay and origin, no
+  --accept-test-streams and none of the paused LIVE flags below. Then:
+  * the status says mode LIVE ("Buybacks live" on the site), and its journal is <journal-dir>/journal_bookings.jsonl
+    (real money only: DRY's simulated buys never count against its caps).
+  * each hour's buy is BOOKED, not simulated as bought: after the pinned chain checks, the gas price cap and a
+    simulation of the route (balance override, as DRY) it journals a 'booking' (window, exact amount) and lists it in
+    buys.recent with simulated false and state "booked". The buy rig's runner (live/buyrig_runner.py) executes it: the
+    rat clicks it through on pons and the rig signs it from the buyback wallet (live/buyrig_live.py). The engine holds
+    no key and never sends.
+  * the runner reports the transaction (POST /pons_session, Bearer BUYBACK_RIG_TOKEN, with the window and the tx hash).
+    The engine verifies it ON CHAIN before counting it: receipt status 1, from = the buyback wallet, to = the pons
+    router, value = the booked amount, the calldata a router buy of exactly that amount, a LABRAT Transfer to the wallet,
+    a block after the booking, a tx not counted before. Then the booking is 'executed' with its tx and the LABRAT
+    received (from the chain, not from the report). Anything else is refused (422; 503 while the chain has no receipt
+    yet, so the runner retries).
+  * the caps count only verified buys, plus the bookings still outstanding (so bookings can never add up past a cap).
+    A booking the rig can no longer sign (one hour after its window ended) plus its router deadline's reach is released
+    as 'booking_expired'.
+  * a stop survives restarts; an operator clears it with BUYBACK_CLEAR_STOP=<the stop's id> (in the status log).
+
 LIVE (implemented, gated like launcher.py / live/brainrig.py, NOT used: the owner said not to buy yet)
   PAUSED: this LIVE path signs from the launch wallet and pays from its claimed creator fees, but the buys are now
   paid from the separate, hand-funded buyback wallet, and no LIVE path for that wallet exists (no key handling), so
@@ -228,6 +250,19 @@ PONS_KEEP = 200                # pons sessions (and buy times) kept in memory fo
 ISO_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
 DEC_RE = re.compile(r'^\d{1,15}(\.\d{1,18})?$')
 HEX64_RE = re.compile(r'^[0-9a-f]{64}$')
+
+# LIVE BOOKINGS (see the docstring): real buys from the buyback wallet, executed by the buy rig, verified on chain here
+LIVE_BOOKINGS_ENV = 'BUYBACK_LIVE_BOOKINGS'     # must be "1", AND the --live-bookings flag
+CLEAR_STOP_ENV = 'BUYBACK_CLEAR_STOP'           # an operator's "I checked": the id of the stop to clear
+BOOKINGS_JOURNAL = 'journal_bookings.jsonl'
+LIVE_BOOKINGS_LABEL = 'LIVE - real buys from the buyback wallet, clicked by the rat on pons'
+EXECUTED_LABEL = 'Bought · clicked by the rat on pons'
+SIGN_UNTIL_S = 2 * HOUR_S      # the rig signs a window's buy at most one hour after the window ends (buyrig_live)
+BOOKING_DEAD_S = SIGN_UNTIL_S + 1260 + 300   # + pons's router deadline (<= 1260 s after signing) + a margin
+LIVE_REPORT_KEYS = frozenset({'window', 'buy_at', 'eth_in', 'tx', 'labrat_out', 'session_at', 'proof', 'replay',
+                              'targets_hit', 'misses', 'checks_passed', 'checks_total', 'simulation'})
+TX_RE = re.compile(r'^0x[0-9a-f]{64}$')
+WINDOW_ID_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:00:00Z$')
 
 
 # ---------------------------------------------------------------------------------------------------- config
@@ -1026,6 +1061,12 @@ class Ledger:
         self.last_window = None                    # the public summary of the last closed window
         self.due_hits = 0                          # the hits of the due window (shown as pending)
         self.win_bought = {}                       # window start -> wei bought for it (previews left out)
+        # LIVE BOOKINGS (empty otherwise): a booked buy is reserved against the caps until it is executed (verified on
+        # chain: then it counts as bought) or can no longer execute (booking_expired)
+        self.reserved = {}                         # window start -> wei of its outstanding booking
+        self.bookings = {}                         # window start -> {state, amount_wei, t, dead_t, hits, hit_rate, entry}
+        self.executed_txs = set()
+        self.n_booked = 0
 
     def budget(self):
         return self.claimed - self.spent
@@ -1062,9 +1103,12 @@ class Ledger:
         start) the hourly cap counts that window's buys (one buy per hour window, whenever in the next hour it
         happens); without it, the buys of the rolling hour. The daily cap is a rolling day, the total per journal."""
         c = self.cfg
-        hour = self.win_bought.get(window, 0) if window is not None else self.window(now, 3600)
+        held = sum(self.reserved.values())         # LIVE BOOKINGS: outstanding bookings count as if bought
+        hour = (self.win_bought.get(window, 0) + self.reserved.get(window, 0) if window is not None
+                else self.window(now, 3600) + held)
         caps = [('per-buy', c.max_buy_wei), ('hourly', c.max_hour_wei - hour),
-                ('daily', c.max_day_wei - self.window(now, 86400)), ('total', c.max_total_wei - self.cap_bought)]
+                ('daily', c.max_day_wei - self.window(now, 86400) - held),
+                ('total', c.max_total_wei - self.cap_bought - held)]
         name, val = min(caps, key=lambda kv: kv[1])
         return max(0, val), name
 
@@ -1167,6 +1211,18 @@ class Ledger:
                     self.buy_amounts.popitem(last=False)
         elif ev == 'pons_session':
             self._pons(r)
+        elif ev == 'booking':
+            self._booking(r)
+        elif ev == 'executed':
+            self._executed(r)
+        elif ev == 'booking_expired':
+            w = int(r['window'])
+            b = self.bookings.get(w)
+            self.reserved.pop(w, None)
+            if b and b['state'] == 'booked':
+                b['state'] = 'expired'
+                b['entry'].update(state='expired', note=r.get('public') or 'not executed in time')
+                self._lw_buy(w, state='expired', note=r.get('public') or 'not executed in time')
         elif ev == 'gas':
             self._gas(r)
         elif ev == 'signed':
@@ -1193,6 +1249,66 @@ class Ledger:
         for r in records:
             if r.get('mode') == mode:
                 self.apply(r)
+
+    # ---- LIVE BOOKINGS
+    def _lw_buy(self, w, **fields):
+        """Update last_window.buy when last_window is the window w."""
+        if self.last_window is not None and self.last_window.get('start') == iso(w):
+            self.last_window['buy'] = {**(self.last_window.get('buy') or {}), **fields}
+
+    def _booking(self, r):
+        """A 'booking' record: the hour's buy, booked for the buy rig to execute (not bought until verified)."""
+        w, amt = int(r['window']), int(r['amount_wei'])
+        at = iso(r['t'])
+        if self.due is not None and w == self.due['start_t']:
+            self.due, self.pending, self.due_hits = None, 0, 0
+        entry = {'at': at, 'window': iso(w), 'eth_in': eth_str(amt), 'labrat_out': None, 'venue': r.get('venue'),
+                 'simulated': False, 'state': 'booked', 'hits_covered': int(r.get('hits_covered', 0)),
+                 'hit_rate': r.get('hit_rate'), 'preview': False}
+        self.bookings[w] = {'state': 'booked', 'amount_wei': amt, 't': r['t'], 'dead_t': int(r['dead_t']),
+                            'hits': int(r.get('hits_covered', 0)), 'hit_rate': r.get('hit_rate'), 'entry': entry,
+                            'tx': None}
+        for k in [k for k in self.bookings if k < w - 2 * 86400 and self.bookings[k]['state'] != 'booked']:
+            del self.bookings[k]
+        self.reserved[w] = amt
+        self.n_booked += 1
+        self.recent.append(entry)
+        self._lw_buy(w, state='booked', note=None, at=at, eth_in=eth_str(amt), simulated=False, preview=False,
+                     venue=r.get('venue'))
+
+    def _executed(self, r):
+        """An 'executed' record: the booked buy, verified on chain. From here on it counts as bought (the caps)."""
+        w, amt, tokens = int(r['window']), int(r['amount_wei']), int(r['tokens_wei'])
+        b = self.bookings.get(w)
+        self.reserved.pop(w, None)
+        self.executed_txs.add(r['tx'])
+        self.spent += amt
+        self._gas(r)
+        self.buys.append((r['t'], amt))
+        while self.buys and r['t'] - self.buys[0][0] >= 86400:
+            self.buys.popleft()
+        self.cap_bought += amt
+        self.win_bought[w] = self.win_bought.get(w, 0) + amt
+        self.n_buys += 1
+        self.bought += amt
+        self.tokens += tokens
+        self.hits_bought += int(r.get('hits_covered', 0))
+        self.failures = 0
+        pons = {'label': EXECUTED_LABEL, 'clicked_by_rat': True, 'simulated': False, 'at': r.get('session_at'),
+                'eth_in': eth_str(amt), 'labrat_out': token_str(tokens), 'proof': r.get('proof'),
+                'replay': r.get('replay'), 'targets_hit': r.get('targets_hit'), 'misses': r.get('misses'),
+                'checks': (f"{int(r['checks_passed'])}/{int(r['checks_total'])}"
+                           if r.get('checks_total') is not None else None)}
+        fields = {'state': 'executed', 'labrat_out': token_str(tokens), 'tx': r['tx'], 'block': r.get('block'),
+                  'executed_at': iso(r['t']), 'pons': pons}
+        if b is not None:
+            b.update(state='executed', tx=r['tx'])
+            b['entry'].update(fields)
+        else:                                      # a booking older than the ones kept in memory: its own entry
+            self.recent.append({'at': iso(r['t']), 'window': iso(w), 'eth_in': eth_str(amt), 'venue': 'pool',
+                                'simulated': False, 'hits_covered': int(r.get('hits_covered', 0)),
+                                'hit_rate': r.get('hit_rate'), 'preview': False, **fields})
+        self._lw_buy(w, **{**fields, 'state': 'bought', 'eth_in': eth_str(amt), 'simulated': False})
 
     def _pons(self, r):
         """A 'pons_session' record: the public note shown on that simulated buy (never a figure the engine uses)."""
@@ -1269,6 +1385,133 @@ def pons_session_record(obj, ledger, now, mode):
         raise PonsRefused('session_at must be after the buy was booked and not in the future')
     return {'buy_at': buy_at, 'amount_wei': amount, 'tokens_wei': tokens, 'session_at': obj['session_at'],
             'proof': obj['proof'], 'replay': obj.get('replay'), **ints, 'simulation': 'ok', 'simulated': True}
+
+
+def _iso_ts(s):
+    return int(datetime.strptime(s, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc).timestamp())
+
+
+def live_report_check(obj, ledger):
+    """LIVE BOOKINGS: the runner's report of an executed buy, validated field by field (no chain read yet).
+    -> {window, booking, tx, amount_wei, session fields...}; 'already' True when this exact tx is already booked for this
+    window (the report is idempotent). PonsRefused otherwise."""
+    if not isinstance(obj, dict):
+        raise PonsRefused('the report is not a JSON object')
+    extra = set(obj) - LIVE_REPORT_KEYS
+    if extra:
+        raise PonsRefused(f'unknown field(s): {", ".join(sorted(extra))[:120]}')
+    for k in ('window', 'eth_in', 'tx'):
+        if k not in obj:
+            raise PonsRefused(f'missing field: {k}')
+    if not isinstance(obj['window'], str) or not WINDOW_ID_RE.match(obj['window']):
+        raise PonsRefused('window must be the booked UTC hour, like 2026-09-25T20:00:00Z')
+    if not isinstance(obj['tx'], str) or not TX_RE.match(obj['tx']):
+        raise PonsRefused('tx must be a transaction hash: 0x and 64 lowercase hex characters')
+    if not isinstance(obj['eth_in'], str) or not DEC_RE.match(obj['eth_in']):
+        raise PonsRefused('eth_in must be a plain decimal string')
+    for k in ('buy_at', 'session_at'):
+        if obj.get(k) is not None and (not isinstance(obj[k], str) or not ISO_RE.match(obj[k])):
+            raise PonsRefused(f'{k} must be a UTC time like 2026-09-25T03:22:58Z')
+    if obj.get('labrat_out') is not None and (not isinstance(obj['labrat_out'], str) or not DEC_RE.match(obj['labrat_out'])):
+        raise PonsRefused('labrat_out must be a plain decimal string')
+    if obj.get('proof') is not None and (not isinstance(obj['proof'], str) or not HEX64_RE.match(obj['proof'])):
+        raise PonsRefused('proof must be the session proof: 64 lowercase hex characters')
+    if obj.get('replay') not in (None, 'MATCH'):
+        raise PonsRefused('replay must be "MATCH" (or left out)')
+    if obj.get('simulation') not in (None, 'ok'):
+        raise PonsRefused('simulation must be "ok" (or left out)')
+    ints = {}
+    for k, hi in (('targets_hit', 50), ('misses', 100_000), ('checks_passed', 100), ('checks_total', 100)):
+        v = obj.get(k)
+        if v is None:
+            continue
+        if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= hi:
+            raise PonsRefused(f'{k} must be an integer 0..{hi}')
+        ints[k] = v
+    w = _iso_ts(obj['window'])
+    b = ledger.bookings.get(w)
+    if b is None:
+        raise PonsRefused('no buy was booked for that window', 404)
+    tx = obj['tx']
+    if b['state'] == 'executed':
+        if b.get('tx') == tx:
+            return {'window': w, 'tx': tx, 'already': True, 'booking': b}
+        raise PonsRefused('that window already has its executed buy', 409)
+    if tx in ledger.executed_txs:
+        raise PonsRefused('that transaction is already counted for another window', 409)
+    if parse_eth(obj['eth_in']) != b['amount_wei']:
+        raise PonsRefused(f"eth_in must be the booked amount ({eth_str(b['amount_wei'])} ETH)")
+    return {'window': w, 'tx': tx, 'already': False, 'booking': b, 'amount_wei': b['amount_wei'],
+            'session_at': obj.get('session_at'), 'buy_at': obj.get('buy_at'), 'proof': obj.get('proof'),
+            'replay': obj.get('replay'), **ints}
+
+
+def verify_execution(rpc, txh, amount_wei, booked_t, wallet=None):
+    """Read-only, on chain: txh is the buyback wallet's buy of exactly amount_wei through the pons router, mined with
+    status 1 after the booking, and LABRAT reached the wallet. -> {tokens_wei, block, block_time, gas...}.
+    PonsRefused 503 while the chain has no receipt (or cannot be read), 422 when it does not verify."""
+    wallet = wallet or BUYBACK_WALLET
+    try:
+        rc, err = rpc.raw('eth_getTransactionReceipt', [txh])
+        tx, err2 = rpc.raw('eth_getTransactionByHash', [txh])
+    except (RpcError, RuntimeError) as e:
+        raise PonsRefused(f'the chain could not be read ({type(e).__name__}); report it again', 503) from None
+    if err is not None or err2 is not None or not rc or not tx:
+        raise PonsRefused('the chain has no receipt for that transaction yet; report it again', 503)
+    lo = lambda v: str(v or '').lower()  # noqa: E731
+    bad = []
+    if lo(rc.get('transactionHash')) != txh or lo(tx.get('hash')) != txh:
+        bad.append('hash')
+    try:
+        status = int(rc.get('status') or '0x0', 16)
+    except ValueError:
+        status = None
+    if status != 1:
+        bad.append('status (not 1: it reverted)')
+    if lo(tx.get('from')) != wallet.lower() or (rc.get('from') is not None and lo(rc.get('from')) != wallet.lower()):
+        bad.append('from (not the buyback wallet)')
+    if lo(tx.get('to')) != ROUTER.lower() or (rc.get('to') is not None and lo(rc.get('to')) != ROUTER.lower()):
+        bad.append('to (not the pons router)')
+    try:
+        value = int(tx.get('value') or '0x0', 16)
+    except ValueError:
+        value = None
+    if value != int(amount_wei):
+        bad.append('value (not the booked amount)')
+    try:
+        amount_in, settle, _mo, _dl = router_amounts(lo(tx.get('input') or tx.get('data')))
+        if not amount_in == settle == int(amount_wei):
+            bad.append('calldata (another amount)')
+    except Exception:
+        bad.append('calldata (not the pinned router buy)')
+    got = 0
+    for lg in rc.get('logs') or []:
+        topics = lg.get('topics') or []
+        if (lo(lg.get('address')) == TOKEN.lower() and len(topics) > 2 and lo(topics[0]) == TRANSFER_TOPIC
+                and lo(topics[2])[-40:] == wallet[2:].lower()):
+            try:
+                got += int(lg.get('data') or '0x0', 16)
+            except ValueError:
+                pass
+    if got <= 0:
+        bad.append('no LABRAT Transfer to the buyback wallet')
+    try:
+        block = int(rc['blockNumber'], 16)
+        blk = rpc.ok('eth_getBlockByNumber', [hex(block), False])
+        block_time = int(blk['timestamp'], 16)
+    except (RpcError, RuntimeError) as e:
+        raise PonsRefused(f'the block could not be read ({type(e).__name__}); report it again', 503) from None
+    except (KeyError, TypeError, ValueError):
+        block, block_time = None, None
+        bad.append('block')
+    if block_time is not None and block_time < int(booked_t) - 60:
+        bad.append('time (mined before the buy was booked)')
+    if bad:
+        raise PonsRefused(f'the transaction does not verify as this booked buy: {"; ".join(bad)}', 422)
+    gas_used = int(rc.get('gasUsed') or '0x0', 16)
+    price = int(rc.get('effectiveGasPrice') or '0x0', 16)
+    return {'tokens_wei': got, 'block': block, 'block_time': block_time, 'gas_used': gas_used, 'gas_price_wei': price,
+            'gas_cost_wei': gas_used * price}
 
 
 # ---------------------------------------------------------------------------------------------------- journal
@@ -1364,6 +1607,49 @@ class DryExecutor:
                      'buyer': self.sim.buyer, 'buyer_balance_wei': real, 'buyer_funded': real >= need,
                      'eth_calls': s['calls'],
                      'state_override': 'buyback wallet balance = max(its ETH, the buy + its worst-case gas)'})
+        return {'ok': True}
+
+
+class BookingExecutor:
+    """LIVE BOOKINGS: books the hour's buy for the buy rig instead of buying it. Never signs, never sends (its RPC is a
+    ReadRpc). The route is simulated first exactly as DRY does (the buyback wallet, its balance raised by an override),
+    so a buy that could not go through, or whose gas is too large a share of it, is never booked."""
+    mode = 'LIVE'
+    fee_funded = False
+
+    def __init__(self, sim, cfg):
+        if isinstance(sim.rpc, LiveRpc) or sim.buyer != BUYBACK_WALLET:
+            raise LiveRefused('bookings simulate from the buyback wallet over a read-only RPC')
+        self.sim, self.cfg = sim, cfg
+
+    def claim(self, amount, ctx, book):
+        raise LiveRefused('bookings never claim creator fees')
+
+    def buy(self, venue, amount, ctx, book):
+        if ctx.get('preview'):
+            raise LiveRefused('a preview (budget not set) is never booked')
+        if venue != 'pool':
+            return {'ok': False, 'skip': True, 'final': True, 'public': 'the rat buys in the pool only',
+                    'error': f'the venue is the {venue}: the buy rig buys through the pons pool only'}
+        gp = ctx['gas_price']
+        real = self.sim.balance()
+        need = int(amount) + int(GAS_GUESS[venue] * GAS_MULT) * gp * FEE_MULT
+        s = self.sim.buy(venue, amount, ctx['timestamp'], {self.sim.buyer: {'balance': hex(max(real, need))}})
+        if not s['ok']:
+            return {'ok': False, 'error': s['error']}
+        cost = s['gas'] * gp
+        share = gas_share_bps(cost, amount)
+        if share > self.cfg.max_gas_share_bps:
+            return {'ok': False, 'skip': True, 'final': True, 'public': 'gas too large a share of the buy',
+                    'error': f'gas would be {share / 100:.1f}% of the buy '
+                    f'(max {self.cfg.max_gas_share_bps / 100:.1f}%): no buy for this hour'}
+        w = int(ctx['window'])
+        book('booking', {'venue': venue, 'amount_wei': int(amount), **due_meta(ctx), 'state': 'booked',
+                         'simulated': False, 'tokens_sim_wei': s['tokens_out'], 'gas_sim': s['gas'],
+                         'gas_price_wei': gp, 'gas_share_bps': share, 'block': ctx['block'],
+                         'buyer': self.sim.buyer, 'buyer_balance_wei': real, 'buyer_funded': real >= need,
+                         'signable_until': w + SIGN_UNTIL_S, 'dead_t': w + BOOKING_DEAD_S,
+                         'executor': 'the buy rig (live/buyrig_runner.py): the rat clicks it through on pons'})
         return {'ok': True}
 
 
@@ -1576,9 +1862,15 @@ class LiveExecutor:
 
 # ---------------------------------------------------------------------------------------------------- the engine
 class Engine:
-    def __init__(self, cfg, mode, journal, rpc, executor, sim, accept_test=False, clock=time.time, relay_url=RELAY_URL):
+    def __init__(self, cfg, mode, journal, rpc, executor, sim, accept_test=False, clock=time.time, relay_url=RELAY_URL,
+                 live_bookings=False):
         self.cfg, self.mode, self.journal, self.rpc, self.executor, self.sim = cfg, mode, journal, rpc, executor, sim
         self.clock = clock
+        # LIVE BOOKINGS: mode LIVE, a BookingExecutor, a read-only RPC (it verifies reported buys; it never sends)
+        self.live_bookings = bool(live_bookings)
+        if self.live_bookings and (mode != 'LIVE' or not isinstance(executor, BookingExecutor)
+                                   or isinstance(rpc, LiveRpc)):
+            raise LiveRefused('live bookings need mode LIVE, the BookingExecutor and a read-only RPC')
         self.lock = threading.RLock()
         self.tick_lock = threading.Lock()
         self.ledger = Ledger(cfg)
@@ -1611,7 +1903,7 @@ class Engine:
         cfg_rec = {f.name: getattr(cfg, f.name) for f in fields(cfg)}
         self.journal.append({'mode': mode, 'ev': 'start', 'relay': relay_url, 'accept_test_streams': bool(accept_test),
                              'config': cfg_rec, 'rule': BUDGET_RULE, 'preview': cfg.preview,
-                             'buyer': getattr(sim, 'buyer', WALLET),
+                             'buyer': getattr(sim, 'buyer', WALLET), 'live_bookings': self.live_bookings,
                              'fee_funded': bool(getattr(executor, 'fee_funded', True)),
                              'resumed': {'hits': self.ledger.hits, 'pending_wei': self.ledger.pending,
                                          'buys': self.ledger.n_buys, 'claims': self.ledger.n_claims,
@@ -1679,11 +1971,18 @@ class Engine:
                 f"the hour {iso(info['window']) if info.get('window') is not None else '?'}: "
                 f"{eth_str(info['amount_wei'])} ETH -> {token_str(info['tokens_wei'])} LABRAT on the {info['venue']} "
                 f"(gas {info['gas']}, {info['gas_share_bps'] / 100:.1f}% of the buy)")
+        elif kind == 'booking':
+            log(f"LIVE booking for the hour {iso(info['window'])}: {eth_str(info['amount_wei'])} ETH, for the buy rig to "
+                f"execute until {iso(info['signable_until'])} (simulated route: {token_str(info['tokens_sim_wei'])} "
+                f"LABRAT, gas {info['gas_sim']}; the wallet {'covers' if info['buyer_funded'] else 'does NOT cover'} it)")
 
     def add_pons_session(self, obj):
         """The runner's report of the rat's pons session for one simulated buy (see PONS_LABEL). Validated by
         pons_session_record, journalled, and shown on that buy in the public status. -> the journal record; raises
-        PonsRefused. It changes no cap, no pending amount and no figure the engine computed."""
+        PonsRefused. It changes no cap, no pending amount and no figure the engine computed.
+        LIVE BOOKINGS: the report of an EXECUTED buy instead (add_live_execution)."""
+        if self.live_bookings:
+            return self.add_live_execution(obj)
         with self.lock:
             rec = pons_session_record(obj, self.ledger, self.clock(), self.mode)
             r = self.journal.append({'mode': self.mode, 'ev': 'pons_session', **rec})
@@ -1693,16 +1992,76 @@ class Engine:
             f"{token_str(rec['tokens_wei'])} LABRAT (simulated), replay {rec.get('replay') or 'not reported'}")
         return r
 
+    def add_live_execution(self, obj):
+        """LIVE BOOKINGS: the runner's report of an executed buy. Validated (live_report_check), VERIFIED ON CHAIN
+        (verify_execution, read-only, outside the engine lock), then journalled as 'executed': only now does it count
+        as bought and against the caps. -> the journal record ({'already': True, ...} for a repeated report of the same
+        transaction). PonsRefused otherwise (503: not on chain yet, report again)."""
+        with self.lock:
+            pre = live_report_check(obj, self.ledger)
+        if pre['already']:
+            return {'already': True, 'window': pre['window'], 'tx': pre['tx']}
+        ver = verify_execution(self.rpc, pre['tx'], pre['amount_wei'], pre['booking']['t'])
+        with self.lock:
+            pre = live_report_check(obj, self.ledger)          # again: another report may have won meanwhile
+            if pre['already']:
+                return {'already': True, 'window': pre['window'], 'tx': pre['tx']}
+            b = pre['booking']
+            rec = {'mode': self.mode, 'ev': 'executed', 'window': pre['window'], 'amount_wei': pre['amount_wei'],
+                   'tx': pre['tx'], **ver, 'hits_covered': b['hits'], 'hit_rate': b['hit_rate'],
+                   'venue': 'pool', 'simulated': False,
+                   **{k: pre.get(k) for k in ('session_at', 'buy_at', 'proof', 'replay', 'targets_hit', 'misses',
+                                              'checks_passed', 'checks_total')},
+                   'verified': 'receipt status 1; from the buyback wallet; to the pons router; value and calldata = '
+                               'the booked amount; LABRAT Transfer to the wallet; mined after the booking'}
+            r = self.journal.append(rec)
+            self.ledger.apply(r)
+            self.changed = True
+        log(f"LIVE: executed buy for the hour {iso(pre['window'])} verified on chain: {eth_str(pre['amount_wei'])} ETH "
+            f"-> {token_str(ver['tokens_wei'])} LABRAT, block {ver['block']}, {pre['tx']}")
+        return r
+
+    def _expire_bookings(self, now):
+        """LIVE BOOKINGS: a booking that can no longer execute (the rig signs at most an hour after its window ended,
+        and pons's router deadline reaches 21 minutes past that) is released from the caps."""
+        with self.lock:
+            for w, b in sorted(self.ledger.bookings.items()):
+                if b['state'] == 'booked' and now >= b['dead_t']:
+                    r = self.journal.append({'mode': self.mode, 'ev': 'booking_expired', 'window': w,
+                                             'amount_wei': b['amount_wei'], 'why': 'the buy rig did not execute it in '
+                                             'time', 'public': 'not executed in time'})
+                    self.ledger.apply(r)
+                    self.changed = True
+                    log(f'LIVE: the booking for the hour {iso(w)} expired unexecuted (released from the caps)')
+
+    def clear_stop(self, sid):
+        """LIVE BOOKINGS: an operator checked why the engine stopped (BUYBACK_CLEAR_STOP=<its id>)."""
+        rec = self.ledger.stop_rec
+        if not sid or not rec or rec.get('id') != sid:
+            return False
+        self.journal.append({'mode': self.mode, 'ev': 'stop_cleared', 'id': sid, 'cleared': rec.get('why'),
+                             'why': f'operator: {CLEAR_STOP_ENV}'})
+        self.ledger.stop_rec = None
+        self.ledger.failures = 0
+        self.failures = 0
+        self.stopped = self.stopped_public = None
+        self.changed = True
+        log(f'the stop {sid} was cleared by the operator')
+        return True
+
     def _stop(self, why, public):
         with self.lock:
             self.stopped, self.stopped_public = why, public
             self.skip_public = None
             self.changed = True
+        sid = hashlib.sha256(f'{self.clock()}|{why}'.encode()).hexdigest()[:8]
         try:        # journalled so a LIVE restart stays stopped until --clear-stop; a failing journal still stops
-            self.journal.append({'mode': self.mode, 'ev': 'stop', 'why': why, 'public': public})
+            r = self.journal.append({'mode': self.mode, 'ev': 'stop', 'id': sid, 'why': why, 'public': public})
+            self.ledger.stop_rec = r
         except OSError as e:
             log(f'the stop could not be journalled ({type(e).__name__})')
-        log(f'STOPPED: {why}')
+        log(f'STOPPED: {why}' + (f' (stop id {sid}; after checking, {CLEAR_STOP_ENV}={sid} clears it)'
+                                 if self.live_bookings else ''))
 
     def _skip(self, why, retry_s, public, ev='buy_skip', **extra):
         """Wait retry_s, then try the hour's buy again (until the next hour closes). `public`: the short fixed
@@ -1801,6 +2160,8 @@ class Engine:
         try:
             now = self.clock()
             try:
+                if self.live_bookings:
+                    self._expire_bookings(now)     # first: an hour closing now is sized without a dead reservation
                 self._roll(now)
             except OSError as e:
                 return self._stop(f'the journal could not be written ({type(e).__name__})', 'the buyback journal failed')
@@ -1910,7 +2271,8 @@ class Engine:
         self.failures = 0
         self.skip_public = None
         self.retry_at = 0.0
-        self.note = 'bought' if self.mode == 'LIVE' else ('simulated a preview buy' if preview else 'simulated a buy')
+        self.note = ('booked for the buy rig' if self.live_bookings else 'bought' if self.mode == 'LIVE'
+                     else ('simulated a preview buy' if preview else 'simulated a buy'))
 
     # ---- status
     def next_buy(self, now):
@@ -1978,7 +2340,8 @@ class Engine:
             pending_hits = w['hits'] + (L.due_hits if L.due is not None else 0)
             return {
                 'mode': self.mode,
-                'label': LIVE_LABEL if self.mode == 'LIVE' else DRY_LABEL,
+                'label': (LIVE_BOOKINGS_LABEL if self.live_bookings else LIVE_LABEL if self.mode == 'LIVE'
+                          else DRY_LABEL),
                 'rule': self.rule_text(),
                 'per_hit_eth': None,              # no per-hit amount since the hourly rule (kept for old readers)
                 'tasks': list(c.tasks),
@@ -1996,8 +2359,11 @@ class Engine:
                 'source': {'public_relay': public_relay, 'accept_test_streams': self.accept_test,
                            'test': (not public_relay) or self.accept_test or test_stream},
                 'buys': {'count': L.n_buys, 'eth_in': eth_str(L.bought), 'labrat_out': token_str(L.tokens),
-                         'simulated': self.mode != 'LIVE', 'recent': [dict(e) for e in L.recent][::-1],
-                         'pons_sessions': L.n_pons, 'previews': L.n_previews},
+                         'simulated': self.mode != 'LIVE', 'recent': [copy.deepcopy(e) for e in L.recent][::-1],
+                         'pons_sessions': L.n_pons, 'previews': L.n_previews,
+                         **({'booked': sum(1 for b in L.bookings.values() if b['state'] == 'booked'),
+                             'executed': L.n_buys, 'explorer': 'https://robinhoodchain.blockscout.com/tx/'}
+                            if self.live_bookings else {})},
                 'next_buy_in_s': due,
                 'next_buy_note': due_why,
                 'next_buy_at': self.next_buy_at(now, due),
@@ -2104,7 +2470,8 @@ def serve_status(engine, host, port, rig_token=None):
     /pons_session for the buy rig's runner (Authorization: Bearer <token>, a JSON body of at most PONS_BODY_MAX
     bytes, validated by pons_session_record). Browsers cannot call it: it needs an Authorization header, and
     the CORS preflight that would need is not answered."""
-    rig_token = rig_token if (rig_token and len(rig_token) >= RIG_TOKEN_MIN and engine.mode == 'DRY') else None
+    open_for_rig = engine.mode == 'DRY' or getattr(engine, 'live_bookings', False)   # never the paused fee-funded LIVE
+    rig_token = rig_token if (rig_token and len(rig_token) >= RIG_TOKEN_MIN and open_for_rig) else None
 
     class H(BaseHTTPRequestHandler):
         def _send(self, code, obj):
@@ -2150,9 +2517,15 @@ def serve_status(engine, host, port, rig_token=None):
             try:
                 rec = engine.add_pons_session(obj)
             except PonsRefused as e:
-                return self._send(e.status, {'error': str(e)[:200]})
+                return self._send(e.status, {'error': str(e)[:300]})
             except OSError as e:
                 return self._send(503, {'error': f'the journal could not be written ({type(e).__name__})'})
+            except Exception as e:                  # a bug: never a traceback to the client; the runner retries
+                log(f'POST /pons_session failed ({type(e).__name__})')
+                return self._send(500, {'error': f'the report could not be handled ({type(e).__name__})'})
+            if getattr(engine, 'live_bookings', False):
+                return self._send(200, {'ok': True, 'window': iso(int(rec['window'])), 'tx': rec['tx'],
+                                        'already': bool(rec.get('already')), 'label': EXECUTED_LABEL})
             return self._send(200, {'ok': True, 'buy_at': rec['buy_at'], 'label': PONS_LABEL})
 
         def log_message(self, *a):
@@ -2346,6 +2719,9 @@ def parse_args(argv=None):
     ap = argparse.ArgumentParser(description='$LABRAT rat buybacks: one buy an hour, sized by the hit rate; DRY by '
                                              'default (simulated, never sent).')
     ap.add_argument('--live', action='store_true', help='LIVE (refused: paused; see the docstring)')
+    ap.add_argument('--live-bookings', action='store_true',
+                    help=f'LIVE BOOKINGS: book each hour\'s buy as a real buy for the buy rig; only together with the '
+                         f'process environment\'s {LIVE_BOOKINGS_ENV}=1 (see the docstring)')
     ap.add_argument('--confirm', help=f'LIVE only: must be {SYMBOL}')
     ap.add_argument('--check', action='store_true', help='one read-only check: the pins and a simulated buy')
     ap.add_argument('--relay', default=RELAY_URL)
@@ -2409,6 +2785,33 @@ def one_check(cfg):
     return out
 
 
+def bookings_gate(a, cfg, environ=None):
+    """-> True when LIVE BOOKINGS is switched on (the --live-bookings flag AND BUYBACK_LIVE_BOOKINGS=1), False when it
+    is off (DRY, exactly as before). SystemExit when it is switched on with a configuration it refuses."""
+    env = os.environ if environ is None else environ
+    flag, on = bool(a.live_bookings), env.get(LIVE_BOOKINGS_ENV) == '1'
+    if not (flag and on):
+        if flag or on:
+            log(f'live bookings: only half switched on (--live-bookings {flag}, {LIVE_BOOKINGS_ENV}=1 {on}): DRY')
+        return False
+
+    def no(why):
+        raise SystemExit(f'live bookings refused (nothing booked): {why}')
+    if a.live or a.confirm or a.first_nonce is not None or a.clear_stop:
+        no('--live / --confirm / --first-nonce / --clear-stop belong to the paused fee-funded LIVE path')
+    if cfg.hourly_budget_wei is None:
+        no('--hourly-budget-eth is not set: a preview is never booked as a real buy')
+    if cfg.window_s != HOUR_S:
+        no('real buys are booked once per UTC hour (no --window-s)')
+    if a.accept_test_streams:
+        no('--accept-test-streams is for DRY tests only: a test stream can never trigger a real buy')
+    if a.relay != RELAY_URL or a.origin != ORIGIN:
+        no(f'live bookings count only the public relay {RELAY_URL} as {ORIGIN}')
+    if cfg.venue == 'curve':
+        no('the buy rig buys through the pons pool only (no --venue curve)')
+    return True
+
+
 def main(argv=None):
     a = parse_args(argv)
     try:
@@ -2418,7 +2821,8 @@ def main(argv=None):
     if a.check:
         print(json.dumps(one_check(cfg), indent=2))
         return 0
-    live = bool(a.live or a.confirm or a.first_nonce is not None or a.clear_stop)
+    bookings = bookings_gate(a, cfg)
+    live = not bookings and bool(a.live or a.confirm or a.first_nonce is not None or a.clear_stop)
     lock = None
     if live:
         jdir = os.path.abspath(LIVE_JOURNAL_DIR)
@@ -2426,22 +2830,32 @@ def main(argv=None):
         mode = 'LIVE'
     else:
         jdir = os.path.abspath(a.journal_dir or DEFAULT_JOURNAL_DIR)
-        rpc, acct, mode = ReadRpc(), None, 'DRY'
+        rpc, acct, mode = ReadRpc(), None, 'LIVE' if bookings else 'DRY'
     try:
-        journal = Journal(live_journal_path(jdir) if live else os.path.join(jdir, 'journal.jsonl'))
+        journal = Journal(live_journal_path(jdir) if live else
+                          os.path.join(jdir, BOOKINGS_JOURNAL if bookings else 'journal.jsonl'))
         sim = Sim(rpc, cfg, buyer=WALLET if live else BUYBACK_WALLET)
         if live:
             executor = LiveExecutor(rpc, acct, journal, Ledger(cfg), sim, cfg)
+        elif bookings:
+            executor = BookingExecutor(sim, cfg)
         else:
             executor = DryExecutor(sim, cfg)
         acct = None
         try:
             engine = Engine(cfg, mode, journal, rpc, executor, sim, accept_test=a.accept_test_streams,
-                            relay_url=a.relay)
+                            relay_url=a.relay, live_bookings=bookings)
         except LiveRefused as e:
             raise SystemExit(f'LIVE refused, nothing was signed or sent: {e}') from None
-        log(f'{mode}: {"LIVE: real claims and buys from the launch wallet" if live else DRY_LABEL}; journal '
-            f'{journal.path}; {engine.ledger.hits} hits and {engine.ledger.n_buys} buys so far')
+        if bookings:
+            sid = os.environ.get(CLEAR_STOP_ENV, '').strip()
+            if sid:
+                engine.clear_stop(sid)
+            if engine.stopped:
+                log(f"live bookings are STOPPED: {engine.stopped} (stop id {(engine.ledger.stop_rec or {}).get('id')}; "
+                    f'after checking, {CLEAR_STOP_ENV}=<that id> clears it)')
+        log(f'{mode}: {"LIVE: real claims and buys from the launch wallet" if live else LIVE_BOOKINGS_LABEL if bookings else DRY_LABEL}; '
+            f'journal {journal.path}; {engine.ledger.hits} hits and {engine.ledger.n_buys} buys so far')
         if cfg.preview:
             log(f'hourly budget not set: each hour runs a simulated PREVIEW buy of {eth_str(cfg.preview_budget_wei)} '
                 f'ETH x the hit rate')
@@ -2461,11 +2875,15 @@ def main(argv=None):
             log(f'chain check failed at startup ({e}); it runs again before every buy')
         stop = threading.Event()
         listener = RelayListener(a.relay, a.origin, engine, stop).start()
-        # the buy rig's reports (POST /pons_session): DRY only, and only with a token in the PROCESS environment
+        # the buy rig's reports (POST /pons_session): DRY or live bookings (never the paused LIVE), and only with a
+        # token in the PROCESS environment
         rig_token = os.environ.get(RIG_TOKEN_ENV, '').strip() if not live else ''
         if rig_token and len(rig_token) < RIG_TOKEN_MIN:
             log(f'{RIG_TOKEN_ENV} is shorter than {RIG_TOKEN_MIN} characters: POST /pons_session stays off')
             rig_token = ''
+        if bookings and not (rig_token and a.status_port):
+            log(f'WARNING: live bookings without {RIG_TOKEN_ENV} and --status-port: the buy rig cannot report its '
+                'executed buys, so none is verified or counted here (the rig\'s own journal still keeps them)')
         srv = serve_status(engine, a.status_host, a.status_port, rig_token or None) if a.status_port else None
         if srv:
             log(f'status on http://{a.status_host}:{a.status_port}/status'
@@ -2492,7 +2910,7 @@ def main(argv=None):
             engine.journal.append({'mode': mode, 'ev': 'end', 'hits': L.hits, 'pending_wei': L.pending,
                                    'buys': L.n_buys, 'bought_wei': L.bought, 'tokens_wei': L.tokens,
                                    'claims': L.n_claims, 'stats': dict(engine.counter.stats)})
-            log(f'end: {L.hits} hits counted, {L.n_buys} {"" if live else "simulated "}buys, '
+            log(f'end: {L.hits} hits counted, {L.n_buys} {"" if live else "verified " if bookings else "simulated "}buys, '
                 f'{eth_str(L.bought)} ETH -> {token_str(L.tokens)} LABRAT')
     finally:
         if lock and os.path.exists(lock):

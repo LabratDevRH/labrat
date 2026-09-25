@@ -1,9 +1,24 @@
 """RATBRAIN buy rig: the rat's trained brain clicks through pons's own BUY flow for $LABRAT on the REAL coin page,
-once per buyback batch, and the rig refuses to sign. DRY ONLY: there is no LIVE path in this file.
+once per buyback batch. DRY (the default, and everything below until "LIVE"): the rig refuses to sign.
 
     python live/buyrig.py --amount 0.0001 [--seed 2026] [--relay wss://<relay>/publish] [--batch-at <iso>] [--hits N]
                           [--policy runs/final/steer.pt] [--press-policy runs/final/policy.pt] [--headful]
-                          [--result-json <path>] [--dev-oracle]
+                          [--result-json <path>] [--dev-oracle] [--live --window <hour>]
+
+LIVE (switched OFF; the signing code is in live/buyrig_live.py, none of it is in this file)
+  Only with --live and --window <the engine's booked hour> (the runner passes them for a booked real buy) AND the process
+  environment's BUYRIG_LIVE=1, BUYRIG_CONFIRM=LABRAT, BUYBACK_RH_KEY whose address is the pinned buyback wallet, and
+  eth_chainId 4663. If any of them is missing the session runs exactly as below (DRY). The key is removed from the
+  environment before Chromium starts; the page gets the wallet's address only (buyrig_live.AddressOnly), with its REAL
+  balance (no 1 ETH override, so pons itself sees whether it is enough). Before pons opens, buyrig_live.open_buyer
+  resolves unfinished windows and refuses a stopped LIVE, a window already reserved or signed, a window more than an
+  hour past its end, the rig's caps and a wallet nonce the journal does not account for. After the rat's Confirm, pons's
+  eth_sendTransaction must pass the 13 checks (the simulation now from the real wallet, no override) plus from = the
+  buyback wallet, value = the booked amount to the wei and min out within 2% of a fresh quote; then the signer
+  re-simulates, checks the balance (the buy + gas x maxFee x 1.2), journals 'reserved', signs ONE EIP-1559 transaction,
+  journals it with its raw bytes, broadcasts it, and pons gets the hash. The receipt's LABRAT Transfer to the wallet is
+  the result (tx, block, labrat_out, signed, sent in BUYRIG_RESULT). Any check failure stops LIVE; so do two failed buys
+  in a row (buyrig_live.py). The stream says "Live" instead of "Simulated" only for such a session.
 
 What happens in one session (research: live/BUYRIG_RESEARCH.md)
   * The rig opens https://www.ponsfamily.com/launchpad/<LABRAT> (1280x900, dark) in Playwright Chromium with
@@ -86,6 +101,7 @@ from concurrent.futures import ThreadPoolExecutor  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 
 import buyback  # noqa: E402
+import buyrig_live  # noqa: E402  (LIVE only: the gates, the journal and the signer; switched off by default)
 import ponsbot  # noqa: E402
 import session as brain_session  # noqa: E402
 from brainrig import StageFailed, RunEnded, Target  # noqa: E402
@@ -96,6 +112,7 @@ SYMBOL = buyback.SYMBOL                                   # LABRAT
 COIN_URL = f'https://www.ponsfamily.com/launchpad/{buyback.TOKEN}'
 VIEW_W, VIEW_H = brainrig.VIEW_W, brainrig.VIEW_H         # 1280 x 900
 REFUSAL_MSG = 'Simulated buy: not signed'                 # pons repeats it in its (masked) toast details
+REFUSAL_LIVE = 'Buy refused by the rig'                   # LIVE: a refused buy (checks, balance, a stop)
 EXECUTE = buyback.SEL['execute']                          # 0x3593564c
 T6 = f'({buyback.POOL_KEY_T},bool,uint128,uint128,uint256,bytes)'
 EXTRA_TX_FIELDS = ('gas', 'gasPrice', 'maxFeePerGas', 'maxPriorityFeePerGas', 'nonce', 'type', 'accessList',
@@ -104,7 +121,7 @@ MIN_OUT_FLOOR_PCT = 97          # pons sets min out = quote - 1 %; 2 % more for 
 DEADLINE_MIN_S = 30             # pons sets deadline = now + 1200 s
 DEADLINE_MAX_S = 1260
 AMOUNT_MIN_WEI = 10 ** 13       # 0.00001 ETH, one hit
-AMOUNT_MAX_WEI = buyback.HARD['max_buy_wei']              # 0.01 ETH, the engine's hard per-buy ceiling
+AMOUNT_MAX_WEI = buyback.HARD['max_buy_wei']              # 0.1 ETH, the engine's hard per-buy ceiling
 QUOTE_WAIT_S = 20.0
 REVIEW_WAIT_S = 10.0
 TOAST_WAIT_S = 10.0
@@ -113,6 +130,7 @@ RELAY_MAX_FRAME = 120_000       # under 131,072 bytes (the relay's older --ws-ma
 FRAME_PREFIX = b'PJPG'
 CHECKPOINT_QUALITY = 82
 LABEL = 'Simulated'
+LABEL_LIVE = 'Live'             # only a session that passed every LIVE gate says this (and signs)
 TOKEN_ENV = 'LABRAT_PUBLISH_TOKEN'
 SOURCE = 'buyrig'               # pons_hello.source: the relay's pons channel takes only this
 # The message types on the relay's pons channel (relay/relay.py PONS_TYPES). The checked transaction and the final
@@ -128,6 +146,14 @@ HONESTY = ("The rat's brain is two trained neural networks driving a simulated r
            "target on pons's buy page, types the batch amount after the rat clicks the amount field, and ignores "
            "clicks outside the lit target. pons builds the buy transaction; the rig checks it, simulates it and "
            'refuses to sign. Nothing is signed or sent.')
+PUBLIC_NOTE_LIVE = ("Live buy. The rat's trained neural networks steer the cursor and click; the rig lights each step "
+                    'and types the amount after the rat clicks the field. pons builds the buy transaction; the rig '
+                    'checks it, simulates it on the live chain and signs it from the buyback wallet. Wallet details on '
+                    'the pons page are hidden.')
+HONESTY_LIVE = HONESTY.replace("the rig checks it, simulates it and refuses to sign. Nothing is signed or sent.",
+                               'the rig checks it, simulates it from the buyback wallet and, only if every check '
+                               'passes, signs it once and sends it. The rat does not understand money: the code sets '
+                               'every rule.')
 
 # (stage key, label, kind, arg). The terms targets are skipped when pons shows no terms gate.
 BUY_TARGETS = (
@@ -144,8 +170,8 @@ PUBLIC_NAME = {'b01_terms_tou': 'Terms of Use', 'b02_terms_privacy': 'Privacy Po
                'b06_confirm': 'Confirm buy'}
 # pons_step "phase" keywords (site.js PHASE): light, aim, press, miss, type, quote, review, check, done
 PHASES = ('light', 'aim', 'press', 'miss', 'type', 'quote', 'review', 'check', 'done')
-# pons_result "reason" keywords when ok is false (site.js REASON)
-REASONS = ('checks_failed', 'simulation_failed', 'quote_failed', 'timeout', 'aborted')
+# pons_result "reason" keywords when ok is false (site.js REASON); the last two only in LIVE
+REASONS = ('checks_failed', 'simulation_failed', 'quote_failed', 'timeout', 'aborted', 'balance_low', 'not_settled')
 AIM_AFTER_S = 0.8               # a lit target still waiting for the rat after this long: phase "aim"
 MISS_PUBLISH_GAP_S = 1.0        # at most one "miss" step a second on the stream (every miss is recorded locally)
 PUBLIC_CHECKS = {       # check key -> what the public stream calls it (no addresses)
@@ -163,8 +189,9 @@ PUBLIC_CHECKS = {       # check key -> what the public stream calls it (no addre
     'review': "matches pons's review",
     'simulation': 'simulated on the live chain',
 }
+PUBLIC_CHECKS_ALL = {**PUBLIC_CHECKS, **buyrig_live.LIVE_CHECKS}      # LIVE adds three
 HEX_RE = re.compile(r'0x[0-9a-f]{3,}', re.I)          # as relay.py's ADDRESS_LIKE (0X counts too)
-ADDR_RE = re.compile(r'0x[0-9a-fA-F]{40}')
+ADDR_RE = re.compile(r'0x[0-9a-fA-F]{40}(?![0-9a-fA-F])')   # an address, not a 64-hex transaction hash
 BANNED_RE = re.compile(r'\b(dry|test|tests|testing|rehearsal|throwaway|mock|dev)\b', re.I)
 
 
@@ -185,8 +212,8 @@ def sha(b):
 
 
 def parse_amount(s):
-    """The batch amount as typed into pons -> (canonical string, wei). ValueError unless 0.00001 <= amount <= 0.01
-    ETH with at most 8 decimals (the engine's batches are multiples of 0.00001)."""
+    """The batch amount as typed into pons -> (canonical string, wei). ValueError unless 0.00001 <= amount <= 0.1
+    ETH (the engine's hard per-buy ceiling) with at most 8 decimals (the engine's buys are multiples of 1e-8 ETH)."""
     try:
         d = Decimal(str(s).strip())
     except InvalidOperation:
@@ -275,20 +302,20 @@ def review_ok(review, amount_wei):
             and str(review.get('slippage') or '').strip() == '1%')
 
 
-def chain_facts(rpc, f, data_hex, wallet, clock=time.time):
+def chain_facts(rpc, f, data_hex, wallet, clock=time.time, override=True):
     """Read-only, right at capture (rpc: a buyback.ReadRpc; it refuses every method that is not a read):
     the exact transaction as eth_call with a 1 ETH state override for the page wallet (only when it goes to the pinned
     router), a fresh quoter quote for amountIn, the same buy with min out = the full quote (tokens out >= the quote),
-    eth_estimateGas, the latest block."""
+    eth_estimateGas, the latest block. override=False (LIVE): no state override, the wallet's real balance."""
     out = {'now': clock(), 'quote': None, 'sim': {'ok': False, 'error': 'not simulated'}, 'sim_floor': None,
-           'gas': None, 'block': None}
+           'gas': None, 'block': None, 'override': bool(override)}
     to = str(f.get('to') or '')
     value = int(f.get('value_wei') or 0)
-    ovr = {wallet: {'balance': hex(ponsbot.DRY_BALANCE_WEI)}}
+    tail = ['latest', {wallet: {'balance': hex(ponsbot.DRY_BALANCE_WEI)}}] if override else ['latest']
     try:
         if data_hex and to.lower() == buyback.ROUTER.lower():
             call = {'from': wallet, 'to': buyback.ROUTER, 'data': data_hex, 'value': hex(value)}
-            _res, err = rpc.raw('eth_call', [call, 'latest', ovr])
+            _res, err = rpc.raw('eth_call', [call, *tail])
             out['sim'] = {'ok': err is None, 'at': clock(), **({'error': buyback.short_err(err),
                                                                'revert': buyback.revert_name(err)} if err else {})}
         if f.get('shape_ok'):
@@ -298,11 +325,11 @@ def chain_facts(rpc, f, data_hex, wallet, clock=time.time):
             if out['quote'] and data_hex and to.lower() == buyback.ROUTER.lower():
                 full = buyback.cd_router_buy(f['amount_in'], out['quote'], f['deadline'])
                 _r2, e2 = rpc.raw('eth_call', [{'from': wallet, 'to': buyback.ROUTER, 'data': full,
-                                                'value': hex(value)}, 'latest', ovr])
+                                                'value': hex(value)}, *tail])
                 out['sim_floor'] = {'ok': e2 is None, **({'error': buyback.short_err(e2)} if e2 else {})}
         if out['sim'].get('ok'):
             g, ge = rpc.raw('eth_estimateGas', [{'from': wallet, 'to': buyback.ROUTER, 'data': data_hex,
-                                                 'value': hex(value)}, 'latest', ovr])
+                                                 'value': hex(value)}, *tail])
             out['gas'] = int(g, 16) if g and ge is None else None
         blk = rpc.ok('eth_getBlockByNumber', ['latest', False])
         out['block'] = {'number': int(blk['number'], 16), 'timestamp': int(blk['timestamp'], 16)}
@@ -356,19 +383,23 @@ def buy_checks(f, expect, facts):
         'review': (review_ok(expect.get('review'), expect['amount_wei']),
                    "pons's review: You send <amount> ETH, Market Uniswap v4 pool, Max slippage 1%"),
         'simulation': (bool((facts.get('sim') or {}).get('ok')),
-                       'eth_call of the exact transaction succeeds (1 ETH balance override), at capture'),
+                       'eth_call of the exact transaction succeeds ('
+                       + ('1 ETH balance override' if facts.get('override', True) else "the wallet's real balance")
+                       + '), at capture'),
     }
     return {k: {'ok': bool(ok), 'expected': str(exp)} for k, (ok, exp) in want.items()}
 
 
-def inspect_buy(tx, wallet, amount_wei, review, rpc, clock=time.time):
-    """Decode + read-only chain facts + checks of pons's eth_sendTransaction. Never signs, never sends."""
+def inspect_buy(tx, wallet, amount_wei, review, rpc, clock=time.time, live=False):
+    """Decode + read-only chain facts + checks of pons's eth_sendTransaction. Never signs, never sends. live=True: the
+    simulation uses the wallet's real balance (no override) and buyrig_live.live_checks are added."""
     f, data_hex = decode_buy(tx)
-    facts = chain_facts(rpc, f, data_hex, wallet, clock) if data_hex else {'now': clock(), 'quote': None,
-                                                                            'sim': {'ok': False,
-                                                                                    'error': 'not decoded'}}
+    facts = (chain_facts(rpc, f, data_hex, wallet, clock, override=not live) if data_hex else
+             {'now': clock(), 'quote': None, 'sim': {'ok': False, 'error': 'not decoded'}, 'override': not live})
     checks = buy_checks(f, {'amount_wei': amount_wei, 'wallet': wallet, 'review': review, 'data_hex': data_hex},
                         facts)
+    if live:
+        checks.update(buyrig_live.live_checks(f, facts, amount_wei))
     failed = [k for k, v in checks.items() if not v['ok']]
     return {'fields': f, 'data_hex': data_hex, 'facts': facts, 'checks': checks, 'failed': failed, 'ok': not failed}
 
@@ -966,19 +997,32 @@ class PonsLink:
 class BuyBot(ponsbot.PonsBot):
     """ponsbot.PonsBot on the $LABRAT coin page. The provider, the DRY balance override, the frame / origin guards and
     the read-only RPC forwarding are ponsbot's own; this subclass only opens the coin page and refuses EVERY signing
-    request (the buy flow never needs one)."""
+    request (the buy flow never needs one).
+    live=True: acct is buyrig_live.AddressOnly (the buyback wallet's address, no key); ponsbot's mode is LIVE, so there
+    is no balance override anywhere (pons reads the real balance). pons's own RPC traffic still never carries a send.
+    The one transaction is signed by buyrig_live.LiveBuyer, outside the page, after the rat's Confirm (BuyRun)."""
 
     SEND_METHODS = frozenset(('eth_sendTransaction', 'eth_sendRawTransaction', 'eth_sendRawTransactionSync',
                               'eth_sendBundle', 'eth_sendPrivateTransaction'))
 
-    def __init__(self, acct, log=None, headful=False):
-        super().__init__(acct, 'DRY', log=log, headful=headful, size=(VIEW_W, VIEW_H), theme='dark',
+    def __init__(self, acct, log=None, headful=False, live=False):
+        if live and not isinstance(acct, buyrig_live.AddressOnly):
+            raise ValueError('LIVE: the page wallet is the address only (buyrig_live.AddressOnly), never a key')
+        super().__init__(acct, 'LIVE' if live else 'DRY', log=log, headful=headful, size=(VIEW_W, VIEW_H), theme='dark',
                          page_cursor=False, symbol=SYMBOL)
         self.rpc_sends_blocked = 0
+        self.refusal_msg = REFUSAL_LIVE if live else REFUSAL_MSG
+
+    async def start(self):
+        page = await super().start()
+        if not self.dry:          # ponsbot routes pons's RPC only in DRY; LIVE: routed too, only to block any send
+            await self.page.route(self._is_rpc_url, self._route_rpc)
+        return page
 
     async def _route_rpc(self, route):
-        """pons's own chain requests (its RPC proxy): a send of any kind never leaves the browser (nothing here signs,
-        so none is expected); everything else is ponsbot's DRY handling (the 1 ETH balance override)."""
+        """pons's own chain requests (its RPC proxy): a send of any kind never leaves the browser (the rig signs outside
+        the page, and pons never sends a raw transaction itself); everything else is ponsbot's DRY handling (the 1 ETH
+        balance override), or in LIVE passes untouched (the real balance)."""
         try:
             req = route.request
             body = json.loads(req.post_data or 'null') if req.method == 'POST' else None
@@ -987,8 +1031,10 @@ class BuyBot(ponsbot.PonsBot):
         calls = body if isinstance(body, list) else [body]
         if any(isinstance(c, dict) and c.get('method') in self.SEND_METHODS for c in calls):
             self.rpc_sends_blocked += 1
-            self._refused('rpc send', 'the buy rig never sends a transaction')
+            self._refused('rpc send', 'the page never sends a transaction')
             return await route.abort()
+        if not self.dry:
+            return await route.continue_()
         return await super()._route_rpc(route)
 
     async def goto(self):
@@ -1018,13 +1064,13 @@ class BuyBot(ponsbot.PonsBot):
 
     async def _eth_sign(self, method, params):
         self.signatures.append({'method': str(method), 'refused': True, 'at': time.time()})
-        self._refused(str(method), 'the buy rig signs nothing')
-        return ponsbot.refusal(REFUSAL_MSG)
+        self._refused(str(method), 'the buy rig signs no message')
+        return ponsbot.refusal(self.refusal_msg)
 
     async def _eth_sign_typed(self, method, params):
         self.signatures.append({'method': str(method), 'refused': True, 'at': time.time()})
-        self._refused(str(method), 'the buy rig signs nothing')
-        return ponsbot.refusal(REFUSAL_MSG)
+        self._refused(str(method), 'the buy rig signs no typed data')
+        return ponsbot.refusal(self.refusal_msg)
 
 
 # ------------------------------------------------------------------------------------------------------------
@@ -1032,17 +1078,34 @@ class BuyBot(ponsbot.PonsBot):
 # ------------------------------------------------------------------------------------------------------------
 class BuyRun(brainrig.Run):
     """brainrig.Run (the rat's session, lighting, click forwarding, misses, the screencast, recording) on the coin page,
-    with the buy targets. Always DRY."""
+    with the buy targets. DRY, unless it is given a buyrig_live.LiveBuyer (buyer=), which only main() makes, after every
+    LIVE gate. brainrig's own launch LIVE path (live_mode) is never used here."""
 
-    def __init__(self, amount, seed, link=None, batch=None, rpc=None, out_root=None):
+    def __init__(self, amount, seed, link=None, batch=None, rpc=None, out_root=None, buyer=None):
         super().__init__(None, seed)
-        self.mode, self.live_mode = 'DRY', False            # whatever brainrig.CONFIG says: this rig is DRY only
+        self.live_mode = False                              # brainrig's launch LIVE: never, whatever CONFIG says
+        self.buyer = buyer                                  # buyrig_live.LiveBuyer (LIVE) or None (DRY)
+        self.buy_live = buyer is not None
+        if self.buy_live and (self.oracle or not isinstance(buyer, buyrig_live.LiveBuyer)):
+            raise ValueError('LIVE needs a gated buyrig_live.LiveBuyer and the rat (never the scripted cursor)')
+        self.mode = 'LIVE' if self.buy_live else 'DRY'
+        self.label = LABEL_LIVE if self.buy_live else LABEL
         self.amount_str, self.amount_wei = parse_amount(amount)
+        if self.buy_live and self.amount_wei != buyer.amount_wei:
+            raise ValueError('the session amount is not the booked amount')
         self.batch = dict(batch or {})
         self.link = link
-        self.rpc = rpc or buyback.ReadRpc()
+        self.rpc = buyer.rpc if self.buy_live else (rpc or buyback.ReadRpc())
         root = Path(out_root) if out_root else ROOT / 'runs'
-        self.run_dir = root / (f'buyrig_{self.stamp}_seed{self.seed}' + ('_DEVORACLE' if self.oracle else ''))
+        self.run_dir = root / (f'buyrig_{self.stamp}_seed{self.seed}' + ('_LIVE' if self.buy_live else '')
+                               + ('_DEVORACLE' if self.oracle else ''))
+        # LIVE (unused in DRY)
+        self.live_verdict = None         # live_refused / live_refused_checks / live_sent / live_bought / live_reverted /
+        self.live_kind = None            # live_unconfirmed / live_send_rejected; kind: check / failure / blocked
+        self.live_error = None
+        self.live_receipt = None
+        self.receipt_task = None
+        self.sign_started = False
         self.targets = [Target(i + 1, *t) for i, t in enumerate(BUY_TARGETS)]
         self.review = None
         self.typed_ok = False
@@ -1060,6 +1123,11 @@ class BuyRun(brainrig.Run):
         self.fail_reason = None          # a REASONS keyword for the public result, when the session ends without a buy
         self._last_miss_pub = 0.0
 
+    def log(self, msg):
+        if getattr(self, 'buyer', None) is not None:
+            msg = self.buyer.redact(msg)         # LIVE: the key is never in a log line, whatever produced it
+        super().log(msg)
+
     # ---- events (the public stream: fixed keywords, short names and numbers only) --------------------------------------
     def _shown(self):
         """The targets this session shows: the terms targets drop out once pons showed no terms gate."""
@@ -1073,7 +1141,7 @@ class BuyRun(brainrig.Run):
             return
         msg = {'type': MSG['step'], 'session': self.stamp, 'i': shown.index(tg) + 1, 'n': len(shown), 'key': tg.key,
                'target': PUBLIC_NAME[tg.key], 'state': tg.state, 'phase': phase if phase in PHASES else '',
-               'simulated': True}
+               'simulated': not self.buy_live}
         if tg.state == 'active' and tg.lights and phase in ('light', 'aim'):
             msg['box'] = tg.lights[-1]['box']
         self.link.step(msg)
@@ -1311,19 +1379,25 @@ class BuyRun(brainrig.Run):
             if self.link is not None:
                 try:
                     self.link.done(self._done_msg())
-                    self.link.bye({'type': MSG['bye'], 'session': self.stamp, 'label': LABEL})
+                    self.link.bye({'type': MSG['bye'], 'session': self.stamp, 'label': self.label})
                 except Exception as e:
                     self.log(f'relay done message failed: {type(e).__name__}')
                 await asyncio.to_thread(self.link.close, 5.0)
 
     async def _run(self):
         B = brainrig.BRAIN
-        self.log(f"buy rig · {LABEL} · the rat buys {self.amount_str} ETH of ${SYMBOL} on pons · seed {self.seed}"
+        self.log(f"buy rig · {self.label} · the rat buys {self.amount_str} ETH of ${SYMBOL} on pons · seed {self.seed}"
                  + (f" · batch {self.batch.get('at')}" if self.batch.get('at') else '')
+                 + (f' · window {self.buyer.window}' if self.buy_live else '')
                  + f" · steering network sha256 {B['steer_sha256'][:16]} · lever-press network sha256 "
                  f"{B['press_sha256'][:16]}")
-        self.log('pons builds the buy transaction; the rig decodes it, checks it, simulates it with eth_call and refuses '
-                 'to sign. Nothing is signed or sent.')
+        if self.buy_live:
+            self.log('LIVE: pons builds the buy transaction; the rig decodes it, checks it, simulates it from the buyback '
+                     'wallet and, only if every check passes, signs ONE transaction for this window and sends it. The '
+                     'key never enters the page.')
+        else:
+            self.log('pons builds the buy transaction; the rig decodes it, checks it, simulates it with eth_call and '
+                     'refuses to sign. Nothing is signed or sent.')
         if self.oracle:
             self.log("DEV --dev-oracle: a SCRIPTED cursor drives the targets, NOT the rat's brain; never streamed")
         steer_path, press_path = self.run_dir / 'steer.pt', self.run_dir / 'press.pt'
@@ -1345,14 +1419,18 @@ class BuyRun(brainrig.Run):
             self.link.hello(self._hello_msg())
 
         # ---- pons
-        acct = ponsbot.throwaway_account()
-        self.bot = BuyBot(acct, log=self.log, headful=brainrig.CONFIG.get('headful', False))
+        if self.buy_live:          # the buyback wallet's ADDRESS only: the key stays in the signer (buyrig_live)
+            acct = buyrig_live.AddressOnly(buyrig_live.WALLET)
+        else:
+            acct = ponsbot.throwaway_account()
+        self.bot = BuyBot(acct, log=self.log, headful=brainrig.CONFIG.get('headful', False), live=self.buy_live)
         self.bot.on_send = self.on_send
         await self.bot.start()
         await self.bot.page.add_init_script(MASK_JS)
         await self.bot.page.add_init_script(brainrig.OVERLAY_JS.replace('__DEV__', 'true' if self.oracle else 'false'))
-        self.log(f'opening {COIN_URL} ({VIEW_W}x{VIEW_H}) with an injected wallet: a fresh in-memory key (DRY); the '
-                 'stream mask is installed before the page loads')
+        self.log(f'opening {COIN_URL} ({VIEW_W}x{VIEW_H}) with an injected wallet: '
+                 + ('the buyback wallet, address only, its real balance (LIVE)' if self.buy_live else
+                    'a fresh in-memory key (DRY)') + '; the stream mask is installed before the page loads')
         try:
             await self.bot.goto()
         except Exception as e:
@@ -1372,8 +1450,13 @@ class BuyRun(brainrig.Run):
         await self._eval('() => { window.__ratDowns = []; return true; }')
         self.log(f"wallet connected in pons (masked on the page) · rig setup (not the rat): pons theme {st['theme']}, "
                  "pons's status strip dismissed · mask audit clean")
-        self.log('pons reads the wallet balance through its own RPC proxy; the rig answers a simulated 1 ETH for this '
-                 'wallet so pons enables Buy. The wallet holds nothing; the rig never signs.')
+        if self.buy_live:
+            self.log("LIVE: pons reads the buyback wallet's REAL balance (no override), so pons itself decides whether "
+                     "it is enough. The rig signs one transaction, only after the rat clicks pons's Confirm buy and "
+                     'every check passes.')
+        else:
+            self.log('pons reads the wallet balance through its own RPC proxy; the rig answers a simulated 1 ETH for '
+                     'this wallet so pons enables Buy. The wallet holds nothing; the rig never signs.')
 
         # ---- the brain
         self.sim_thread = threading.Thread(target=self._sim, name='brain-session', daemon=True)
@@ -1406,15 +1489,25 @@ class BuyRun(brainrig.Run):
             await asyncio.wait_for(self.send_entered.wait(), brainrig.SEND_WAIT_S)
         except asyncio.TimeoutError:
             raise StageFailed(last.key, f'pons never called eth_sendTransaction within {brainrig.SEND_WAIT_S} s')
-        try:
-            await asyncio.wait_for(self.tx_seen.wait(), brainrig.DRY_HANDLE_WAIT_S)
-        except asyncio.TimeoutError:
-            raise StageFailed(last.key, f'the wallet hook did not finish within {brainrig.DRY_HANDLE_WAIT_S} s')
+        if self.buy_live:
+            # the signer makes blocking RPCs with retries: once pons's transaction is handed over, never abandon it
+            # half way on a short timer (brainrig's LIVE rule)
+            await self.tx_seen.wait()
+        else:
+            try:
+                await asyncio.wait_for(self.tx_seen.wait(), brainrig.DRY_HANDLE_WAIT_S)
+            except asyncio.TimeoutError:
+                raise StageFailed(last.key, f'the wallet hook did not finish within {brainrig.DRY_HANDLE_WAIT_S} s')
         if self.rejection_task:
             await self.rejection_task
+        if self.receipt_task:
+            await self.receipt_task
         return self._outcome()
 
     # ---- the wallet: pons's eth_sendTransaction ----------------------------------------------------------------------
+    def _refusal(self):
+        return ponsbot.refusal(REFUSAL_LIVE if self.buy_live else REFUSAL_MSG)
+
     async def on_send(self, tx):
         armed = bool(self.bot.armed)
         self.sends.append({'tx': tx, 'at': time.time(), 'armed': armed})
@@ -1425,14 +1518,17 @@ class BuyRun(brainrig.Run):
         if not armed or self.handled_send is not None:
             why = "the rat has not clicked Confirm buy" if not armed else 'one buy request per session'
             self.log(f'refused ({why})')
-            return ponsbot.refusal(REFUSAL_MSG)
+            return self._refusal()
         self.handled_send = n - 1
         self.send_entered.set()
         try:
-            return await self._handle_send(tx)
+            return await (self._handle_send_live(tx) if self.buy_live else self._handle_send(tx))
         except Exception as e:                 # whatever went wrong, the answer to pons is the same refusal
             self.log(f'the buy request could not be handled ({type(e).__name__}); refused')
-            return ponsbot.refusal(REFUSAL_MSG)
+            if self.buy_live and self.buyer.signed and self.receipt_task is None:
+                # it was signed and handed to the chain before the failure: its receipt still decides the outcome
+                self.receipt_task = asyncio.ensure_future(self._await_receipt())
+            return self._refusal()
         finally:
             self.tx_seen.set()
 
@@ -1476,6 +1572,154 @@ class BuyRun(brainrig.Run):
         self.rejection_task = asyncio.ensure_future(self._watch_rejection())
         return resp
 
+    # ---- LIVE: the same checks, then the one transaction of this window ------------------------------------------------
+    async def _handle_send_live(self, tx):
+        """Every DRY check (the simulation from the wallet's real balance) plus buyrig_live.live_checks. A short balance
+        is a failed buy; any failed check stops LIVE; otherwise buyrig_live.LiveBuyer re-simulates, checks the balance,
+        reserves the window, signs ONE transaction, journals it and broadcasts it, and pons gets the hash."""
+        b = self.buyer
+        try:
+            res = await asyncio.wait_for(self.loop.run_in_executor(
+                None, inspect_buy, tx, buyrig_live.WALLET, self.amount_wei, self.review, self.rpc, time.time, True), 30)
+        except Exception as e:
+            f, _ = decode_buy(tx)
+            res = {'fields': f, 'data_hex': None, 'facts': {'error': f'{type(e).__name__}'},
+                   'checks': {'inspection': {'ok': False, 'expected': 'the checks ran'}}, 'failed': ['inspection'],
+                   'ok': False}
+        self.inspection = res
+        f, facts, checks, failed = res['fields'], res['facts'], res['checks'], res['failed']
+        self.capture = {'raw_request': tx, 'fields': f, 'facts': facts, 'checks': checks, 'failed': failed,
+                        'expected': {'amount_wei': self.amount_wei, 'amount_eth': self.amount_str, 'window': b.window,
+                                     'wallet': buyrig_live.WALLET, 'review': self.review},
+                        'mode': 'LIVE', 'wallet': buyrig_live.WALLET, 'at': utc(), 'at_unix': time.time(),
+                        'signed': False, 'broadcast': False, 'dev_oracle': self.oracle}
+        n = len(checks)
+        self.out.json({'type': 'tx', 'mode': 'LIVE', 'phase': 'checked', 'checks': checks, 'failed': failed,
+                       'quote': facts.get('quote'), 'min_out': f.get('min_out'), 'simulation': facts.get('sim')})
+        sim = facts.get('sim') or {}
+        self.log(f"decoded: execute {f.get('commands')} {f.get('actions')} · amountIn {f.get('amount_in')} · minOut "
+                 f"{f.get('min_out')} · deadline {f.get('deadline')} · value {f.get('value_wei')} · fresh quote "
+                 f"{facts.get('quote')}")
+        self.log('eth_call of the exact transaction from the buyback wallet (real balance, no override): '
+                 + ('ok' if sim.get('ok') else f"failed: {sim.get('error')}")
+                 + (f" · gas {facts.get('gas')}" if facts.get('gas') else ''))
+        self.log(f'{n - len(failed)}/{n} checks passed' + (f' · FAILED {failed}' if failed else ''))
+        try:
+            short = await self.loop.run_in_executor(None, b.balance_short, facts.get('gas'))
+        except Exception as e:
+            return await self._live_refuse(f'the balance could not be read ({type(e).__name__})', 'blocked')
+        if short:
+            return await self._live_refuse(f'the buyback wallet cannot cover the buy: {short}', 'failure',
+                                           reason='balance_low')
+        if failed:
+            return await self._live_refuse(f'checks failed: {failed}', 'check')
+        # from here on the transaction belongs to the signer: nothing stops it half way
+        self.sign_started = True
+        self.log(f'{n}/{n} checks passed · LIVE: re-simulating from the buyback wallet, checking the balance, then '
+                 f'signing ONE transaction for the window {b.window}')
+        try:
+            sent = await self.loop.run_in_executor(None, b.sign_and_send, res['data_hex'], f.get('deadline'))
+        except buyrig_live.LiveRefused as e:
+            return await self._live_refuse(str(e), e.kind)
+        except Exception as e:
+            if b.signed:
+                raise                              # signed: on_send starts the receipt watch and answers pons
+            return await self._live_refuse(f'the signer failed ({type(e).__name__})', 'failure')
+        h = sent['tx']
+        self.capture.update(signed=True, broadcast=sent['broadcast'], tx=h, send_error=sent['error'])
+        self.out.json({'type': 'tx', 'mode': 'LIVE', 'phase': 'sent', 'broadcast': sent['broadcast'], 'tx': h,
+                       'explorer_tx': f'{buyrig_live.EXPLORER}/tx/{h}', 'send_error': sent['error']})
+        self.log(f"LIVE: broadcast {sent['broadcast']} · {buyrig_live.EXPLORER}/tx/{h}"
+                 + (f" · send error: {sent['error']}" if sent['error'] else ''))
+        if sent['broadcast'] is False:
+            # every RPC rejected the raw transaction: pons gets an error, not a hash; resolve() finishes the window
+            self.live_verdict = 'live_send_rejected'
+            self.receipt_task = asyncio.ensure_future(self._await_receipt(buyrig_live.REJECTED_WAIT_S))
+            resp = ponsbot.err(-32000, 'Buy not sent: every RPC rejected it')
+            self.capture['response_to_page'] = resp
+            if self.link is not None:
+                self.link.tx(self._tx_msg())
+            return resp
+        self.live_verdict = 'live_sent'
+        self.receipt_task = asyncio.ensure_future(self._await_receipt())
+        self.capture['response_to_page'] = {'result': h}
+        if self.link is not None:
+            self.link.tx(self._tx_msg())
+        self.rejection_task = asyncio.ensure_future(self._watch_toast())
+        return {'result': h}
+
+    async def _live_refuse(self, why, kind, reason=None):
+        """LIVE, nothing signed: booked by kind (a check stops LIVE, a failure counts), and pons gets 4001."""
+        self.live_error, self.live_kind = str(why)[:400], kind
+        self.live_verdict = 'live_refused_checks' if kind == 'check' else 'live_refused'
+        if reason:
+            self.fail_reason = reason
+        try:
+            await self.loop.run_in_executor(None, buyrig_live.note_refusal, self.buyer.journal, self.buyer.window,
+                                            buyrig_live.LiveRefused(why, kind), self.log_ts)
+        except Exception as e:
+            self.log(f'the refusal could not be journalled ({type(e).__name__})')
+        resp = self._refusal()
+        self.capture = {**(self.capture or {}), 'verdict': self.live_verdict, 'error': self.live_error,
+                        'kind': kind, 'response_to_page': resp, 'signed': False, 'broadcast': False}
+        self.log(f'LIVE: refused with {ponsbot.USER_REJECTED} ({self.live_error}). Nothing signed, nothing sent.'
+                 + (' LIVE is stopped until an operator clears it.' if kind == 'check' else ''))
+        if self.link is not None:
+            self.link.tx(self._tx_msg())
+        self.rejection_task = asyncio.ensure_future(self._watch_rejection())
+        return resp
+
+    async def _await_receipt(self, seconds=None):
+        info = await self.loop.run_in_executor(None, self.buyer.wait_receipt, seconds)
+        self.live_receipt = info
+        if info is None:
+            self.live_verdict = 'live_send_rejected' if self.live_verdict == 'live_send_rejected' else 'live_unconfirmed'
+        elif info['ok']:
+            self.live_verdict = 'live_bought'
+            self.log(f"LIVE: bought · block {info['block']} · {buyback.token_str(info['labrat_out_wei'])} LABRAT to the "
+                     f"buyback wallet")
+        else:
+            self.live_verdict = 'live_reverted' if info['status'] != 1 else 'live_mined_without_labrat'
+            self.log(f'LIVE: the buy did not go through ({self.live_verdict})')
+        if self.capture is not None:
+            self.capture['receipt'] = info
+        if self.link is not None:
+            self.link.tx(self._tx_msg())
+        return info
+
+    async def _watch_toast(self):
+        """LIVE, after pons got the hash: whatever pons shows (for the record; the receipt decides the outcome)."""
+        t_end = time.time() + TOAST_WAIT_S
+        hit = None
+        while time.time() < t_end:
+            hit = await self._eval(TOAST_JS)
+            if hit:
+                break
+            await asyncio.sleep(0.2)
+        self.rejection = hit
+        await asyncio.sleep(0.6)
+        jpg = await self._checkpoint('after')
+        if jpg:
+            self.final_jpg = jpg
+        self.log(f'pons shows: {hit}' if hit else f'pons showed no toast within {TOAST_WAIT_S:g} s')
+
+    def _signed_broadcast(self):
+        """{'signed', 'broadcast'} from what the signer actually did (never assumed). DRY: always unsigned."""
+        b = self.buyer
+        if b is None or not b.signed:
+            return {'signed': False, 'broadcast': False}
+        return {'signed': True, 'broadcast': (b.sent or {}).get('broadcast', 'unknown')}
+
+    def _live_settle(self, outcome):
+        """Blocking, at the end of a LIVE session: a session for a booked window that ended with nothing signed and
+        nothing booked yet (the rat never reached Confirm, pons never asked, the mask stopped it...) is one failed buy.
+        A signed one is decided by its receipt (now, or by resolve() later)."""
+        b = self.buyer
+        if b is None or b.signed or self.live_kind is not None:
+            return
+        why = str(outcome.get('error') or outcome.get('reason') or 'the session ended without a buy')[:300]
+        buyrig_live.record_failure(b.journal, b.window, why, self.log_ts)
+
     async def _watch_rejection(self):
         t_end = time.time() + TOAST_WAIT_S
         hit = None
@@ -1507,7 +1751,23 @@ class BuyRun(brainrig.Run):
                 'tokens_out_at_least_quote': (facts.get('sim_floor') or {}).get('ok'),
                 'gas': facts.get('gas'), 'block': (facts.get('block') or {}).get('number')}
 
+    def _live_facts(self):
+        """LIVE: what the signer did. {} in DRY."""
+        b = self.buyer
+        if b is None:
+            return {}
+        rc = self.live_receipt or b.receipt or {}
+        sb = self._signed_broadcast()
+        return {'window': b.window, 'tx': (b.signed or {}).get('tx'), 'signed': sb['signed'],
+                'sent': bool(sb['signed'] and sb['broadcast'] is not False), 'broadcast': sb['broadcast'],
+                'block': rc.get('block'), 'labrat_out_wei': rc.get('labrat_out_wei') if rc.get('ok') else None,
+                'labrat_out': buyback.token_str(rc['labrat_out_wei']) if rc.get('ok') else None,
+                'gas_used': rc.get('gas_used'), 'bought': bool(rc.get('ok')), 'verdict': self.live_verdict,
+                'kind': self.live_kind, 'error': self.live_error}
+
     def _outcome(self):
+        if self.buy_live:
+            return self._outcome_live()
         cap = self.capture or {}
         num = self._numbers()
         out = {'mode': cap.get('verdict'), 'amount_eth': self.amount_str, 'amount_wei': self.amount_wei,
@@ -1522,8 +1782,31 @@ class BuyRun(brainrig.Run):
                  f'{LABEL}: the captured buy failed {num["failed"]}; refused. Nothing was bought.')
         return out
 
+    def _outcome_live(self):
+        cap = self.capture or {}
+        num = self._numbers()
+        lf = self._live_facts()
+        out = {'mode': lf['verdict'] or 'live_not_sent', 'amount_eth': self.amount_str, 'amount_wei': self.amount_wei,
+               'window': lf['window'], 'tx': lf['tx'], 'block': lf['block'], 'labrat_out': lf['labrat_out'],
+               'labrat_out_wei': lf['labrat_out_wei'], 'quote': num['labrat_out'], 'quote_wei': num['quote'],
+               'min_out': num['min_out'], 'min_out_wei': num['min_out_wei'], 'checks_passed': not num['failed'],
+               'failed_checks': num['failed'], 'checks': f"{num['checks_passed']}/{num['checks_total']}",
+               'simulation': num['simulation'], 'gas_estimate': num['gas'], 'gas_used': lf['gas_used'],
+               'response_to_page': cap.get('response_to_page'), 'page_showed': self.rejection,
+               'signed': lf['signed'], 'broadcast': lf['broadcast'], 'sent': lf['sent'], 'error': lf['error'],
+               'refusal_kind': lf['kind'], 'captured_tx': 'captured_tx.json', 'review': self.review}
+        if lf['bought']:
+            self.log(f"LIVE: the rat bought {self.amount_str} ETH of LABRAT on pons -> {lf['labrat_out']} LABRAT, block "
+                     f"{lf['block']} · {buyrig_live.EXPLORER}/tx/{lf['tx']}")
+        elif lf['signed']:
+            self.log(f"LIVE: signed and {'sent' if lf['sent'] else 'NOT sent'}, not bought ({lf['verdict']}); the "
+                     'journal holds it and the next start resolves it')
+        else:
+            self.log(f"LIVE: nothing was signed or sent ({lf['verdict'] or 'the session ended first'})")
+        return out
+
     def _hello_msg(self):
-        return {'type': MSG['hello'], 'v': 1, 'source': SOURCE, 'label': LABEL, 'simulated': True,
+        return {'type': MSG['hello'], 'v': 1, 'source': SOURCE, 'label': self.label, 'simulated': not self.buy_live,
                 'session': self.stamp, 'coin': SYMBOL, 'venue': 'pons',
                 'title': f'The rat buys ${SYMBOL} on pons', 'amount_eth': self.amount_str,
                 'batch': ({'at': self.batch.get('at'), 'hits': self.batch.get('hits')} if self.batch.get('at') else None),
@@ -1533,25 +1816,49 @@ class BuyRun(brainrig.Run):
                 'targets': [PUBLIC_NAME[t.key] for t in self._shown()],
                 'brain': {'networks': 2, 'units': brainrig.UNITS, 'connections': brainrig.CONNECTIONS,
                           'commit': self.commit},
-                'note': PUBLIC_NOTE}
+                'note': PUBLIC_NOTE_LIVE if self.buy_live else PUBLIC_NOTE}
 
     @staticmethod
     def _fail_kind(failed):
         return 'simulation_failed' if failed and set(failed) <= {'simulation'} else 'checks_failed'
 
+    def _live_reason(self, num):
+        """LIVE: the public reason keyword of a session that did not buy."""
+        lf = self._live_facts()
+        if lf['bought']:
+            return None
+        if lf['signed']:
+            return 'not_settled'
+        if self.fail_reason == 'balance_low':
+            return 'balance_low'
+        if self.live_kind == 'check' and num['failed']:
+            return self._fail_kind(num['failed'])
+        if self.live_kind is not None:
+            return 'checks_failed' if self.live_kind == 'check' else 'aborted'
+        return self.fail_reason if self.fail_reason in REASONS else 'aborted'
+
     def _tx_msg(self):
         num = self._numbers()
         res = self.inspection or {}
         ok = bool(res.get('ok'))
-        return {'type': MSG['tx'], 'kind': 'tx', 'label': LABEL, 'simulated': True, 'session': self.stamp,
-                'ok': ok, 'reason': None if ok else self._fail_kind(num['failed']),
-                'eth_in': self.amount_str, 'amount_eth': self.amount_str,
-                'labrat_out': num['labrat_out'], 'min_out': num['min_out'], 'market': 'Uniswap v4 pool',
-                'max_slippage': '1%', 'checks_passed': num['checks_passed'], 'checks_total': num['checks_total'],
-                'checks': [{'name': PUBLIC_CHECKS.get(k, k), 'ok': bool(v.get('ok'))}
-                           for k, v in (res.get('checks') or {}).items()],
-                'simulation': num['simulation'], 'gas': num['gas'], 'signed': False, 'sent': False,
-                'status': 'checked, not signed' if ok else 'refused'}
+        msg = {'type': MSG['tx'], 'kind': 'tx', 'label': self.label, 'simulated': not self.buy_live,
+               'session': self.stamp, 'ok': ok, 'reason': None if ok else self._fail_kind(num['failed']),
+               'eth_in': self.amount_str, 'amount_eth': self.amount_str,
+               'labrat_out': num['labrat_out'], 'min_out': num['min_out'], 'market': 'Uniswap v4 pool',
+               'max_slippage': '1%', 'checks_passed': num['checks_passed'], 'checks_total': num['checks_total'],
+               'checks': [{'name': PUBLIC_CHECKS_ALL.get(k, k), 'ok': bool(v.get('ok'))}
+                          for k, v in (res.get('checks') or {}).items()],
+               'simulation': num['simulation'], 'gas': num['gas'], 'signed': False, 'sent': False,
+               'status': 'checked, not signed' if ok else 'refused'}
+        if self.buy_live:
+            lf = self._live_facts()
+            ok = ok and self.live_kind is None and lf['broadcast'] is not False
+            msg.update(ok=ok, reason=None if ok else self._live_reason(num), signed=lf['signed'], sent=lf['sent'],
+                       status=('bought' if lf['bought'] else 'signed and sent' if lf['sent'] else
+                               'signed, not sent' if lf['signed'] else 'refused' if not ok else 'checked'))
+            if lf['bought']:
+                msg['labrat_out'] = lf['labrat_out']        # what reached the wallet (the receipt), not the quote
+        return msg
 
     def _done_msg(self):
         r = self.result or {}
@@ -1559,21 +1866,30 @@ class BuyRun(brainrig.Run):
         ok = bool(r.get('ok'))
         if ok:
             reason = None
+        elif self.buy_live:
+            reason = self._live_reason(num)
         elif self.inspection is not None and not self.inspection.get('ok'):
             reason = self._fail_kind(num['failed'])
         elif self.fail_reason in REASONS:
             reason = self.fail_reason
         else:
             reason = 'aborted'
-        return {'type': MSG['done'], 'kind': 'done', 'label': LABEL, 'simulated': True, 'session': self.stamp,
-                'ok': ok, 'reason': reason,
-                'outcome': 'checked, not signed' if ok else ('refused' if self.inspection else 'stopped'),
-                'eth_in': self.amount_str, 'amount_eth': self.amount_str, 'labrat_out': num['labrat_out'],
-                'checks_passed': num['checks_passed'], 'checks_total': num['checks_total'],
-                'simulation': num['simulation'], 'targets_hit': sum(1 for c in self.clicks if c['forwarded']),
-                'misses': sum(1 for c in self.clicks if not c['forwarded']),
-                'seconds': round(time.time() - self.t_start, 1), 'session_proof': self.proof, 'recorded': self.saved,
-                'signed': False, 'sent': False, 'ended': utc()}
+        msg = {'type': MSG['done'], 'kind': 'done', 'label': self.label, 'simulated': not self.buy_live,
+               'session': self.stamp, 'ok': ok, 'reason': reason,
+               'outcome': 'checked, not signed' if ok else ('refused' if self.inspection else 'stopped'),
+               'eth_in': self.amount_str, 'amount_eth': self.amount_str, 'labrat_out': num['labrat_out'],
+               'checks_passed': num['checks_passed'], 'checks_total': num['checks_total'],
+               'simulation': num['simulation'], 'targets_hit': sum(1 for c in self.clicks if c['forwarded']),
+               'misses': sum(1 for c in self.clicks if not c['forwarded']),
+               'seconds': round(time.time() - self.t_start, 1), 'session_proof': self.proof, 'recorded': self.saved,
+               'signed': False, 'sent': False, 'ended': utc()}
+        if self.buy_live:
+            lf = self._live_facts()
+            msg.update(signed=lf['signed'], sent=lf['sent'],
+                       outcome=('bought' if lf['bought'] else 'not settled' if lf['signed'] else
+                                'refused' if self.inspection else 'stopped'),
+                       labrat_out=lf['labrat_out'] if lf['bought'] else num['labrat_out'])
+        return msg
 
     def _stream_stats(self):
         st = super()._stream_stats()
@@ -1607,6 +1923,18 @@ class BuyRun(brainrig.Run):
                 pass
         if self.bot and self.bot.page and self.final_jpg is None and self.breach is None:
             self.final_jpg = await self._checkpoint('final')
+        if self.buy_live:
+            if self.receipt_task is not None and not self.receipt_task.done():
+                try:
+                    await self.receipt_task           # a sent buy is always followed to its receipt (or its timeout)
+                except Exception as e:
+                    self.log(f'the receipt watch failed ({type(e).__name__}); the next start resolves it')
+            try:
+                await self.loop.run_in_executor(None, self._live_settle, outcome)
+            except Exception as e:
+                self.log(f'the LIVE journal could not be updated ({type(e).__name__})')
+            if outcome.get('mode') in ('error', 'ended'):
+                outcome = {**outcome, **{k: v for k, v in self._outcome_live().items() if k not in ('mode',)}}
         await asyncio.sleep(1.0)
         if self.final_jpg:
             (self.run_dir / 'pons_final.jpg').write_bytes(self.final_jpg)
@@ -1634,10 +1962,13 @@ class BuyRun(brainrig.Run):
                        'rule': 'a frame is saved or streamed only between two clean mask audits'}, fh, indent=1,
                       default=str)
         B = brainrig.BRAIN
-        rig = {'rig': 'live/buyrig.py', 'research': 'live/BUYRIG_RESEARCH.md', 'mode': 'DRY', 'label': LABEL,
+        rig = {'rig': 'live/buyrig.py', 'research': 'live/BUYRIG_RESEARCH.md', 'mode': self.mode, 'label': self.label,
                'dev_oracle': self.oracle, 'pons_url': COIN_URL, 'viewport': [VIEW_W, VIEW_H],
-               'wallet_kind': 'fresh in-memory key per session (DRY)',
-               'dry_balance_override_eth': ponsbot.DRY_BALANCE_WEI / 1e18, 'amount_eth': self.amount_str,
+               'wallet_kind': ('the buyback wallet (LIVE: the page gets its address only; the key stays in the signer)'
+                               if self.buy_live else 'fresh in-memory key per session (DRY)'),
+               'dry_balance_override_eth': None if self.buy_live else ponsbot.DRY_BALANCE_WEI / 1e18,
+               'live': ({k: v for k, v in self._live_facts().items() if k not in ('tx',)} if self.buy_live else None),
+               'amount_eth': self.amount_str,
                'amount_wei': self.amount_wei, 'batch': self.batch, 'terms_shown': self.terms_shown,
                'send_requests': len(self.sends), 'signature_requests': len(self.bot.signatures) if self.bot else 0,
                'wallet_refusals': len(self.bot.refusals) if self.bot else 0,
@@ -1650,8 +1981,8 @@ class BuyRun(brainrig.Run):
                'steer_policy': B['steer_source'], 'steer_sha256': B['steer_sha256'],
                'press_policy': B['press_source'], 'press_sha256': B['press_sha256'], 'units': brainrig.UNITS,
                'connections': brainrig.CONNECTIONS, 'presses_seen': self.presses_seen,
-               'type_delay_ms': brainrig.TYPE_DELAY_MS, 'honesty': HONESTY, 'started_utc': utc(self.t_start),
-               'ended_utc': utc()}
+               'type_delay_ms': brainrig.TYPE_DELAY_MS, 'honesty': HONESTY_LIVE if self.buy_live else HONESTY,
+               'started_utc': utc(self.t_start), 'ended_utc': utc()}
         if self.oracle:
             with open(self.run_dir / 'oracle.json', 'w', encoding='utf-8', newline='\n') as fh:
                 json.dump(scrub({'kind': 'DEV_ORACLE_NOT_A_BRAIN_RUN', 'buy': outcome, 'rig': rig}), fh, indent=1)
@@ -1674,8 +2005,13 @@ class BuyRun(brainrig.Run):
     def _write_result(self, outcome, rig):
         num = self._numbers()
         ok = (outcome.get('mode') == 'dry_captured' and self.saved and self.breach is None and not self.oracle)
+        lf = self._live_facts()
+        if self.buy_live:
+            # LIVE: ok means the buy was mined with LABRAT received (money moved: it is reported even without a replay)
+            ok = bool(lf['bought']) and not self.oracle
         self.result = scrub({
-            'ok': ok, 'verdict': outcome.get('mode'), 'label': LABEL, 'amount_eth': self.amount_str,
+            'ok': ok, 'verdict': outcome.get('mode'), 'mode': self.mode, 'label': self.label,
+            'amount_eth': self.amount_str,
             'amount_wei': self.amount_wei, 'labrat_out': num['labrat_out'], 'tokens_wei': num['quote'],
             'min_out': num['min_out'], 'checks_passed': num['checks_passed'], 'checks_total': num['checks_total'],
             'failed_checks': num['failed'], 'simulation': num['simulation'],
@@ -1686,6 +2022,13 @@ class BuyRun(brainrig.Run):
             'batch': self.batch, 'frames': rig['frames_saved'], 'mask_breach': self.breach is not None,
             'stream': rig['stream'], 'dev_oracle': self.oracle, 'signed': False, 'sent': False,
             'error': outcome.get('error') or outcome.get('reason')})
+        if self.buy_live:
+            self.result.update(
+                window=lf['window'], signed=lf['signed'], sent=lf['sent'], broadcast=lf['broadcast'],
+                tx=lf['tx'] if lf['tx'] and buyrig_live.HASH_RE.match(lf['tx']) else None, block=lf['block'],
+                labrat_out=lf['labrat_out'], labrat_out_wei=lf['labrat_out_wei'], quote=num['labrat_out'],
+                refusal_kind=lf['kind'], error=self.buyer.redact(lf['error'] or outcome.get('error') or
+                                                                 outcome.get('reason') or '') or None)
         with open(self.run_dir / 'buyrig_result.json', 'w', encoding='utf-8', newline='\n') as fh:
             json.dump(self.result, fh, indent=1)
 
@@ -1738,12 +2081,12 @@ def configure(seed, headful=False, dev_oracle=False):
                            mode='DRY', live=None, token=None, pinned=None)
 
 
-async def run_session(amount, seed, relay=None, token=None, batch=None, out_root=None, rpc=None, link=None):
+async def run_session(amount, seed, relay=None, token=None, batch=None, out_root=None, rpc=None, link=None, buyer=None):
     loop = asyncio.get_running_loop()
     loop.set_default_executor(ThreadPoolExecutor(brainrig.EXECUTOR_THREADS, thread_name_prefix='buyrig'))
     if link is None and relay:
         link = PonsLink(relay, token)
-    r = BuyRun(amount, seed, link=link, batch=batch, rpc=rpc, out_root=out_root)
+    r = BuyRun(amount, seed, link=link, batch=batch, rpc=rpc, out_root=out_root, buyer=buyer)
     brainrig.ACTIVE['run'] = r
     brainrig.STATE['busy'] = True
     try:
@@ -1753,15 +2096,38 @@ async def run_session(amount, seed, relay=None, token=None, batch=None, out_root
     return r
 
 
+def decide_live(live_flag, window, amount_wei, dev_oracle=False, environ=None, gate_rpc=None, log=say, **open_kw):
+    """-> (buyer, refusal, why). buyer: a buyrig_live.LiveBuyer when EVERY gate holds and the preflight passed (LIVE);
+    refusal: a buyrig_live.LiveRefused when the gates hold but the preflight refused (no session); both None: DRY,
+    exactly as before (why says which gate was missing). The key leaves the environment here, whatever the outcome."""
+    buyer, refusal, why = None, None, ''
+    try:
+        if not (live_flag or window):
+            why = 'not asked for (no --live / --window)'
+        elif dev_oracle:
+            why = '--dev-oracle is a scripted cursor, never LIVE'
+        else:
+            acct, why = buyrig_live.gate(live_flag, window, environ, gate_rpc)
+            if acct is not None:
+                try:
+                    buyer = buyrig_live.open_buyer(acct, window, amount_wei, log=log, environ=environ, **open_kw)
+                except buyrig_live.LiveRefused as e:
+                    refusal = e
+                acct = None
+    finally:
+        buyrig_live.drop_key(environ)
+    return buyer, refusal, why
+
+
 def main(argv=None):
     for stream, kw in ((sys.stdout, {'line_buffering': True}), (sys.stderr, {})):
         try:
             stream.reconfigure(encoding='utf-8', errors='replace', **kw)
         except Exception:
             pass
-    ap = argparse.ArgumentParser(description='RATBRAIN buy rig: the rat clicks through a simulated $LABRAT buy on pons '
-                                             '(DRY only: nothing is signed or sent)')
-    ap.add_argument('--amount', required=True, help='the batch amount in ETH, e.g. 0.0001 (0.00001 .. 0.01)')
+    ap = argparse.ArgumentParser(description='RATBRAIN buy rig: the rat clicks through a $LABRAT buy on pons (simulated '
+                                             'unless every LIVE gate holds: see the docstring)')
+    ap.add_argument('--amount', required=True, help='the batch amount in ETH, e.g. 0.0001 (0.00001 .. 0.1)')
     ap.add_argument('--seed', type=int, default=2026)
     ap.add_argument('--policy', default='runs/final/steer.pt', help='the STEERING network')
     ap.add_argument('--press-policy', default='runs/final/policy.pt', help='the lever-PRESS network')
@@ -1773,11 +2139,34 @@ def main(argv=None):
     ap.add_argument('--headful', action='store_true', help='show the Chromium window')
     ap.add_argument('--dev-oracle', action='store_true',
                     help='TESTING ONLY: a scripted cursor instead of the brain (never streamed, never reported)')
+    ap.add_argument('--live', action='store_true',
+                    help='LIVE (the runner passes it for a booked real buy): signs only if EVERY gate holds '
+                         '(live/buyrig_live.py); otherwise the session runs simulated, as before')
+    ap.add_argument('--window', help="LIVE: the engine's booked hour, e.g. 2026-09-25T20:00:00Z (one transaction per "
+                                     'window, ever)')
     a = ap.parse_args(argv)
     try:
-        amount, _wei = parse_amount(a.amount)
+        amount, wei = parse_amount(a.amount)
     except ValueError as e:
+        buyrig_live.drop_key()
         raise SystemExit(f'bad --amount: {e}')
+    buyer, refusal, why = decide_live(a.live, a.window, wei, a.dev_oracle)
+    if buyer is not None:
+        say(f'  LIVE: every gate holds; this session may sign ONE transaction for the window {a.window}')
+    elif refusal is not None:
+        say(f'  LIVE refused ({refusal.kind}): {refusal}. No session runs, nothing is signed.')
+    elif a.live or a.window:
+        say(f'  LIVE is off ({why}): this session runs simulated, as before')
+    if refusal is not None:
+        res = {'ok': False, 'verdict': 'live_refused', 'mode': 'LIVE', 'window': a.window, 'amount_eth': amount,
+               'signed': False, 'sent': False, 'refusal_kind': refusal.kind, 'error': str(refusal)[:400],
+               'run_dir': None, 'session_proof': None}
+        if a.result_json:
+            with open(a.result_json, 'w', encoding='utf-8', newline='\n') as fh:
+                json.dump(res, fh, indent=1)
+        say('BUYRIG_RESULT ' + json.dumps({k: res.get(k) for k in ('ok', 'verdict', 'mode', 'window', 'amount_eth',
+                                                                      'signed', 'sent', 'error')}))
+        return 2
     token = None
     if a.relay:
         if a.dev_oracle:
@@ -1791,20 +2180,27 @@ def main(argv=None):
         raise SystemExit('--batch-at must look like 2026-09-25T03:22:58Z')
     note = load_brain(a.policy, a.press_policy)
     configure(a.seed, a.headful, a.dev_oracle)
-    say(f"\n  RATBRAIN buy rig · {LABEL} · {amount} ETH of ${SYMBOL} on pons · seed {a.seed}"
+    say(f"\n  RATBRAIN buy rig · {LABEL_LIVE if buyer else LABEL} · {amount} ETH of ${SYMBOL} on pons · seed {a.seed}"
         + (' · DEV ORACLE (scripted cursor, NOT the rat)' if a.dev_oracle else '') + '\n'
         + (f'  {note}\n' if note else '')
         + f"  brain commit {brainrig.BRAIN['commit']} · relay {'pons channel' if a.relay else 'off'}\n")
     batch = {'at': a.batch_at, 'hits': a.hits} if (a.batch_at or a.hits is not None) else None
-    r = asyncio.run(run_session(amount, a.seed, relay=a.relay, token=token, batch=batch, out_root=a.out_root))
-    res = r.result or {'ok': False, 'verdict': None, 'run_dir': rel(r.run_dir), 'error': 'no result was written'}
+    r = asyncio.run(run_session(amount, a.seed, relay=a.relay, token=token, batch=batch, out_root=a.out_root,
+                                buyer=buyer))
+    res = r.result
+    if not res:
+        res = {'ok': False, 'verdict': None, 'mode': r.mode, 'run_dir': rel(r.run_dir), 'error': 'no result was written'}
+        if buyer is not None:                  # whatever broke, what the signer did is reported
+            lf = r._live_facts()
+            res.update(window=a.window, tx=lf['tx'], signed=lf['signed'], sent=lf['sent'], block=lf['block'])
     if a.result_json:
         with open(a.result_json, 'w', encoding='utf-8', newline='\n') as fh:
             json.dump(res, fh, indent=1)
-    say('BUYRIG_RESULT ' + json.dumps({k: res.get(k) for k in ('ok', 'verdict', 'amount_eth', 'labrat_out',
-                                                                  'checks_passed', 'checks_total', 'simulation',
-                                                                  'targets_hit', 'misses', 'run_dir',
-                                                                  'session_proof')}))
+    keys = ('ok', 'verdict', 'mode', 'amount_eth', 'labrat_out', 'checks_passed', 'checks_total', 'simulation',
+            'targets_hit', 'misses', 'run_dir', 'session_proof')
+    if buyer is not None:
+        keys += ('window', 'tx', 'block', 'signed', 'sent')
+    say('BUYRIG_RESULT ' + json.dumps({k: res.get(k) for k in keys}))
     return 0 if res.get('ok') else 2
 
 
