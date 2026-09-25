@@ -123,14 +123,56 @@ wss://labrat-relay-production.up.railway.app/publish` (token from `LABRAT_PUBLIS
 `live/start_live_feed.ps1 [-Python <path to python.exe>]` does the same in the background, reading the token from
 `.env` and logging to `runs/publisher.log`; it idles until a run's `log.jsonl` is being written.
 
+## Rat Tiles
+
+`tiles_env.py`: our own falling-tiles rhythm game, played by the same two-network brain. The rat's screen has 4
+lanes; one black tile per note of a public-domain melody (`assets/songs.json`, identical to
+`site/assets/songs.json`: Ode to Joy, Twinkle Twinkle Little Star, Frère Jacques, the opening of Für Elise) slides
+down its lane. The rat turns its head to put the cursor on the lowest tile and presses the lever to tap it before it
+passes the bottom; each tap plays that tile's note, so the tiles in order spell the melody (a note's lane comes from
+its pitch, see `tiles_env.song_lanes`).
+
+- **Rules:** a tap on the lowest tile is a hit (+50, as a target click in the cursor task); a click anywhere else is
+  wrong (-3); a tile that passes the bottom untapped is a miss (-10, its note is skipped). A tap is a press the
+  steering network asked for: only the first click of each press counts. Each press is a trial, as each step is in
+  the launch rig: when the lever-press network hands the body back, the rat is put back in its standing start pose
+  (without that, a paw left on the lever froze the cursor and kept the lever from re-arming). A fall costs 40 and
+  the rat is put back on its feet the same way; the song goes on. Until a tile is on screen the brain rests, as during
+  the rig's holds. The steering network's head-down commands are cut while the head is pitched far down (most falls
+  in the cursor tasks were the head driven into the floor); head up and sideways stay free. A small shaping reward
+  leads the cursor to the middle and lower part of the tile, where a press that takes its time still lands on it.
+- **What the steering network sees:** the lowest tile as the lit target (the cursor task's cue), plus 9 inputs
+  appended to its observation: the tiles' speed, time until the tile passes the bottom, when it reaches and leaves
+  the cursor's row, whether the cursor is in its lane, where the next tile is, and tiles left.
+  `train.py --resume runs/final/steer.pt` widens the 21-input steering network to 30 inputs with zero weights on the
+  new ones, so it starts out playing exactly as the steering network did.
+- **Curriculum** (`--curriculum`): from one slow, tall tile at a time (0.07 screen heights a second) to a column
+  scrolling in on the song's rhythm (up to 0.5 a second, 1.2 s a beat), stepped up when the rat taps more than 75% of
+  the tiles at its level (twice as fast over 95%) and down under 45%.
+- **Training** plays 8-note phrases of random songs; the **live view** plays whole songs in turn (one episode per
+  song) and also streams the board (`tiles`, up to 10 a second) and every tile's outcome (`tile`); see
+  `live/publish_training.py`. A tile tapped counts as a hit for the buybacks, like a target hit in the steering task.
+- **Measured** (`runs/tiles_sanity`, a local sanity run: the steering network plus 1.35M steps with 6 × 6 envs, about
+  11 minutes on a 12-thread PC; its `log.jsonl` is kept): the curriculum reached the top level (0.5 screen heights a
+  second, 1.2 s a beat) after 0.53M steps. There the rat's tile rate fell to 79% (the log's low point) and was back
+  at 97% by the end. With mean actions at the top level (`tiles_env.py --eval`, 36 phrases) the steering network as
+  it started taps 1.5 of 8 tiles (every phrase ends on the third missed tile), the trained one 7.8 of 8 (99%); whole
+  songs at that level (`--full-songs`, 12 plays of Twinkle, Twinkle, 42 notes), 99%. Up to difficulty 0.6 the
+  steering network already played at 98% before any tiles training.
+
+```
+python train.py --task tiles --name tiles_rw1 --resume runs/final/steer.pt --steps 4152000 --curriculum
+python tiles_env.py --eval runs/tiles_rw1/policy_last.pt --difficulty 0.3     # mean actions, 24 phrases
+```
+
 ## Rat buybacks (built, DRY only)
 
 `live/buyback.py`: every target the rat hits in the live view (the newest saved training checkpoint, playing in its own
 simulation) adds 0.00001 ETH to a batched buyback of $LABRAT, paid only from the claimed creator fees, until the hourly,
-daily or total caps are reached; hits over the caps are counted but add nothing. Only the cursor and steering tasks
-count (they have a lit target). The code sets that rule; the rat does not understand money. It is **DRY**: it counts
-the hits from the relay and simulates each fee claim and buy with `eth_call` on the real chain. It reads no `.env`,
-signs nothing and sends nothing. The LIVE path is gated like the launcher (plus a fixed journal place and a nonce
+daily or total caps are reached; hits over the caps are counted but add nothing. Only the cursor, steering and Rat
+Tiles tasks count (they have a lit target; in Rat Tiles a hit is a tile tapped). The code sets that rule; the rat does
+not understand money. It is **DRY**: it counts the hits from the relay and simulates each fee claim and buy with
+`eth_call` on the real chain. It reads no `.env`, signs nothing and sends nothing. The LIVE path is gated like the launcher (plus a fixed journal place and a nonce
 check against the chain) and has not been used. The site panel is off (`site/buyback.js`). Notes: `live/BUYBACK.md`;
 tests: `python live/buyback_test.py`.
 

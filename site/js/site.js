@@ -155,6 +155,9 @@ const TASKS = {
             key: 'hits', label: 'Targets clicked per attempt (of 4)', fmt: v => num(v, 2) },
   steer: { name: 'Steering', what: 'point the head at lit targets, press only on target',
            key: 'hits', label: 'Targets clicked per attempt (of 4)', fmt: v => num(v, 2) },
+  // Rat Tiles: log rows carry "hits" = tiles hit per attempt (as the cursor tasks' targets)
+  tiles: { name: 'Rat Tiles', what: 'tap the falling tiles with a lever press, in time, to play a melody',
+           key: 'hits', label: 'Tiles hit per attempt', fmt: v => num(v, 1) },
 };
 
 /* ------------------------------------------------------------------ charts (canvas, one series each) */
@@ -451,6 +454,7 @@ function onStatus(st) {
   if (streaming && st.metrics && typeof st.metrics.steps === 'number') addRows([st.metrics]);
   if (streaming || mode === 'replay') hidePlaceholder();
   setMode(mode);
+  try { TILES.onStatus(st); } catch (e) { console.warn('labrat: tiles status', e); }
 }
 
 /* rows arrive as the live run's log history (live.js keeps the newest <= 300); keep a longer history in this tab by
@@ -874,24 +878,28 @@ const PONS = (function ratOnPons() {
     show();
     if (!wrap.hidden) render();
   }
-  // the 3D view could not start, or was torn down (so live.js holds no relay socket): a socket for this panel alone
-  function ownSocket() {
+  // the 3D view could not start, or was torn down (so live.js holds no relay socket): a socket of the page's own.
+  // other: {onText(m), onRelay(open)} for the page's other panels (Rat Tiles reads the training channel's texts)
+  function ownSocket(other) {
     const url = window.LABRAT_RELAY;
     if (S.own || typeof url !== 'string' || !/^wss?:\/\//i.test(url)) return;
     S.own = true;
+    const o = other && typeof other === 'object' ? other : {};
+    const call = (f, x) => { try { if (typeof f === 'function') f(x); } catch (e) { console.warn('labrat: socket hook', e); } };
     let wait = 2000;
     const open = () => {
       let ws;
       try { ws = new WebSocket(url); } catch (e) { setTimeout(open, wait); return; }
       ws.binaryType = 'arraybuffer';
-      ws.onopen = () => { wait = 2000; onRelay(true); };
+      ws.onopen = () => { wait = 2000; onRelay(true); call(o.onRelay, true); };
       ws.onmessage = ev => {
         if (typeof ev.data !== 'string') { onFrame(ev.data); return; }
         if (ev.data.length > 65536) return;
         let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-        if (m && typeof m === 'object' && m.channel === 'pons') onPons(m);
+        if (!m || typeof m !== 'object') return;
+        if (m.channel === 'pons') onPons(m); else call(o.onText, m);
       };
-      ws.onclose = () => { onRelay(false); setTimeout(open, wait); wait = Math.min(wait * 2, 30000); };
+      ws.onclose = () => { onRelay(false); call(o.onRelay, false); call(o.onText, { type: 'idle' }); setTimeout(open, wait); wait = Math.min(wait * 2, 30000); };
       ws.onerror = () => { try { ws.close(); } catch (e) { /* ignore */ } };
     };
     open();
@@ -899,6 +907,578 @@ const PONS = (function ratOnPons() {
   setInterval(() => { if (!wrap.hidden && !document.hidden) render(); }, 2000);
   render();
   return { onPons, onFrame, onRelay, onBuyback, ownSocket };
+})();
+
+/* ------------------------------------------------------------------ Rat Tiles: R-01 plays piano
+   A training run whose hello says task "tiles" also streams, on the relay socket the 3D view uses (live.js hands them
+   over through onTiles; the relay replays the newest snapshot to a late joiner):
+     {"type":"tiles","t","song","speed","lanes":4,"cursor":[x,y],"tiles":[[id,lane,y,h,state],...],"note_i"}
+         at most 10 a second; x, y and h in screen units (0..1, y down; y is a tile's centre); state "up"|"hit"|"miss";
+         speed in screen heights per second; the lanes split the screen's width equally
+     {"type":"tile","id","lane","result":"hit"|"miss"|"wrong","note_i","song"}   once per tile outcome
+   This panel draws the board a fifth of a second behind the stream (interpolating between snapshots) and keeps the score.
+   Sound: nothing is created until the viewer taps "Tap to hear R-01 play" (no AudioContext exists before that tap).
+   After it, each hit plays that tile's note of the song (assets/songs.json: public-domain melodies) with a piano-like
+   tone made in the browser (WebAudio oscillators and a short noise knock; no recordings).
+   Honesty: LIVE only when live.js reports a live training run; a test stream is labelled as one; every value from the
+   stream is checked before it is drawn or written. The home page only has the teaser (#rt-teaser). */
+const TILES = (function ratTiles() {
+  const teaser = $('#rt-teaser'), teaserSt = $('#rt-teaser-st');
+  const sec = $('#piano');
+  const E = sec ? { badge: $('#rt-badge'), badgeT: $('#rt-badge-t'), conn: $('#rt-conn'), screen: $('#rt-screen'),
+    cv: $('#rt-canvas'), emptyT: $('#rt-empty-t'), emptyS: $('#rt-empty-s'), cap: $('#rt-cap'), songK: $('#rt-song-k'),
+    song: $('#rt-song'), comp: $('#rt-composer'), pd: $('#rt-pd'), notes: $('#rt-notes'), notesT: $('#rt-notes-t'),
+    hits: $('#rt-hits'), miss: $('#rt-miss'), streak: $('#rt-streak'), best: $('#rt-best'), sub: $('#rt-sub'),
+    listen: $('#rt-listen'), mute: $('#rt-mute'), bb: $('#rt-bb') } : null;
+  const cx = E && Object.values(E).every(Boolean) && E.cv.getContext ? E.cv.getContext('2d') : null;
+  const panel = !!cx;
+
+  const DELAY = 0.2;         // s: the board plays this far behind the newest snapshot (the stream's jitter buffer)
+  const STALE_S = 4;         // no snapshot for this long: the board stops (the run may be between attempts)
+  const LATE_S = 0.6;        // a hit due longer ago than this makes no sound (a hidden tab catching up)
+  const BEAT_S = 0.6;        // one beat of a melody: how long a note's key is held (at least 0.8 s: the rat is slow)
+  const MAX_LANES = 8;
+  const fin = v => typeof v === 'number' && Number.isFinite(v);
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const sid = s => (typeof s === 'string' && /^[a-z0-9_-]{1,40}$/.test(s)) ? s : null;
+  const plain = (s, n = 120) => typeof s === 'string' ? s.replace(/[\u0000-\u001f\u007f<>]/g, '').trim().slice(0, n) : '';
+  const isTestHello = h => !!h && (h.test === true || /^\s*TEST\b/.test(String(h.label || '')));
+  const put = (el, s) => { const t = String(s == null ? '' : s); if (el.textContent !== t) el.textContent = t; };
+  const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+
+  /* ---- the melodies (assets/songs.json, the same file the training env reads) */
+  const SEMI = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+  const midiOf = s => { const m = typeof s === 'string' && /^([A-G])(#|b)?(-?\d)$/.exec(s);
+    return m ? 12 * (+m[3] + 1) + SEMI[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0) : null; };
+  const noteLabel = s => String(s).replace('#', '♯').replace(/^([A-G])b/, '$1♭');
+  const SONGS = new Map();
+  let songsAsked = false;
+  function loadSongs() {
+    if (songsAsked || !panel) return;
+    songsAsked = true;
+    fetch('assets/songs.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(j => {
+      if (!Array.isArray(j)) return;
+      for (const s of j.slice(0, 64)) {
+        if (!s || typeof s !== 'object' || !sid(s.id) || !Array.isArray(s.notes) || !s.notes.length) continue;
+        const notes = s.notes.slice(0, 2000).map(n => {
+          const midi = Array.isArray(n) ? midiOf(n[0]) : null;
+          return midi === null ? null : { midi, name: noteLabel(n[0]), beats: fin(n[1]) && n[1] > 0 ? Math.min(n[1], 8) : 1 };
+        });
+        if (notes.some(n => !n)) continue;
+        const ms = notes.map(n => n.midi);
+        SONGS.set(s.id, { id: s.id, title: plain(s.title) || s.id.replace(/_/g, ' '), composer: plain(s.composer),
+                          pd: s.public_domain === true, notes, lo: Math.min(...ms), hi: Math.max(...ms) });
+      }
+      stripKey = null;
+      renderUi();
+    }).catch(() => { /* the board still works; notes are named from the stream only */ });
+  }
+
+  /* ---- the sound: made in the browser, only after the viewer's tap */
+  const Piano = {
+    ctx: null, bus: null, master: null, wave: null, knock: null, muted: false,
+    unlock() {
+      if (this.ctx) { try { this.ctx.resume(); } catch (e) { /* ignore */ } return true; }
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return false;
+      let c;
+      try { c = new AC(); } catch (e) { return false; }
+      this.ctx = c;
+      const comp = c.createDynamicsCompressor();
+      comp.threshold.value = -16; comp.knee.value = 12; comp.ratio.value = 3.5; comp.attack.value = 0.004; comp.release.value = 0.25;
+      const master = c.createGain(); master.gain.value = 0.55;
+      master.connect(comp); comp.connect(c.destination);
+      this.master = master; this.bus = master;
+      try {   // a small room: a short, synthetic impulse response (decaying noise)
+        const len = Math.round(c.sampleRate * 1.3), ir = c.createBuffer(2, len, c.sampleRate);
+        for (let ch = 0; ch < 2; ch++) { const d = ir.getChannelData(ch); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3.4); }
+        const conv = c.createConvolver(); conv.buffer = ir;
+        const wet = c.createGain(); wet.gain.value = 0.15;
+        const bus = c.createGain();
+        bus.connect(master); bus.connect(conv); conv.connect(wet); wet.connect(master);
+        this.bus = bus;
+      } catch (e) { /* dry */ }
+      // a struck string's partials (the filter below darkens the tone as it dies away, like a piano's)
+      const H = [0, 1, 0.52, 0.32, 0.2, 0.14, 0.1, 0.07, 0.05, 0.035, 0.025, 0.018];
+      this.wave = c.createPeriodicWave(new Float32Array(H.length), Float32Array.from(H));
+      const kb = c.createBuffer(1, Math.round(c.sampleRate * 0.06), c.sampleRate), kd = kb.getChannelData(0);
+      for (let i = 0; i < kd.length; i++) kd[i] = (Math.random() * 2 - 1) * (1 - i / kd.length);
+      this.knock = kb;
+      try { c.resume(); } catch (e) { /* ignore */ }
+      return true;
+    },
+    setMuted(m) {
+      this.muted = !!m;
+      if (this.ctx) this.master.gain.setTargetAtTime(this.muted ? 0 : 0.55, this.ctx.currentTime, 0.03);
+    },
+    play(midi, beats) {
+      const c = this.ctx;
+      if (!c || this.muted || c.state === 'closed' || !fin(midi)) return;
+      const t = c.currentTime + 0.015, f = 440 * Math.pow(2, (midi - 69) / 12);
+      const hold = clamp(beats * BEAT_S, 0.8, 2.4), end = t + hold + 0.9;
+      const tau = clamp(1.5 * Math.pow(261.63 / f, 0.55), 0.3, 2.4);         // lower strings ring longer
+      const peak = 0.3 * clamp(Math.pow(261.63 / f, 0.18), 0.75, 1.2);
+      const env = c.createGain();
+      env.gain.setValueAtTime(0.0001, t);
+      env.gain.linearRampToValueAtTime(peak, t + 0.005);
+      env.gain.setTargetAtTime(peak * 0.42, t + 0.005, 0.09);                 // the quick first drop of a struck string
+      env.gain.setTargetAtTime(0.0001, t + 0.22, tau);                         // then the long decay
+      env.gain.setTargetAtTime(0.0001, t + hold, 0.11);                        // the damper, when the key is let go
+      const lp = c.createBiquadFilter();
+      lp.type = 'lowpass'; lp.Q.value = 0.4;
+      lp.frequency.setValueAtTime(Math.min(16000, f * 12), t);
+      lp.frequency.setTargetAtTime(Math.min(12000, f * 3.2), t + 0.01, 0.5);
+      lp.connect(env); env.connect(this.bus);
+      for (const cents of [-1.6, 1.6]) {                                        // two strings of one key, a hair apart
+        const o = c.createOscillator();
+        o.setPeriodicWave(this.wave); o.frequency.value = f; o.detune.value = cents;
+        o.connect(lp); o.start(t); o.stop(end);
+      }
+      const n = c.createBufferSource(), bp = c.createBiquadFilter(), ng = c.createGain();   // the hammer's soft knock
+      n.buffer = this.knock; bp.type = 'bandpass'; bp.frequency.value = clamp(f * 5, 1200, 5200); bp.Q.value = 0.9;
+      ng.gain.setValueAtTime(peak * 0.2, t); ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.045);
+      n.connect(bp); bp.connect(ng); ng.connect(this.bus); n.start(t); n.stop(t + 0.06);
+    },
+  };
+
+  /* ---- state */
+  const S = {
+    st: null,                  // {live, test, streaming, task, run} from the 3D view (or this panel's own socket)
+    open: false, wasOpen: false,
+    snaps: [], lastAt: 0, play: null, lastT: 0,
+    lanes: 4, song: null, noteI: null, firstSeen: null, speed: null,
+    results: new Map(),        // note index -> 'hit' | 'miss', this play of the song
+    tileState: new Map(), tileNote: new Map(),   // tile id -> result / note index, from the tile events of this attempt
+    hits: 0, misses: 0, wrong: 0, streak: 0, best: 0, attempt: null,
+    run: null, had: false,
+    pending: [], fx: [], trail: [],
+    sound: false, bbTiles: false,
+  };
+  let stripKey = null, bars = [], lastMode = '', raf = 0, visible = true, W = 0, H = 0, dpr = 1;
+
+  function mode(now) {
+    const st = S.st;
+    if (!st || !S.wasOpen) return 'connecting';
+    if (st.streaming && st.task === 'tiles') {
+      if (S.snaps.length && now - S.lastAt < STALE_S) return st.live ? 'live' : 'test';
+      return 'wait';
+    }
+    return 'standby';
+  }
+
+  function newRun(run) {
+    S.run = run; S.had = false;
+    S.hits = S.misses = S.wrong = S.streak = S.best = 0; S.attempt = null;
+    S.song = null; S.noteI = S.firstSeen = null; S.results.clear(); S.tileState.clear(); S.tileNote.clear();
+    S.snaps.length = 0; S.play = null; S.pending.length = 0; S.fx.length = 0; S.trail.length = 0;
+  }
+  function newPlay(song, noteI) {
+    S.song = song; S.noteI = noteI; S.firstSeen = noteI;
+    S.results.clear(); S.tileState.clear(); S.tileNote.clear();
+  }
+
+  /* st.stream (from live.js, or from onRaw): the relay's training session, null or {live, test, task, run}. It does
+     not wait for the 3D view, which only changes mode while it is on screen (this panel is usually scrolled to). */
+  function onStatus(st) {
+    if (!st || typeof st !== 'object') return;
+    const s = st.stream && typeof st.stream === 'object' ? st.stream : null;
+    const streaming = !!s || st.live === true || st.test === true || st.source === 'test';
+    const live = s ? s.live === true && s.test !== true : st.live === true;
+    const src = s || st;
+    const next = { live, test: streaming && !live, streaming,
+                   task: typeof src.task === 'string' ? src.task : null, run: typeof src.run === 'string' ? src.run : null };
+    if (streaming && next.task === 'tiles' && next.run && next.run !== S.run) newRun(next.run);
+    S.st = next;
+    teaserUpdate();
+    if (!panel) return;
+    if (streaming && next.task === 'tiles') loadSongs();
+    renderUi(); kick();
+  }
+  function onRelay(open) {
+    S.open = !!open;
+    if (S.open) S.wasOpen = true;
+    if (panel) renderUi();
+  }
+
+  /* ---- the stream */
+  function readSnap(m) {
+    if (!Array.isArray(m.tiles)) return null;
+    const lanes = Number.isInteger(m.lanes) && m.lanes >= 1 && m.lanes <= MAX_LANES ? m.lanes : 4;
+    const tiles = [];
+    for (const r of m.tiles.slice(0, 64)) {
+      if (!Array.isArray(r) || r.length < 5) continue;
+      const [id, lane, y, h, state] = r;
+      if (!Number.isInteger(id) || !Number.isInteger(lane) || lane < 0 || lane >= lanes || !fin(y) || !fin(h) ||
+          h <= 0 || h > 1 || y < -3 || y > 3) continue;
+      tiles.push({ id, lane, y, h, state: state === 'hit' || state === 'miss' ? state : 'up' });
+    }
+    const c = m.cursor;
+    return { t: fin(m.t) ? m.t : null, song: sid(m.song), lanes, tiles, byId: new Map(tiles.map(t => [t.id, t])),
+             speed: fin(m.speed) && m.speed > 0 && m.speed < 20 ? m.speed : null,
+             cursor: Array.isArray(c) && fin(c[0]) && fin(c[1]) && c[0] >= 0 && c[1] >= 0 ? [clamp(c[0], 0, 1), clamp(c[1], 0, 1)] : null,
+             noteI: Number.isInteger(m.note_i) && m.note_i >= 0 && m.note_i < 100000 ? m.note_i : null };
+  }
+  function onTiles(m) {
+    if (!panel || !m || typeof m !== 'object') return;
+    const now = performance.now() / 1000;
+    if (m.type === 'tiles') {
+      const s = readSnap(m);
+      if (!s) return;
+      const prev = S.snaps[S.snaps.length - 1], prevNote = S.noteI, prevSong = S.song;
+      let dt = prev && s.t !== null && prev.t !== null ? s.t - prev.t : NaN;     // sim time between snapshots
+      if (!(dt > 0 && dt < 1.5)) dt = prev ? clamp(now - prev.at, 0.02, 0.5) : 0; // a new attempt (its clock restarts)
+      s.st = prev ? prev.st + dt : 0; s.at = now;
+      S.snaps.push(s);
+      if (S.snaps.length > 40) S.snaps.splice(0, S.snaps.length - 40);
+      S.lastAt = now; S.had = true; S.lanes = s.lanes;
+      if (s.speed) S.speed = s.speed;
+      if (s.song && (s.song !== S.song || (s.noteI !== null && S.noteI !== null && s.noteI < S.noteI))) newPlay(s.song, s.noteI);
+      if (s.noteI !== null) { S.noteI = s.noteI; if (S.firstSeen === null) S.firstSeen = s.noteI; }
+      loadSongs();
+      kick();
+      if ((lastMode !== 'live' && lastMode !== 'test') || S.noteI !== prevNote || S.song !== prevSong) renderUi();
+      return;
+    }
+    if (m.type !== 'tile' || !['hit', 'miss', 'wrong'].includes(m.result)) return;
+    const ev = { result: m.result, id: Number.isInteger(m.id) ? m.id : null, lane: Number.isInteger(m.lane) && m.lane >= 0 && m.lane < MAX_LANES ? m.lane : null,
+                 noteI: Number.isInteger(m.note_i) && m.note_i >= 0 && m.note_i < 100000 ? m.note_i : null, song: sid(m.song) };
+    S.pending.push({ due: now + DELAY, kind: 'tile', ev });
+    kick();
+  }
+  function onEpisode(m) {
+    if (!panel || !m || typeof m !== 'object' || !(S.st && S.st.task === 'tiles')) return;
+    S.pending.push({ due: performance.now() / 1000 + DELAY, kind: 'episode',
+                     ev: { hits: Number.isInteger(m.hits) && m.hits >= 0 ? m.hits : null, n: Number.isInteger(m.n) ? m.n : null } });
+  }
+
+  /* ---- playback: the playhead runs on the wall clock, DELAY behind the newest snapshot */
+  function advance(now) {
+    const dt = S.lastT ? clamp(now - S.lastT, 0, 0.25) : 0;
+    S.lastT = now;
+    const N = S.snaps[S.snaps.length - 1];
+    if (!N) return;
+    const target = N.st + (now - N.at) - DELAY;
+    if (S.play === null) { S.play = target; return; }
+    S.play += dt;
+    const err = target - S.play;
+    if (Math.abs(err) > 0.5) S.play = target; else S.play += err * Math.min(1, dt * 2);
+  }
+  function sample() {
+    const A = S.snaps;
+    if (!A.length || S.play === null) return null;
+    const p = S.play;
+    let i = A.length - 1;
+    while (i > 0 && A[i].st > p) i--;
+    const a = A[i], b = A[i + 1];
+    if (!b || p < a.st) {                       // before the first or after the newest snapshot: slide on at its speed
+      const x = clamp(p - a.st, -0.3, 0.4), sp = a.speed || 0;
+      return { tiles: a.tiles.map(t => ({ ...t, y: t.y + sp * x })), cursor: a.cursor, lanes: a.lanes };
+    }
+    const span = Math.max(1e-6, b.st - a.st), al = clamp((p - a.st) / span, 0, 1), near = al < 0.5 ? a : b;
+    const tiles = b.tiles.map(t => {
+      const o = a.byId.get(t.id);
+      const y = o ? o.y + (t.y - o.y) * al : t.y - (b.speed || 0) * (1 - al) * span;
+      return { ...t, y, state: (near.byId.get(t.id) || t).state };
+    });
+    for (const t of a.tiles) if (!b.byId.has(t.id) && al < 0.5) tiles.push({ ...t, y: t.y + (a.speed || 0) * al * span });
+    const ca = a.cursor, cb = b.cursor;
+    const cursor = ca && cb ? [ca[0] + (cb[0] - ca[0]) * al, ca[1] + (cb[1] - ca[1]) * al] : near.cursor;
+    return { tiles, cursor, lanes: b.lanes };
+  }
+  function activeTile(smp) {
+    let best = null;
+    for (const t of smp.tiles) {
+      const st = S.tileState.get(t.id) || t.state;
+      if (st === 'up' && t.y - t.h / 2 < 1 && (!best || t.y > best.y)) best = t;
+    }
+    return best;
+  }
+
+  /* ---- tile events, applied when the board reaches them */
+  function pump(now) {
+    advance(now);
+    let changed = false;
+    while (S.pending.length && S.pending[0].due <= now) {
+      const p = S.pending.shift();
+      changed = true;
+      if (p.kind === 'episode') {
+        S.attempt = p.ev; S.tileState.clear(); S.tileNote.clear();
+        continue;
+      }
+      const ev = p.ev, late = now - p.due > LATE_S;
+      if (ev.song && ev.song !== S.song) newPlay(ev.song, ev.noteI);
+      const smp = sample(), L = S.lanes;
+      const tile = smp && ev.id !== null ? smp.tiles.find(t => t.id === ev.id) : null;
+      const lane = tile ? tile.lane : ev.lane !== null ? Math.min(ev.lane, L - 1) : 0;
+      const cur = smp && smp.cursor;
+      if (ev.result === 'hit') {
+        S.hits++; S.streak++; S.best = Math.max(S.best, S.streak);
+        if (ev.noteI !== null) S.results.set(ev.noteI, 'hit');
+        if (ev.id !== null) { S.tileState.set(ev.id, 'hit'); if (ev.noteI !== null) S.tileNote.set(ev.id, ev.noteI); }
+        const song = SONGS.get(S.song), note = song && ev.noteI !== null ? song.notes[ev.noteI] : null;
+        if (note && S.sound && !late) Piano.play(note.midi, note.beats);
+        S.fx.push({ kind: 'hit', at: now, id: ev.id, lane, y: tile ? tile.y : cur ? cur[1] : 0.7, label: note ? note.name : '' });
+      } else if (ev.result === 'miss') {
+        S.misses++; S.streak = 0;
+        if (ev.noteI !== null) S.results.set(ev.noteI, 'miss');
+        if (ev.id !== null) S.tileState.set(ev.id, 'miss');
+        S.fx.push({ kind: 'miss', at: now, lane });
+      } else {
+        S.wrong++; S.streak = 0;
+        S.fx.push({ kind: 'wrong', at: now, x: cur ? cur[0] : (lane + 0.5) / L, y: cur ? cur[1] : 0.8 });
+      }
+    }
+    if (S.fx.length) S.fx = S.fx.filter(f => now - f.at < 1.2);
+    if (changed) renderUi();
+  }
+
+  /* ---- drawing */
+  const INK = '#0c0818', BOARD = '#ebe5f5', GOLD = '#F5AC29', MAG = '#D60C94';
+  function rrect(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    cx.beginPath(); cx.moveTo(x + r, y); cx.arcTo(x + w, y, x + w, y + h, r); cx.arcTo(x + w, y + h, x, y + h, r);
+    cx.arcTo(x, y + h, x, y, r); cx.arcTo(x, y, x + w, y, r); cx.closePath();
+  }
+  // between sessions: a dark, empty board (lanes and faint outlines only) under the standby message
+  function drawIdle() {
+    cx.fillStyle = '#0b0519'; cx.fillRect(0, 0, W, H);
+    const L = S.lanes, lw = W / L;
+    cx.strokeStyle = 'rgba(136,8,181,.32)'; cx.lineWidth = 1;
+    for (let k = 1; k < L; k++) { const x = Math.round(k * lw) + 0.5; cx.beginPath(); cx.moveTo(x, 0); cx.lineTo(x, H); cx.stroke(); }
+    cx.strokeStyle = 'rgba(210,192,240,.12)'; cx.fillStyle = 'rgba(210,192,240,.035)'; cx.lineWidth = 1;
+    [[0, 0.16], [2, 0.44], [1, 0.72], [3, 1.0]].forEach(([lane, y]) => {
+      if (lane >= L) return;
+      rrect(lane * lw + lw * 0.05, (y - 0.12) * H, lw * 0.9, 0.24 * H, 4); cx.fill(); cx.stroke();
+    });
+    cx.fillStyle = 'rgba(234,53,96,.3)'; cx.fillRect(0, H - 3, W, 3);
+  }
+  function draw(now, m) {
+    cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (m !== 'live' && m !== 'test') { S.trail.length = 0; drawIdle(); return; }
+    cx.fillStyle = BOARD; cx.fillRect(0, 0, W, H);
+    const smp = S.snaps.length ? sample() : null;
+    const L = smp ? smp.lanes : S.lanes, lw = W / L, pad = Math.max(2, lw * 0.035);
+    const act = smp && (m === 'live' || m === 'test') ? activeTile(smp) : null;
+    if (act) { cx.fillStyle = 'rgba(214,12,148,.07)'; cx.fillRect(act.lane * lw, 0, lw, H); }
+    cx.strokeStyle = 'rgba(75,4,196,.18)'; cx.lineWidth = 1;
+    for (let k = 1; k < L; k++) { const x = Math.round(k * lw) + 0.5; cx.beginPath(); cx.moveTo(x, 0); cx.lineTo(x, H); cx.stroke(); }
+    cx.fillStyle = 'rgba(234,53,96,.55)'; cx.fillRect(0, H - 3, W, 3);           // the edge a tile must not slide past
+    const fs = Math.max(10, Math.min(20, lw * 0.16));
+    if (smp) {
+      for (const t of smp.tiles) {
+        const x0 = t.lane * lw + pad, w = lw - 2 * pad, y0 = (t.y - t.h / 2) * H, h = t.h * H;
+        if (y0 > H || y0 + h < 0) continue;
+        const st = S.tileState.get(t.id) || t.state;
+        rrect(x0, y0, w, h, 4);
+        if (st === 'hit') {
+          cx.fillStyle = 'rgba(245,172,41,.24)'; cx.fill();
+          cx.strokeStyle = 'rgba(232,110,61,.5)'; cx.lineWidth = 1.5; cx.stroke();
+          const ni = S.tileNote.get(t.id), song = SONGS.get(S.song), note = song && ni !== undefined ? song.notes[ni] : null;
+          if (note) {
+            cx.fillStyle = '#9a4a0c'; cx.font = '600 ' + fs + 'px "JetBrains Mono", ui-monospace, monospace';
+            cx.textAlign = 'center'; cx.textBaseline = 'middle'; cx.fillText(note.name, x0 + w / 2, y0 + h / 2);
+          }
+        } else if (st === 'miss') {
+          cx.fillStyle = 'rgba(234,53,96,.38)'; cx.fill();
+        } else {
+          cx.fillStyle = INK; cx.fill();
+          if (t === act) { cx.strokeStyle = GOLD; cx.lineWidth = 2.5; rrect(x0 + 1.25, y0 + 1.25, w - 2.5, h - 2.5, 3.5); cx.stroke(); }
+        }
+      }
+    }
+    // effects
+    for (const f of S.fx) {
+      const age = now - f.at;
+      if (age < 0) continue;
+      if (f.kind === 'hit') {
+        const x = (f.lane + 0.5) * lw, y = f.y * H, k = age / 0.55;
+        if (k < 1) {
+          cx.strokeStyle = 'rgba(245,172,41,' + (0.9 * (1 - k)).toFixed(3) + ')'; cx.lineWidth = 3 * (1 - k) + 1;
+          cx.beginPath(); cx.arc(x, y, lw * (0.18 + 0.42 * k), 0, 7); cx.stroke();
+        }
+        if (f.label && age < 1.1) {
+          cx.fillStyle = 'rgba(154,74,12,' + (1 - age / 1.1).toFixed(3) + ')';
+          cx.font = '700 ' + Math.round(fs * 1.25) + 'px "JetBrains Mono", ui-monospace, monospace';
+          cx.textAlign = 'center'; cx.textBaseline = 'middle'; cx.fillText(f.label, x, y - H * 0.08 - age * H * 0.12);
+        }
+      } else if (f.kind === 'miss') {
+        const k = age / 0.7;
+        if (k < 1) {
+          const g = cx.createLinearGradient(0, H * 0.7, 0, H);
+          g.addColorStop(0, 'rgba(234,53,96,0)'); g.addColorStop(1, 'rgba(234,53,96,' + (0.55 * (1 - k)).toFixed(3) + ')');
+          cx.fillStyle = g; cx.fillRect(f.lane * lw, H * 0.7, lw, H * 0.3);
+        }
+      } else if (f.kind === 'wrong') {
+        const k = age / 0.6;
+        if (k < 1) {
+          const x = f.x * W, y = f.y * H, r = lw * (0.08 + 0.2 * k);
+          cx.strokeStyle = 'rgba(234,53,96,' + (1 - k).toFixed(3) + ')'; cx.lineWidth = 2.5;
+          cx.beginPath(); cx.arc(x, y, r, 0, 7); cx.stroke();
+          const s = lw * 0.06;
+          cx.beginPath(); cx.moveTo(x - s, y - s); cx.lineTo(x + s, y + s); cx.moveTo(x + s, y - s); cx.lineTo(x - s, y + s); cx.stroke();
+        }
+      }
+    }
+    // the rat's cursor (its head's direction) and a short trail
+    const c = smp && (m === 'live' || m === 'test') ? smp.cursor : null;
+    if (c) {
+      const TR = 0.3;                           // s of trail; a jump (a new attempt, a gap in the stream) starts it over
+      const lastPt = S.trail[S.trail.length - 1];
+      if (lastPt && Math.hypot(c[0] - lastPt[0], c[1] - lastPt[1]) > 0.12) S.trail.length = 0;
+      S.trail.push([c[0], c[1], now]);
+      while (S.trail.length && now - S.trail[0][2] > TR) S.trail.shift();
+      for (let i = 1; i < S.trail.length; i++) {
+        const a = S.trail[i - 1], b = S.trail[i], k = 1 - (now - b[2]) / TR;
+        cx.strokeStyle = 'rgba(214,12,148,' + (0.35 * k).toFixed(3) + ')'; cx.lineWidth = 2.5 * k + 0.5;
+        cx.beginPath(); cx.moveTo(a[0] * W, a[1] * H); cx.lineTo(b[0] * W, b[1] * H); cx.stroke();
+      }
+      const x = c[0] * W, y = c[1] * H, r = Math.max(7, Math.min(14, W * 0.012));
+      cx.lineWidth = 5; cx.strokeStyle = 'rgba(255,255,255,.9)'; cx.beginPath(); cx.arc(x, y, r, 0, 7); cx.stroke();
+      cx.lineWidth = 2.5; cx.strokeStyle = MAG; cx.beginPath(); cx.arc(x, y, r, 0, 7); cx.stroke();
+      cx.fillStyle = MAG; cx.beginPath(); cx.arc(x, y, 2.6, 0, 7); cx.fill();
+    } else S.trail.length = 0;
+  }
+  function size() {
+    const r = E.screen.getBoundingClientRect();
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    W = Math.max(1, r.width); H = Math.max(1, r.height);
+    E.cv.width = Math.round(W * dpr); E.cv.height = Math.round(H * dpr);
+    draw(performance.now() / 1000, mode(performance.now() / 1000));
+  }
+  function frame(ms) {
+    raf = 0;
+    const now = ms / 1000, m = mode(now);
+    pump(now);
+    draw(now, m);
+    if (m !== lastMode) renderUi();
+    if ((m === 'live' || m === 'test' || S.fx.length || S.pending.length) && visible && !document.hidden) raf = requestAnimationFrame(frame);
+  }
+  function kick() {
+    if (panel && !raf && visible && !document.hidden) raf = requestAnimationFrame(frame);
+  }
+
+  /* ---- the text around the board */
+  function renderUi() {
+    if (!panel) return;
+    const now = performance.now() / 1000, m = mode(now);
+    lastMode = m;
+    sec.dataset.state = m;
+    const live = S.st && S.st.live;
+    const B = { connecting: ['conn', 'CONNECTING'], live: ['live', 'LIVE TRAINING'], test: ['test', 'TEST STREAM'],
+                wait: live ? ['live', 'LIVE TRAINING'] : ['test', 'TEST STREAM'], standby: ['off static', 'STANDBY'] }[m];
+    E.badge.className = 'badge ' + B[0]; put(E.badgeT, B[1]);
+    const other = S.st && S.st.streaming && S.st.task !== 'tiles' ? (TASKS[S.st.task] ? TASKS[S.st.task].name : 'another task') : null;
+    put(E.conn, m === 'live' || m === 'test' ? 'playing now' : m === 'wait' ? 'starting'
+      : other ? 'training on another task' : !S.open && S.wasOpen ? 'reconnecting' : '');
+    let t = '', s = '';
+    if (m === 'connecting') t = 'Connecting to the lab';
+    else if (m === 'wait') { t = 'R-01 is about to play'; s = 'The first tiles appear in a moment.'; }
+    else if (m === 'standby') {
+      t = 'R-01 isn’t playing right now';
+      s = other ? 'It is training on another task (' + other + '). Rat Tiles sessions appear here while they stream.'
+        : 'The next session will appear here.';
+      if (S.had && S.hits + S.misses > 0) s = 'Last session: ' + plural(S.hits, 'tile', 'tiles') + ' hit, ' + S.misses + ' missed. ' + s;
+    }
+    put(E.emptyT, t); put(E.emptyS, s);
+    put(E.cap, m === 'live' ? 'Live training: the newest saved checkpoint of run ' + (S.st.run || '') + ', playing Rat Tiles in its own simulation. The cursor is where R-01’s head points; a lever press taps.'
+      : m === 'test' ? 'Test stream, not a live training run. The cursor is where R-01’s head points; a lever press taps.' : '');
+
+    // the melody
+    const song = S.song ? SONGS.get(S.song) : null;
+    const playing = m === 'live' || m === 'test';
+    if (song || S.song) {
+      put(E.songK, playing ? 'Now playing' : 'Last melody');
+      put(E.song, song ? song.title : S.song.replace(/_/g, ' '));
+      put(E.comp, song ? song.composer : ''); E.pd.hidden = !(song && song.pd);
+    } else {
+      put(E.songK, 'Melodies');
+      put(E.song, 'Public-domain tunes');
+      put(E.comp, SONGS.size ? Array.from(SONGS.values()).map(x => x.title).join(' · ') : ''); E.pd.hidden = true;
+    }
+    const key = song ? song.id + ':' + song.notes.length : '';
+    if (key !== stripKey) {
+      stripKey = key;
+      E.notes.innerHTML = song ? song.notes.map(n => '<i style="--h:' + ((n.midi - song.lo) / Math.max(1, song.hi - song.lo)).toFixed(3) + '"></i>').join('') : '';
+      bars = Array.from(E.notes.children);
+    }
+    let nh = 0, nm = 0;
+    bars.forEach((b, i) => {
+      const r = S.results.get(i);
+      if (r === 'hit') nh++; else if (r === 'miss') nm++;
+      const cls = r === 'hit' ? 'hit' : r === 'miss' ? 'miss' : playing && i === S.noteI ? 'now'
+        : S.firstSeen !== null && i < S.firstSeen ? 'pre' : '';
+      if (b.className !== cls) b.className = cls;
+    });
+    if (song) {
+      const cur = S.noteI !== null && S.noteI < song.notes.length ? S.noteI : null;
+      put(E.notesT, (playing && cur !== null ? 'Note ' + (cur + 1) + ' of ' + song.notes.length + ' (' + song.notes[cur].name + ') · ' : '') +
+        nh + ' played, ' + nm + ' missed');
+    } else put(E.notesT, '');
+
+    // the score
+    const any = S.had || S.hits + S.misses + S.wrong > 0;
+    put(E.hits, any ? S.hits : '—'); put(E.miss, any ? S.misses : '—');
+    put(E.streak, any ? S.streak : '—'); put(E.best, any ? S.best : '—');
+    const sub = [];
+    if (S.speed && (playing || m === 'wait')) sub.push('A tile crosses the screen in ' + (1 / S.speed).toFixed(1) + ' s');
+    if (S.wrong) sub.push(plural(S.wrong, 'press', 'presses') + ' off the tile');
+    if (S.attempt && S.attempt.hits !== null) sub.push('Last attempt: ' + plural(S.attempt.hits, 'tile', 'tiles') + ' hit');
+    put(E.sub, sub.join(' · '));
+
+    // sound
+    E.listen.hidden = S.sound; E.mute.hidden = !S.sound;
+    E.mute.setAttribute('aria-pressed', String(Piano.muted));
+    put(E.mute.lastElementChild, Piano.muted ? 'Muted' : 'Sound on');
+    E.bb.hidden = !S.bbTiles;
+  }
+
+  function teaserUpdate() {
+    if (!teaser) return;
+    const st = S.st, on = !!(st && st.streaming && st.task === 'tiles');
+    const state = on ? (st.live ? 'live' : 'test') : 'idle';
+    if (teaser.dataset.state !== state) teaser.dataset.state = state;
+    put(teaserSt, state === 'live' ? 'Playing now' : state === 'test' ? 'Test stream' : 'New');
+  }
+
+  /* the panel's own socket (when the 3D view cannot start): the training channel's messages, read as live.js would */
+  let rawHello = null;
+  function onRaw(m) {
+    if (!m || typeof m !== 'object') return;
+    switch (m.type) {
+      case 'state': rawHello = m.live === true && m.hello && typeof m.hello === 'object' ? m.hello : null; break;
+      case 'hello': rawHello = m; break;
+      case 'bye': case 'idle': rawHello = null; break;
+      case 'tiles': case 'tile': onTiles(m); return;
+      case 'episode': onEpisode(m); return;
+      default: return;
+    }
+    const h = rawHello;
+    onStatus({ stream: h ? { live: !isTestHello(h), test: isTestHello(h), task: h.task, run: h.run } : null });
+  }
+  function onBuyback(j) {
+    const on = !!(j && Array.isArray(j.tasks) && j.tasks.includes('tiles'));
+    if (on !== S.bbTiles) { S.bbTiles = on; if (panel) renderUi(); }
+  }
+
+  if (panel) {
+    E.listen.addEventListener('click', () => {
+      if (Piano.unlock()) { S.sound = true; Piano.setMuted(false); }
+      else { put(E.listen, 'Sound is not available in this browser'); E.listen.disabled = true; }
+      renderUi();
+      if (S.sound) E.mute.focus();
+    });
+    E.mute.addEventListener('click', () => { Piano.setMuted(!Piano.muted); renderUi(); });
+    if (window.ResizeObserver) new ResizeObserver(size).observe(E.screen); else addEventListener('resize', size);
+    if ('IntersectionObserver' in window) new IntersectionObserver(es => { visible = es[0].isIntersecting; kick(); }).observe(E.screen);
+    document.addEventListener('visibilitychange', kick);
+    // tile events and sound keep going while the board is scrolled away (the frame loop only runs while it is visible)
+    setInterval(() => { const now = performance.now() / 1000; pump(now); if (mode(now) !== lastMode) { renderUi(); draw(now, mode(now)); } }, 200);
+    loadSongs();
+    size();
+    renderUi();
+  }
+  teaserUpdate();
+  return { onStatus, onTiles, onEpisode, onRelay, onRaw, onBuyback };
 })();
 
 /* ------------------------------------------------------------------ rat buybacks (buyback.js)
@@ -1002,6 +1582,7 @@ const PONS = (function ratOnPons() {
       if (!j || typeof j !== 'object') throw new Error('bad status');
       render(j);
       PONS.onBuyback(j);                 // the rat-on-pons panel's "next session" line
+      TILES.onBuyback(j);                // Rat Tiles says its hits count only if the engine counts the tiles task
     } catch (e) {
       E.conn.textContent = 'status unavailable'; E.conn.className = 'bb-conn off';
     }
@@ -1015,12 +1596,15 @@ const PONS = (function ratOnPons() {
 setMode('connecting');
 recordedReady.then(() => renderHUD());
 
+// the page's own relay socket, for when the 3D view (and so its socket) is not there: the pons panel and Rat Tiles
+const fallbackSocket = () => PONS.ownSocket({ onText: m => TILES.onRaw(m), onRelay: o => TILES.onRelay(o) });
+
 (async function mountViewer() {
   const el = $('#live-view');
   let mod = null;
   try { mod = await import('./live.js'); }
   catch (e) { console.warn('labrat: live viewer unavailable -', e && e.message ? e.message : e); }
-  if (!mod || typeof mod.mountLive !== 'function') { LIVE.failed = true; setMode('offline'); PONS.ownSocket(); return; }
+  if (!mod || typeof mod.mountLive !== 'function') { LIVE.failed = true; setMode('offline'); fallbackSocket(); return; }
   try {
     // mountLive never throws: it resolves to a handle after the first frame, or to null (and draws its own
     // fallback line) when the 3D view cannot start
@@ -1033,14 +1617,17 @@ recordedReady.then(() => renderHUD());
       // the relay's pons channel rides on the same socket; live.js ignores it and hands it to the pons panel
       onPons: m => PONS.onPons(m),
       onPonsFrame: b => PONS.onFrame(b),
-      onRelay: (open, gone) => { PONS.onRelay(open); if (gone) PONS.ownSocket(); },
+      // Rat Tiles (a training run with task "tiles"): board snapshots and tile outcomes, and each attempt's result
+      onTiles: m => { try { TILES.onTiles(m); } catch (e) { console.warn('labrat: onTiles', e); } },
+      onEpisode: m => { try { TILES.onEpisode(m); } catch (e) { console.warn('labrat: onEpisode', e); } },
+      onRelay: (open, gone) => { PONS.onRelay(open); TILES.onRelay(open); if (gone) fallbackSocket(); },
     });
     // null: the 3D view could not start here; the dot-rat placeholder stays up with the offline message
-    if (!handle) { LIVE.failed = true; setMode('offline'); PONS.ownSocket(); return; }
+    if (!handle) { LIVE.failed = true; setMode('offline'); fallbackSocket(); return; }
     // if the viewer draws but never reports a status, do not leave the placeholder over it
     setTimeout(() => { if (!LIVE.phGone && !LIVE.failed) hidePlaceholder(); }, 5000);
   } catch (e) {
     console.warn('labrat: live viewer failed to start -', e && e.message ? e.message : e);
-    LIVE.failed = true; setMode('offline'); PONS.ownSocket();
+    LIVE.failed = true; setMode('offline'); fallbackSocket();
   }
 })();

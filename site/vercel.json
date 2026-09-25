@@ -1,0 +1,20 @@
+{
+  "redirects": [
+    {
+      "source": "/trial",
+      "destination": "/buyback",
+      "permanent": true
+    },
+    {
+      "source": "/trial/",
+      "destination": "/buyback",
+      "permanent": true
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/buyback",
+      "destination": "/buyback/index.html"
+    }
+  ]
+}

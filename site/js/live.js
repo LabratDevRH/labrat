@@ -19,7 +19,9 @@
      import {mountLive} from './js/live.js';
      const handle = await mountLive(document.getElementById('live'), {
        onStatus: s => ...,      // {live, label, task, run, steps, source: 'training'|'test'|'replay'|'none', test?, waiting?,
-                                //  loading? (source 'none' while the replay clip is still downloading)}
+                                //  loading? (source 'none' while the replay clip is still downloading),
+                                //  stream: the relay's training session whatever this view shows, null or
+                                //  {live, test, task, run} (this view only changes mode while it is on screen)}
        onMetrics: (rows, info) => ...,   // rows: last <= 300 log.jsonl rows of the streamed run; info {live, row?}
        onEpisode: msg => ...,   // {type:'episode', n, presses, hits, misses, fell}
        onTarget: t => ...,      // replay: {n, total, label, lit, done}
@@ -27,6 +29,9 @@
        onPons: m => ...,        // the relay's pons channel, text: {channel:'pons', type:'pons_hello'|'pons_step'|
                                 //  'pons_result'|'pons_bye'|'pons_state'|'pons_idle', ...}; never used by this view
        onPonsFrame: buf => ..., // the pons channel's frames: ArrayBuffer b"PJPG" + a JPEG; never used by this view
+       onTiles: m => ...,       // Rat Tiles (a run whose hello has task "tiles"): {type:'tiles', t, song, speed, lanes,
+                                //  cursor, tiles, note_i} board snapshots and {type:'tile', id, lane, result, note_i, song}
+                                //  outcomes; this view only shows the active tile (the frame's target fields)
        onRelay: (open, gone) => ..., // the relay socket opened (true) or closed (false); gone=true: this view was torn
                                 //  down and will not reconnect (anything riding on its socket needs its own)
      });
@@ -921,9 +926,19 @@ async function mount(el, opts, st) {
     return {live: false, source: 'none', label: 'STANDBY · waiting for a training run', task: null, run: null,
       steps: null, waiting: LV.relayLive, loading: replayLoading || replay !== null};   // (loaded: switching to it)
   }
+  // the relay's view of the training channel, whatever this view is drawing: null, or {live, test, task, run} while a
+  // publisher's session is on (live: a training run, test: a test stream). This view switches modes only while it is
+  // on screen; the page's other panels (Rat Tiles) must not wait for that.
+  function streamInfo() {
+    const h = LV.relayLive && LV.hello && typeof LV.hello === 'object' ? LV.hello : null;
+    if (!h) return null;
+    const test = isTestHello(h);
+    return {live: !test, test, task: typeof h.task === 'string' ? h.task : null, run: typeof h.run === 'string' ? h.run : null};
+  }
   let lastStatusKey = '';
   function pushStatus(force) {
     const s = status();
+    s.stream = streamInfo();
     const k = JSON.stringify(s);
     if (!force && k === lastStatusKey) return;
     lastStatusKey = k;
@@ -977,6 +992,9 @@ async function mount(el, opts, st) {
       // pons channel messages ("channel":"pons": pons_hello / step / result / bye / state / idle) never touch the
       // training view (a pons idle must not end a live training stream); the page's pons panel gets them
       if (m.channel === 'pons' || (typeof m.type === 'string' && m.type.startsWith('pons_'))) { safe(opts.onPons, m); return; }
+      // Rat Tiles snapshots and tile outcomes: for the page's Rat Tiles panel (this view draws the active tile from the
+      // frames' target fields)
+      if (m.type === 'tiles' || m.type === 'tile') { safe(opts.onTiles, m); return; }
       onText(m);
     };
     ws.onclose = () => {
@@ -1291,6 +1309,7 @@ async function mount(el, opts, st) {
     } else if (mode === 'live') {
       right = `EPISODE ${Number.isFinite(cur[2]) ? cur[2] | 0 : '–'}`;
       if (screenMode === 1) note = `lever task · presses this episode: ${presses}`;
+      else if (task === 'tiles') { note = 'Rat Tiles · cursor = head direction · tap = lever press'; label = hasTgt ? 'tile' : ''; }
       else { note = 'cursor = head direction · click = lever press'; label = hasTgt ? 'target' : ''; }
     } else note = 'waiting for data';
     const key = [mode, task, screenMode, label, right, note, evTag, evText, hasTgt ? scrU.uTgt.value.toArray().map(v => v.toFixed(3)).join() : '', fontsReady].join('|');
