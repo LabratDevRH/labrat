@@ -317,6 +317,56 @@ p{margin:0 0 14px}
 .bb-note{margin:10px 0 0;font-size:12.5px;line-height:1.5;color:var(--muted)}
 @media (max-width:760px){.bb-kv{grid-template-columns:repeat(2,minmax(0,1fr))}.bb-conn{margin-left:0}}
 
+/* the rat on pons (hidden until the relay's pons channel has had a session) */
+#rp-wrap[hidden]{display:none}
+.rp{margin-top:18px;border:1px solid var(--line);border-radius:10px;padding:14px 18px 16px;min-width:0;
+  background:linear-gradient(180deg,rgba(18,6,42,.8),rgba(6,2,16,.88))}
+.rp .badge{font-size:10.5px;padding:4px 9px 4px 8px;gap:7px;letter-spacing:.14em}
+.rp .badge i{width:7px;height:7px}
+.rp-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,330px);gap:16px;align-items:start;min-width:0}
+.rp-screen{position:relative;margin:0;border:1px solid var(--line-soft);border-radius:6px;overflow:hidden;background:#0b0a10;
+  aspect-ratio:1280/900;min-width:0}
+.rp-screen canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0;transition:opacity .35s,filter .35s}
+.rp-screen.has-frame canvas{opacity:1}
+.rp-screen.idle canvas{filter:saturate(.6) brightness(.7)}
+.rp-empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;
+  padding:16px;text-align:center;background:radial-gradient(closest-side,rgba(75,4,196,.18),transparent)}
+.rp-screen.has-frame .rp-empty{display:none}
+.rp-empty b{font-size:15px;font-weight:600;color:var(--ink)}
+.rp-empty span{font-family:var(--mono);font-size:12px;color:var(--muted)}
+.rp-cap{position:absolute;left:10px;bottom:10px;max-width:calc(100% - 20px);font-family:var(--mono);font-size:11.5px;line-height:1.4;
+  color:var(--ink);background:rgba(8,3,20,.86);border:1px solid var(--line);border-radius:4px;padding:5px 9px}
+.rp-side{display:flex;flex-direction:column;gap:12px;min-width:0}
+.rp-k{margin:0;font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+.rp-target{margin:0;font-size:18px;font-weight:600;line-height:1.35;color:var(--ink);overflow-wrap:anywhere}
+.rp-target.res{color:var(--goldy)}
+.rp-phase{margin:4px 0 0;font-family:var(--mono);font-size:12.5px;line-height:1.45;color:var(--dim)}
+.rp-phase:empty{display:none}
+.rp-steps{list-style:none;margin:0;padding:0;display:grid;gap:5px;counter-reset:rp}
+.rp-steps:empty{display:none}
+.rp-steps li{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:12px;line-height:1.3;color:var(--muted);
+  counter-increment:rp;min-width:0}
+.rp-steps li::before{content:counter(rp);flex:0 0 auto;width:20px;height:20px;border-radius:50%;display:inline-grid;place-items:center;
+  font-size:10.5px;border:1px solid var(--line-soft);color:var(--faint)}
+.rp-steps li.done{color:var(--dim)}
+.rp-steps li.done::before{content:"\2713";background:rgba(136,8,181,.38);border-color:var(--violet);color:var(--ink)}
+.rp-steps li.on{color:var(--ink);font-weight:600}
+.rp-steps li.on::before{background:var(--goldy);border-color:var(--goldy);color:#000}
+.rp-steps li.skip{color:var(--faint)}
+.rp-steps li.skip::before{content:"\2013";background:transparent;border-color:var(--line-soft);color:var(--faint)}
+.rp-steps em{font-style:normal;color:var(--faint);font-weight:400}
+.rp-kv{grid-template-columns:repeat(2,minmax(0,1fr))}
+.rp-kv dd{font-size:13.5px;line-height:1.35}
+.rp-next{margin:0;font-family:var(--mono);font-size:12.5px;line-height:1.45;color:var(--goldy)}
+.rp-note{margin:0}
+/* phones and narrow windows: the side column sits below the picture, so the current step rides on the picture too */
+.rp-now{display:none}
+@media (max-width:900px){.rp-body{grid-template-columns:minmax(0,1fr)}
+  .rp-cap{left:8px;bottom:8px;max-width:calc(100% - 16px);font-size:10.5px;padding:3px 7px}
+  .rp-now:not([hidden]){display:block;position:absolute;left:8px;top:8px;max-width:calc(100% - 16px);font-family:var(--mono);
+    font-size:11px;font-weight:600;line-height:1.35;color:#000;background:var(--goldy);border-radius:3px;padding:3px 7px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+
 /* facts band */
 .facts{list-style:none;margin:18px 0 0;padding:0;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));
   border:1px solid var(--line-soft);border-radius:var(--r);overflow:hidden;background:rgba(8,3,20,.55)}

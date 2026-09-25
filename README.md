@@ -96,7 +96,10 @@ Live at **https://lab-rat.net** (site on Vercel, relay on Railway at `labrat-rel
   there is no clip, and switches to **LIVE TRAINING** only while a training run is being streamed. The coin card
   reads `site/coin.js`: `window.LABRAT_COIN = null` shows "Launching soon"; set it after the launch.
 - `relay/relay.py`: the relay (deployable to Railway; see `relay/README.md`, and set both `LABRAT_PUBLISH_TOKEN`
-  and `LIVE_ORIGINS` there). One publisher in, many viewers out.
+  and `LIVE_ORIGINS` there). One training publisher in, many viewers out, plus a second channel
+  (`/publish?channel=pons`) for the buy rig: the rat clicking through each buyback on the real pons page, as masked
+  JPEG frames and step messages. The site's **Rat on pons** panel (next to Rat buybacks) shows that stream while a
+  session runs, and the last session's final frame and result between sessions, every buy labelled Simulated.
 - `live/publish_training.py`: runs next to training on the training PC. It plays the run's latest saved checkpoint
   in its own simulation at 25 fps and streams it, with every new `log.jsonl` row, to the relay. It says bye when
   `log.jsonl` has been silent for 90 s, and the site goes back to the replay.
@@ -107,7 +110,7 @@ Local preview (PowerShell, two shells, the same token in both):
 
 ```
 $env:LABRAT_PUBLISH_TOKEN = '<a random token, 16+ characters>'
-$env:SERVE_SITE = '1'; cd relay; uvicorn relay:app --host 127.0.0.1 --port 4720 --ws-max-size 131072 --ws-per-message-deflate false
+$env:SERVE_SITE = '1'; cd relay; uvicorn relay:app --host 127.0.0.1 --port 4720 --ws-max-size 266240 --ws-per-message-deflate false
 # open http://localhost:4720/
 
 $env:LABRAT_PUBLISH_TOKEN = '<the same token>'

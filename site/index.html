@@ -193,6 +193,44 @@
     </section>
   </div>
 
+  <!-- the rat on pons: each buyback clicked through by the rat on the real pons page (site.js; frames via the relay's
+       pons channel). Hidden until there is a session to show. -->
+  <div class="wrap wide" id="rp-wrap" hidden>
+    <section class="rp" id="rat-on-pons" aria-labelledby="rp-title" data-state="connecting">
+      <div class="bb-bar">
+        <h2 class="bb-title" id="rp-title">Rat on pons</h2>
+        <span class="badge conn" id="rp-badge"><i aria-hidden="true"></i><b id="rp-badge-t">CONNECTING</b></span>
+        <span class="bb-mode dry" id="rp-sim">Simulated</span>
+        <span class="bb-conn" id="rp-conn"></span>
+      </div>
+      <p class="bb-rule">For each buyback, R-01 clicks through the buy itself on the $LABRAT page on pons. The rig lights one target at a time, the rat steers the cursor onto it with its head, and a lever press clicks; presses off the target are ignored. After the rat clicks the amount field, the rig types the batch amount. Wallet details on the page are hidden in this stream.</p>
+      <div class="rp-body">
+        <figure class="rp-screen" id="rp-screen">
+          <canvas id="rp-canvas" width="1280" height="900" role="img" aria-label="The pons page as the rat works through the buy"></canvas>
+          <div class="rp-empty" id="rp-empty"><b id="rp-empty-t">Opening the $LABRAT page on pons</b><span id="rp-empty-s">the first frame appears in a moment</span></div>
+          <figcaption class="rp-cap" id="rp-cap" hidden></figcaption>
+          <span class="rp-now" id="rp-now" aria-hidden="true" hidden></span>
+        </figure>
+        <aside class="rp-side" aria-label="Buy session">
+          <p class="rp-k" id="rp-k">Buy session</p>
+          <div aria-live="polite">
+            <p class="rp-target" id="rp-target">&mdash;</p>
+            <p class="rp-phase" id="rp-phase"></p>
+          </div>
+          <ol class="rp-steps" id="rp-steps" aria-label="Targets in this session"></ol>
+          <dl class="bb-kv rp-kv">
+            <div><dt id="rp-amt-k">Buy size</dt><dd id="rp-amt">&mdash;</dd></div>
+            <div><dt id="rp-out-k">LABRAT (simulated)</dt><dd id="rp-out">&mdash;</dd></div>
+            <div><dt>Transaction checks</dt><dd id="rp-checks">&mdash;</dd></div>
+            <div><dt>Rat's clicks</dt><dd id="rp-clicks">&mdash;</dd></div>
+          </dl>
+          <p class="rp-next" id="rp-next" hidden></p>
+          <p class="bb-note rp-note" id="rp-note"></p>
+        </aside>
+      </div>
+    </section>
+  </div>
+
   <div class="wrap wide">
     <ul class="facts reveal" aria-label="R-01 in numbers">
       <li><b>11</b><span>steps per launch, each one a click by the rat</span></li>

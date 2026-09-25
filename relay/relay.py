@@ -1,8 +1,13 @@
-"""labrat live relay: one publisher (the owner's PC, running next to training) -> many public viewers.
+"""labrat live relay: publishers on the owner's PC (training, and the pons buy rig) -> many public viewers.
 
-    WS  /publish   the publisher. Needs the header "Authorization: Bearer <LABRAT_PUBLISH_TOKEN>". One at a time.
-    WS  /live      public viewers (the website's live view). Receive-only; a viewer may send a tiny "ping".
-    GET /status    JSON: live, hello, metrics (the last log.jsonl row), viewers, and a few counters.
+    WS  /publish   the training publisher (the default channel). Needs the header
+                   "Authorization: Bearer <LABRAT_PUBLISH_TOKEN>". One at a time.
+    WS  /publish?channel=pons
+                   the pons buy rig (same token): the rat clicking through a $LABRAT buy on the real pons page, as
+                   masked JPEG frames plus step messages. One at a time, independent of the training publisher.
+    WS  /live      public viewers (the website). Receive-only; a viewer may send a tiny "ping". Viewers get both
+                   channels on one socket (see "The pons channel" below).
+    GET /status    JSON: live, hello, metrics (the last log.jsonl row), viewers, a few counters, and "pons".
     GET /healthz   {"ok": true}
 
 What a viewer receives, in order:
@@ -23,8 +28,22 @@ publisher is connected, has sent a hello with source "training" that is not a te
 in the last 15 s. A test stream (publish_training.py --assume-live-for-test: hello "test": true, label "TEST ...")
 is refused unless RELAY_ALLOW_TEST=1, which is for a local relay only.
 
+The pons channel. Everything it sends to viewers is marked as its own, so the training view (site/js/live.js) can
+skip it and the site's "Rat on pons" panel can pick it out:
+    - text messages carry "channel":"pons" (the relay sets it when forwarding) and have types of their own:
+      pons_hello, pons_step, pons_result, pons_bye from the rig; pons_state and pons_idle from the relay.
+    - binary frames are b"PJPG" + one JPEG, forwarded unchanged (prefix kept). Training frames are unchanged too.
+    - a late joiner gets {"type":"pons_state","channel":"pons","live":bool,"hello":..,"step":..,"result":..} after
+      the training replay, then the channel's last frame (kept after a session ends: the site shows the last
+      session's final frame while idle). Nothing is sent for the channel until it has had a session.
+    - frames reach each viewer at most PONS_VIEWER_FPS times a second: a newer frame replaces one not yet sent.
+    - no pons text may contain an address-like "0x" string: such a message is dropped (the site shows no addresses).
+      The frames are masked by the rig before they are sent; the relay cannot look inside a JPEG.
+"live" for the pons channel means: its publisher is connected, has sent a pons_hello with source "buyrig" (a test
+session, "test": true, only with RELAY_ALLOW_TEST=1), and has sent something in the last 15 s.
+
 Run it (single process only: all state is in memory, so never use --workers > 1 or several replicas):
-    uvicorn relay:app --host 0.0.0.0 --port $PORT --ws-max-size 131072 --ws-per-message-deflate false
+    uvicorn relay:app --host 0.0.0.0 --port $PORT --ws-max-size 266240 --ws-per-message-deflate false
     SERVE_SITE=1 also serves ../site at / (local preview; see README.md).
 """
 import asyncio
@@ -34,6 +53,7 @@ import ipaddress
 import json
 import math
 import os
+import re
 import struct
 import time
 from collections import deque
@@ -71,6 +91,19 @@ MIN_TOKEN_LEN = 16            # a shorter LABRAT_PUBLISH_TOKEN counts as unset
 VIEWERS_PER_IP = 8            # /live sockets one client address may hold (RELAY_MAX_PER_IP; 0 = no per-address cap)
 REFUSAL_LOG_WINDOW_S = 60.0   # refused publisher handshakes: at most REFUSAL_LOG_MAX log lines per window ...
 REFUSAL_LOG_MAX = 3           # ... then one summary line (the full totals are in /status counts)
+
+# ---- the pons channel (/publish?channel=pons) -----------------------------------------------------------------------
+CHANNELS = ('training', 'pons')   # /publish?channel=...; none (or "training") is the training channel
+PONS_MAGIC = b'PJPG'              # a pons frame: these 4 bytes, then one JPEG (SOI ... EOI); forwarded with the prefix
+PONS_MAX_BINARY = 256 * 1024      # pons frame cap, prefix included (the Procfile's --ws-max-size leaves room above it)
+PONS_MIN_FRAME = 4 + 4            # the prefix plus the smallest possible JPEG head and tail
+PONS_MAX_TEXT = 4096              # pons_hello / pons_step / pons_result / pons_bye are small (and kept for pons_state)
+PONS_TYPES = ('pons_hello', 'pons_step', 'pons_result', 'pons_bye')
+PONS_SOURCE = 'buyrig'            # pons_hello.source: the buy rig, clicking through a buy on the real pons page
+PONS_SESSION_MAX = 64             # pons_hello.session: a short id
+PONS_VIEWER_FPS = 5               # pons frames per second per viewer, at most (a newer frame replaces an unsent one)
+PONS_VIEWER_GAP_S = 1.0 / PONS_VIEWER_FPS
+ADDRESS_LIKE = re.compile(r'0x[0-9a-f]{3,}', re.IGNORECASE)   # never in a pons text (checked on its ASCII JSON)
 
 
 def _env_int(name, default, lo, hi):
@@ -166,9 +199,13 @@ class Viewer:
     falls behind only needs the newest ones: past VIEWER_MAX_FRAMES the oldest queued frame is dropped. Text (hello,
     metrics, checkpoint, episode, idle, state) is never dropped; a viewer that has VIEWER_MAX_TEXTS of it queued, or is
     stuck on one send for VIEWER_STUCK_S, is hopelessly behind and is closed (1013, try again later), after which its
-    page can reconnect and get a fresh state."""
+    page can reconnect and get a fresh state.
+
+    Pons frames (the pons channel's masked JPEGs) are not queued: each viewer holds at most one, the newest, and gets
+    it at most PONS_VIEWER_FPS times a second. It goes out after any queued text (so a pons_hello / pons_state
+    arrives before the frames that follow it) and ahead of queued training frames (so those cannot starve it)."""
     __slots__ = ('ws', 'q', 'n_bin', 'n_text', 'dropped', 'wake', 'done', 'closed', 'kill_code', 'kill_reason',
-                 'sending_since', 'bucket', 'bucket_t')
+                 'sending_since', 'bucket', 'bucket_t', 'pons_frame', 'pons_next')
 
     def __init__(self, ws):
         self.ws = ws
@@ -184,6 +221,8 @@ class Viewer:
         self.sending_since = 0.0
         self.bucket = float(VIEWER_MSG_BURST)
         self.bucket_t = time.monotonic()
+        self.pons_frame = None            # the newest pons frame not yet sent to this viewer
+        self.pons_next = 0.0              # monotonic time before which no pons frame goes out (the per-viewer rate)
 
     def push_bytes(self, b):
         if self.closed:
@@ -212,6 +251,15 @@ class Viewer:
         self.n_text += 1
         self.wake.set()
 
+    def push_pons(self, b):
+        """A pons frame: replaces the one this viewer has not been sent yet (frames are whole pictures)."""
+        if self.closed:
+            return
+        if self.pons_frame is not None:
+            HUB.count('pons_frames_skipped_for_rate')
+        self.pons_frame = b
+        self.wake.set()
+
     def kill(self, code, reason):
         if self.closed:
             return
@@ -219,6 +267,7 @@ class Viewer:
         self.kill_code, self.kill_reason = code, reason
         self.q.clear()
         self.n_bin = self.n_text = 0
+        self.pons_frame = None
         self.wake.set()
         self.done.set()
 
@@ -235,17 +284,33 @@ class Viewer:
         ws, q = self.ws, self.q
         try:
             while not self.closed:
-                if not q:
-                    self.wake.clear()
-                    await self.wake.wait()
-                    continue
-                item = q.popleft()
+                item = None
+                if self.pons_frame is not None and self.n_text == 0:
+                    wait = self.pons_next - time.monotonic()
+                    if wait <= 0:
+                        item, self.pons_frame = self.pons_frame, None
+                        self.pons_next = time.monotonic() + PONS_VIEWER_GAP_S
+                    elif not q:           # nothing else to send: sleep until the pons frame is due (or news)
+                        self.wake.clear()
+                        try:
+                            await asyncio.wait_for(self.wake.wait(), wait)
+                        except asyncio.TimeoutError:
+                            pass
+                        continue
+                if item is None:
+                    if not q:
+                        self.wake.clear()
+                        await self.wake.wait()
+                        continue
+                    item = q.popleft()
+                    if item.__class__ is bytes:
+                        self.n_bin -= 1
+                    else:
+                        self.n_text -= 1
                 self.sending_since = time.monotonic()
                 if item.__class__ is bytes:
-                    self.n_bin -= 1
                     await ws.send_bytes(item)
                 else:
-                    self.n_text -= 1
                     await ws.send_text(item)
                 self.sending_since = 0.0
         except asyncio.CancelledError:
@@ -392,6 +457,60 @@ class Hub:
 HUB = Hub()
 
 
+class PonsHub:
+    """The pons channel: its publisher (the buy rig), the current or last session (its hello, latest step and
+    result), and its last frame. Kept after a session ends, so a late joiner sees how the last one finished."""
+
+    def __init__(self):
+        self.pub = None
+        self.live = False
+        self.hello = None                 # the latest pons_hello (as forwarded, with "channel":"pons")
+        self.step = None                  # the latest pons_step of that session
+        self.result = None                # its pons_result, once there is one
+        self.last_frame = None            # the newest pons frame (b"PJPG" + JPEG)
+        self.frames_in = 0
+        self._fps_n = 0
+        self._fps_t = time.monotonic()
+        self.fps_in = 0.0
+        self._state = None
+
+    def dirty(self):
+        self._state = None
+
+    def has_state(self):
+        return self.hello is not None or self.last_frame is not None
+
+    def state_text(self):
+        """{"type":"pons_state","channel":"pons","live":..,"hello":..,"step":..,"result":..}: ASCII JSON, each part at
+        most PONS_MAX_TEXT, so the whole stays small."""
+        if self._state is None:
+            self._state = ('{"type":"pons_state","channel":"pons","live":' + ('true' if self.live else 'false')
+                           + ',"hello":' + _compact(self.hello) + ',"step":' + _compact(self.step)
+                           + ',"result":' + _compact(self.result) + '}')
+        return self._state
+
+    def set_idle(self, reason, why):
+        if not self.live:
+            return
+        self.live = False
+        self.dirty()
+        say(f'pons idle: {why}')
+        HUB.broadcast_text(_compact({'type': 'pons_idle', 'channel': 'pons', 'reason': reason}))
+
+    def touch(self, pub):
+        """A usable message from the buy rig: it is fresh; if it had gone quiet mid-session, the session is live
+        again (and viewers get a fresh pons_state)."""
+        pub.last_rx = time.monotonic()
+        if pub.in_session and not self.live:
+            self.live = True
+            self.dirty()
+            say('pons live again: the buy rig is sending again')
+            HUB.broadcast_text(self.state_text())
+
+
+PONS = PonsHub()
+
+
 def _compact(obj):
     return json.dumps(obj, separators=(',', ':'), allow_nan=False)
 
@@ -518,6 +637,101 @@ def on_pub_bytes(pub, data):
     H.broadcast_bytes(data)
 
 
+def on_pons_text(pub, text):
+    """One text message from the pons publisher. Returns None, or (close_code, reason) to close the publisher.
+    Forwarded with "channel":"pons" set; anything carrying an address-like 0x string is dropped."""
+    H, P = HUB, PONS
+    if len(text) > PONS_MAX_TEXT or len(text.encode('utf-8')) > PONS_MAX_TEXT:
+        H.count('pons_dropped_text_too_big')
+        return None
+    try:
+        msg, _changed = _loads_browser_safe(text)
+    except (ValueError, RecursionError):
+        H.count('pons_dropped_bad_json')
+        return None
+    if not isinstance(msg, dict) or msg.get('type') not in PONS_TYPES:
+        H.count('pons_dropped_unknown_type')
+        return None
+    msg['channel'] = 'pons'
+    out = _compact(msg)                   # ASCII JSON: escapes cannot hide an address from the check below
+    if len(out) > PONS_MAX_TEXT:
+        H.count('pons_dropped_text_too_big')
+        return None
+    if ADDRESS_LIKE.search(out):
+        H.count('pons_dropped_address')
+        return None
+    kind = msg['type']
+    now = time.monotonic()
+
+    if kind == 'pons_hello':
+        if msg.get('source') != PONS_SOURCE:
+            H.count('pons_refused_hello_source')
+            say(f"refused a pons_hello with source {msg.get('source')!r}: the pons channel carries the buy rig only")
+            return 1008, 'the pons channel carries the buy rig only (pons_hello.source must be "buyrig")'
+        if _is_test_stream(msg) and not ALLOW_TEST:
+            H.count('pons_refused_test_hello')
+            say('refused a pons test session (pons_hello "test" or a label starting with TEST)')
+            return 1008, 'test sessions are not shown as live; this relay shows them only with RELAY_ALLOW_TEST=1'
+        session = msg.get('session')
+        if not isinstance(session, str) or not session or len(session) > PONS_SESSION_MAX:
+            H.count('pons_dropped_bad_hello')
+            return None
+        prev = P.hello
+        if not (prev and prev.get('session') == session and prev.get('started') == msg.get('started')):
+            # a new session: nothing of the last one carries over, and no viewer gets its frames after this hello
+            P.step = P.result = P.last_frame = None
+            for v in list(H.viewers):
+                v.pons_frame = None
+        P.hello = msg
+        pub.in_session = True
+        pub.last_rx = now
+        P.live = True
+        P.dirty()
+        say(f'pons live: session {session!r}')
+        H.broadcast_text(out)
+        return None
+
+    if not pub.in_session:
+        H.count('pons_dropped_outside_session')
+        return None
+
+    if kind == 'pons_bye':
+        pub.in_session = False
+        pub.last_rx = now
+        H.broadcast_text(out)
+        P.set_idle('bye', 'the buy rig said bye')
+        return None
+
+    P.touch(pub)
+    if kind == 'pons_step':
+        P.step = msg
+    else:
+        P.result = msg
+    P.dirty()
+    H.broadcast_text(out)
+    return None
+
+
+def on_pons_bytes(pub, data):
+    H, P = HUB, PONS
+    n = len(data)
+    if n > PONS_MAX_BINARY:
+        H.count('pons_dropped_frame_too_big')
+        return
+    if n < PONS_MIN_FRAME or data[:4] != PONS_MAGIC or data[4:6] != b'\xff\xd8' or data[-2:] != b'\xff\xd9':
+        H.count('pons_dropped_bad_frame')
+        return
+    if not pub.in_session:
+        H.count('pons_dropped_outside_session')
+        return
+    P.touch(pub)
+    P.last_frame = data
+    P.frames_in += 1
+    P._fps_n += 1
+    for v in list(H.viewers):
+        v.push_pons(data)
+
+
 def _bearer(header):
     if not header:
         return None
@@ -577,6 +791,14 @@ async def _ticker():
         if dt >= 2.0:
             H.fps_in = round(H._fps_n / dt, 1)
             H._fps_n, H._fps_t = 0, now
+        P = PONS
+        pp = P.pub
+        if P.live and (pp is None or now - pp.last_rx > IDLE_S):
+            P.set_idle('quiet', f'the buy rig sent nothing for {IDLE_S:.0f} s')
+        dt = now - P._fps_t
+        if dt >= 2.0:
+            P.fps_in = round(P._fps_n / dt, 1)
+            P._fps_n, P._fps_t = 0, now
 
 
 @asynccontextmanager
@@ -613,41 +835,54 @@ async def ws_publish(ws: WebSocket):
         REFUSALS.say(f'refused a publisher from {peer}: missing or wrong token')
         await _deny(ws, 401, 'unauthorized')
         return
-    cur = H.pub
+    channel = ws.query_params.get('channel') or 'training'
+    if channel not in CHANNELS:
+        H.count('publishers_refused_channel')
+        REFUSALS.say(f'refused a publisher from {peer}: unknown channel')
+        await _deny(ws, 400, 'unknown channel (use no channel for training, or channel=pons)')
+        return
+    pons = channel == 'pons'
+    owner = PONS if pons else H           # each channel has its own publisher slot
+    tag = ' (pons channel)' if pons else ''
+    cur = owner.pub
     if cur is not None and time.monotonic() - cur.last_rx <= IDLE_S:
-        H.count('publishers_refused_busy')
-        REFUSALS.say(f'refused a second publisher from {peer}: one is already streaming')
+        H.count('pons_publishers_refused_busy' if pons else 'publishers_refused_busy')
+        REFUSALS.say(f'refused a second publisher from {peer}{tag}: one is already streaming')
         await _deny(ws, 409, 'another publisher is streaming; try again when it has stopped')
         return
     pub = Publisher(ws, peer)
     if cur is not None:
         # the old one has been quiet for over IDLE_S (crashed, half-open connection): the new one takes over
-        say('replacing a publisher that went quiet')
-        H.count('publishers_replaced')
-        H.pub = None
-        H.set_idle(IDLE_GONE, 'publisher replaced')
+        say('replacing a publisher that went quiet' + tag)
+        H.count('pons_publishers_replaced' if pons else 'publishers_replaced')
+        owner.pub = None
+        if pons:
+            PONS.set_idle('disconnected', 'publisher replaced')
+        else:
+            H.set_idle(IDLE_GONE, 'publisher replaced')
         _spawn(_close_quietly(cur.ws, 4001, 'replaced by a newer publisher'))
-    H.pub = pub                       # claim the slot before any await, so two handshakes cannot both win
+    owner.pub = pub                   # claim the slot before any await, so two handshakes cannot both win
     try:
         await ws.accept()
     except Exception:
-        if H.pub is pub:
-            H.pub = None
+        if owner.pub is pub:
+            owner.pub = None
         return
-    H.count('publishers_accepted')
-    say(f'publisher connected from {peer}')
+    H.count('pons_publishers_accepted' if pons else 'publishers_accepted')
+    say(f'publisher connected from {peer}{tag}')
+    on_text, on_bytes = (on_pons_text, on_pons_bytes) if pons else (on_pub_text, on_pub_bytes)
     try:
         while True:
             msg = await ws.receive()
-            if msg['type'] == 'websocket.disconnect' or H.pub is not pub:
+            if msg['type'] == 'websocket.disconnect' or owner.pub is not pub:
                 break
             data = msg.get('bytes')
             refusal = None
             try:
                 if data is not None:
-                    on_pub_bytes(pub, data)
+                    on_bytes(pub, data)
                 else:
-                    refusal = on_pub_text(pub, msg.get('text') or '')
+                    refusal = on_text(pub, msg.get('text') or '')
             except Exception as e:        # one odd message never takes the stream down
                 H.count('dropped_error')
                 if H.counts['dropped_error'] <= 5:
@@ -661,10 +896,13 @@ async def ws_publish(ws: WebSocket):
     except Exception:
         pass
     finally:
-        if H.pub is pub:
-            H.pub = None
-            H.set_idle(IDLE_GONE, 'the publisher disconnected')
-            say('publisher disconnected')
+        if owner.pub is pub:
+            owner.pub = None
+            if pons:
+                PONS.set_idle('disconnected', 'the buy rig disconnected')
+            else:
+                H.set_idle(IDLE_GONE, 'the publisher disconnected')
+            say('publisher disconnected' + tag)
 
 
 @app.websocket('/live')
@@ -708,6 +946,11 @@ async def ws_live(ws: WebSocket):
         v.push_text(H.state_text())
         if H.live and H.last_frame is not None:
             v.push_bytes(H.last_frame)
+        P = PONS
+        if P.has_state():                 # the pons channel, once it has had a session: its state, then its last frame
+            v.push_text(P.state_text())
+            if P.last_frame is not None:
+                v.push_pons(P.last_frame)
         sender = asyncio.create_task(v.send_loop())
         reader = asyncio.create_task(v.read_loop())
         try:
@@ -734,10 +977,22 @@ _NO_CACHE = {'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store'}
 
 @app.get('/status')
 async def status():   # async: runs on the event loop, never alongside a HUB update
-    H = HUB
-    p = H.pub
+    H, P = HUB, PONS
+    p, pp = H.pub, PONS.pub
     now = time.monotonic()
     H.state_text()                        # (cached) so state_rows is current
+    pons = {
+        'live': P.live,
+        'hello': P.hello,
+        'step': P.step,
+        'result': P.result,
+        'publisher': None if pp is None else {'in_session': pp.in_session, 'quiet_s': round(now - pp.last_rx, 1)},
+        'frames_in': P.frames_in,
+        'fps_in': P.fps_in if P.live else 0.0,
+        'last_frame_bytes': len(P.last_frame) if P.last_frame is not None else 0,
+        'max_frame_bytes': PONS_MAX_BINARY,
+        'viewer_fps': PONS_VIEWER_FPS,
+    }
     return JSONResponse({
         'live': H.live,
         'hello': H.hello,
@@ -756,6 +1011,7 @@ async def status():   # async: runs on the event loop, never alongside a HUB upd
         'idle_after_s': IDLE_S,
         'uptime_s': round(time.time() - H.started),
         'counts': dict(H.counts),
+        'pons': pons,
     }, headers=_NO_CACHE)
 
 

@@ -24,6 +24,11 @@
        onEpisode: msg => ...,   // {type:'episode', n, presses, hits, misses, fell}
        onTarget: t => ...,      // replay: {n, total, label, lit, done}
        onEvent: e => ...,       // replay: the timeline entry now in effect {t, kind, text, until, target}
+       onPons: m => ...,        // the relay's pons channel, text: {channel:'pons', type:'pons_hello'|'pons_step'|
+                                //  'pons_result'|'pons_bye'|'pons_state'|'pons_idle', ...}; never used by this view
+       onPonsFrame: buf => ..., // the pons channel's frames: ArrayBuffer b"PJPG" + a JPEG; never used by this view
+       onRelay: (open, gone) => ..., // the relay socket opened (true) or closed (false); gone=true: this view was torn
+                                //  down and will not reconnect (anything riding on its socket needs its own)
      });
 
    mountLive never throws: on failure it puts a short fallback line in the container and resolves to null.
@@ -101,6 +106,9 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 // a publisher's test stream (hello "test": true, or a label starting with TEST): shown, but never called live
 const isTestHello = h => !!h && typeof h === 'object' && (h.test === true || /^\s*TEST\b/.test(String(h.label || '')));
 const safe = (fn, ...a) => { try { if (typeof fn === 'function') fn(...a); } catch (e) { console.warn('labrat live: callback failed -', e); } };
+// a frame of the relay's pons channel: b"PJPG" + a JPEG (never a rat frame, whatever its size)
+const isPonsFrame = b => b instanceof ArrayBuffer && b.byteLength >= 4 &&
+  (v => v[0] === 0x50 && v[1] === 0x4A && v[2] === 0x50 && v[3] === 0x47)(new Uint8Array(b, 0, 4));
 
 async function loadThree() {
   try { return await import('three'); }
@@ -955,22 +963,35 @@ async function mount(el, opts, st) {
     let ws;
     try { ws = new WebSocket(relay); } catch (e) { retryTimer = setTimeout(connect, RETRY_MS); return; }
     LV.ws = ws; ws.binaryType = 'arraybuffer';
-    ws.onopen = () => { LV.open = true; };
+    ws.onopen = () => { LV.open = true; safe(opts.onRelay, true); };
     ws.onmessage = ev => {
       if (st.disposed) return;
-      if (typeof ev.data !== 'string') { onBinary(ev.data); return; }
+      if (typeof ev.data !== 'string') {
+        // the relay's pons channel (b"PJPG" + a JPEG): not a rat frame; handed to the page's pons panel as is
+        if (isPonsFrame(ev.data)) { safe(opts.onPonsFrame, ev.data); return; }
+        onBinary(ev.data); return;
+      }
       if (ev.data.length > 65536) return;
       let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
-      if (m && typeof m === 'object') onText(m);
+      if (!m || typeof m !== 'object') return;
+      // pons channel messages ("channel":"pons": pons_hello / step / result / bye / state / idle) never touch the
+      // training view (a pons idle must not end a live training stream); the page's pons panel gets them
+      if (m.channel === 'pons' || (typeof m.type === 'string' && m.type.startsWith('pons_'))) { safe(opts.onPons, m); return; }
+      onText(m);
     };
     ws.onclose = () => {
       if (LV.ws !== ws) return;
       LV.ws = null; LV.open = false; liveOff();
+      safe(opts.onRelay, false);
       if (!st.disposed) retryTimer = setTimeout(connect, RETRY_MS);
     };
     ws.onerror = () => { try { ws.close(); } catch (_) { /* ignore */ } };
   }
-  st.cleanup.push(() => { clearTimeout(retryTimer); const ws = LV.ws; LV.ws = null; if (ws) try { ws.close(); } catch (_) { /* ignore */ } });
+  st.cleanup.push(() => {
+    clearTimeout(retryTimer); const ws = LV.ws; LV.ws = null; if (ws) try { ws.close(); } catch (_) { /* ignore */ }
+    // the view is gone for good (WebGL lost, or a failed start): the page's pons panel must get its own socket
+    safe(opts.onRelay, false, true);
+  });
 
   function liveOff() {
     LV.relayLive = false; LV.frames.length = 0; LV.ph = null;

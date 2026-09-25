@@ -1,13 +1,14 @@
 """End-to-end test of relay.py.
 
-Starts the relay with the Procfile's own command line on 127.0.0.1:4723 and drives it with a fake publisher and
-several viewers: two fast ones (the websockets client), a deliberately slow one and a stuck one (hand-rolled websocket
-clients on a socket with a 4 KB receive buffer, reading at a pace we set), plus short-lived ones for the caps.
+Starts the relay with the Procfile's own command line on 127.0.0.1:4762 (RELAY_TEST_PORT overrides it) and drives it
+with a fake publisher and several viewers: two fast ones (the websockets client), a deliberately slow one and a stuck
+one (hand-rolled websocket clients on a socket with a 4 KB receive buffer, reading at a pace we set), plus short-lived
+ones for the caps. Then, on a fresh relay, the pons channel: a fake buy-rig publisher next to a training publisher.
 
     python relay/test_relay.py
 
-Takes about a minute (it waits out the real 15 s idle timer twice). Prints PASS/FAIL per check and exits non-zero on
-any failure. It only ever stops the relay processes it started itself.
+Takes about two minutes (it waits out the real 15 s idle timer four times). Prints PASS/FAIL per check and exits
+non-zero on any failure. It only ever stops the relay processes it started itself.
 """
 import asyncio
 import base64
@@ -30,9 +31,10 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PORT = 4723
+PORT = int(os.environ.get('RELAY_TEST_PORT') or 4762)
 HOSTPORT = f'127.0.0.1:{PORT}'
 PUB = f'ws://{HOSTPORT}/publish'
+PONS_PUB = f'ws://{HOSTPORT}/publish?channel=pons'
 LIVE = f'ws://{HOSTPORT}/live'
 TOKEN = 'test-' + secrets.token_urlsafe(24)
 AUTH = {'Authorization': 'Bearer ' + TOKEN}
@@ -168,6 +170,21 @@ def make_frame(k, size=FRAME_BYTES, magic=7.0):
 
 def frame_k(b):
     return int(struct.unpack_from('<f', b, 8)[0])
+
+
+def pons_frame(k, size=2048, magic=b'PJPG', soi=b'\xff\xd8', eoi=b'\xff\xd9'):
+    """A pons-channel frame: b"PJPG" + a stand-in JPEG (SOI, a comment marker carrying k, padding, EOI). The relay
+    checks the prefix and the JPEG's first and last two bytes; it never decodes the picture."""
+    head = magic + soi + b'\xff\xfe' + struct.pack('>I', k)
+    return head + b'\x00' * max(0, size - len(head) - len(eoi)) + eoi
+
+
+def pons_k(b):
+    return struct.unpack_from('>I', b, 8)[0]
+
+
+def is_pons(b):
+    return isinstance(b, bytes) and b[:4] == b'PJPG'
 
 
 def _no_nan(c):
@@ -809,6 +826,8 @@ async def other_relays():
         check(code == 503, '/publish is refused (503) even with a token', f'HTTP {code}: {body}')
         code, _ = await refused_status(PUB)
         check(code == 503, '/publish without a token is refused (503)', f'HTTP {code}')
+        code, _ = await refused_status(PONS_PUB, AUTH)
+        check(code == 503, '/publish?channel=pons is refused (503) too', f'HTTP {code}')
         V = await Rec('V').start()
         await until(lambda: len(V.msgs) >= 1, 3)
         check(V.msgs and strict(V.msgs[0][1]).get('live') is False, 'viewers still connect and see not-live')
@@ -839,6 +858,16 @@ async def other_relays():
         check(st['allow_test_streams'] is True and st['live'] is True and st['hello'] == th
               and V.texts()[1:] == [th] and len(V.frames()) == 1,
               'the test hello (with "test": true and its TEST label) and its frames reach viewers')
+        PQ = await connect(PONS_PUB, additional_headers=AUTH, open_timeout=5)
+        tp = dict(PHELLO, test=True)
+        await PQ.send(json.dumps(tp))
+        await PQ.send(pons_frame(1))
+        await until(lambda: any(is_pons(m) for _, m in V.msgs), 3)
+        st = await status()
+        check(st['pons']['live'] is True and st['pons']['hello'] == as_pons(tp) and as_pons(tp) in V.texts()
+              and [m for _, m in V.msgs if is_pons(m)] == [pons_frame(1)],
+              'a pons test session ("test": true) reaches viewers, marked as a test')
+        await PQ.close()
         await P.close()
         await V.close()
     finally:
@@ -846,8 +875,316 @@ async def other_relays():
         check('TEST STREAMS ALLOWED' in relay.text(), 'the relay says so loudly when it starts')
 
 
+PHELLO = {'type': 'pons_hello', 'source': 'buyrig', 'session': 'buy-0001', 'started': '2026-09-25T12:00:00Z',
+          'amount_eth': '0.0001', 'targets': ['Amount field', 'Buy LABRAT', 'Confirm buy'], 'simulated': True}
+PHELLO2 = dict(PHELLO, session='buy-0002', started='2026-09-25T12:10:00Z')
+
+
+def as_pons(d):
+    return dict(d, channel='pons')
+
+
+async def pons_relay():
+    relay = Relay({'LABRAT_PUBLISH_TOKEN': TOKEN}, 'pons')
+    closers = []
+    try:
+        await pons_checks(closers)
+    finally:
+        for c in closers:
+            try:
+                await c()
+            except Exception:
+                pass
+        relay.stop()
+        log = relay.text()
+    check('Traceback' not in log and 'Exception in ASGI' not in log, 'the relay logged no exceptions (pons channel)',
+          f'log: {relay.logpath}')
+    if 'Traceback' in log or 'Exception in ASGI' in log:
+        print(log[-4000:])
+
+
+async def pons_checks(closers):
+    section('pons channel: auth, channels and one publisher per channel')
+    for hdrs, what in [(None, 'no Authorization header'), ({'Authorization': 'Bearer nope-nope-nope-nope'}, 'a wrong token')]:
+        code, _ = await refused_status(PONS_PUB, hdrs)
+        check(code == 401, f'/publish?channel=pons refuses {what}', f'HTTP {code}')
+    code, body = await refused_status(f'ws://{HOSTPORT}/publish?channel=nope', AUTH)
+    check(code == 400, '/publish with an unknown channel is refused (400)', f'HTTP {code}: {body}')
+    A = await Rec('A').start()
+    closers.append(A.close)
+    await asyncio.sleep(0.4)
+    check(len(A.msgs) == 1 and A.texts()[0].get('type') == 'state',
+          'a viewer gets no pons message before the pons channel has had a session', f'{len(A.msgs)} messages')
+    T = await connect(PUB, additional_headers=AUTH, open_timeout=5)
+    closers.append(T.close)
+    await T.send(json.dumps(HELLO))
+    PP = await connect(PONS_PUB, additional_headers=AUTH, open_timeout=5)
+    closers.append(PP.close)
+    check(True, 'a pons publisher is accepted while the training publisher streams')
+    code, _ = await refused_status(PONS_PUB, AUTH)
+    check(code == 409, 'a second pons publisher is refused while the first is fresh (409)', f'HTTP {code}')
+    code, _ = await refused_status(PUB, AUTH)
+    check(code == 409, 'the training slot is still its own (a second training publisher: 409)', f'HTTP {code}')
+
+    section('pons channel: forwarding, and the training channel unchanged')
+    await until(lambda: A.find_text(lambda d: d == HELLO) is not None, 3)
+    mark = len(A.msgs)
+    await PP.send(pons_frame(1))                                         # before the pons_hello: dropped
+    await PP.send(json.dumps({'type': 'pons_step', 'i': 1, 'n': 3}))     # before the pons_hello: dropped
+    await PP.send(json.dumps(PHELLO))
+    await until(lambda: A.find_text(lambda d: d.get('type') == 'pons_hello', mark) is not None, 3)
+    got = A.texts(mark)
+    check(got == [as_pons(PHELLO)], 'the pons_hello is forwarded with "channel":"pons" added; nothing sent before it',
+          str([t.get('type') for t in got]))
+    row_text = json.dumps({'type': 'metrics', 'row': {'steps': 1000, 'ret': 1.5}})
+    step1 = {'type': 'pons_step', 'session': 'buy-0001', 'i': 1, 'n': 3, 'target': 'Amount field', 'phase': 'aim'}
+    mark = len(A.msgs)
+    await T.send(row_text)
+    await T.send(make_frame(1))
+    await PP.send(json.dumps(step1))
+    await PP.send(pons_frame(10))
+    await until(lambda: any(is_pons(m) for _, m in A.msgs[mark:]), 3)
+    seq = A.msgs[mark:]
+    raw_texts = [m for _, m in seq if isinstance(m, str)]
+    check(row_text in raw_texts, 'a training text is forwarded verbatim (no channel added)')
+    check(any(m == make_frame(1) for _, m in seq), 'a training frame is forwarded byte for byte')
+    check(as_pons(step1) in [strict(m) for m in raw_texts], 'a pons_step is forwarded with "channel":"pons"')
+    check([m for _, m in seq if is_pons(m)] == [pons_frame(10)], 'a pons frame is forwarded byte for byte, PJPG prefix kept')
+    big = pons_frame(11, size=200 * 1024)
+    mark = len(A.msgs)
+    await PP.send(big)
+    await until(lambda: any(is_pons(m) for _, m in A.msgs[mark:]), 3)
+    check([m for _, m in A.msgs[mark:] if is_pons(m)] == [big],
+          'a 200 KB pons frame (over the old 128 KB socket limit) is forwarded intact')
+
+    section('pons channel: caps and junk')
+    await asyncio.sleep(0.3)                                             # the per-viewer frame gap
+    mark = len(A.msgs)
+    await PP.send(pons_frame(20, size=256 * 1024 + 1))                   # over 256 KB
+    await PP.send(pons_frame(21, magic=b'XJPG'))                         # no PJPG prefix
+    await PP.send(pons_frame(22, soi=b'\x89P'))                          # not a JPEG
+    await PP.send(pons_frame(23, eoi=b'\x00\x00'))                       # a JPEG cut short
+    await PP.send(make_frame(24))                                        # a training frame on the pons channel
+    await PP.send(json.dumps(dict(step1, target='0x4C26…b893')))         # an address-like string
+    await PP.send('{"type":"pons_step","target":"\\u0030x4c26ab"}')      # the same, hidden in a JSON escape
+    await PP.send(json.dumps(HELLO))                                     # a training type on the pons channel
+    await PP.send(json.dumps(dict(step1, pad='x' * 5000)))               # over 4 KB
+    await PP.send('{"type":"pons_step",')                                # not JSON
+    await PP.send(json.dumps({'type': 'pons_state', 'live': True}))      # relay-only
+    step2 = dict(step1, i=2, target='Buy LABRAT', phase='press')
+    await PP.send(json.dumps(step2))
+    await PP.send(pons_frame(25))
+    await until(lambda: any(is_pons(m) for _, m in A.msgs[mark:]), 3)
+    seq = A.msgs[mark:]
+    check([pons_k(m) for _, m in seq if is_pons(m)] == [25] and not [m for _, m in seq if isinstance(m, bytes)
+                                                                      and not is_pons(m)],
+          'oversized, unprefixed, non-JPEG and truncated pons frames (and a rat frame) are not forwarded')
+    check([strict(m) for _, m in seq if isinstance(m, str)] == [as_pons(step2)],
+          'address-like (even JSON-escaped), oversized, non-JSON, training-type and relay-only pons texts are dropped')
+    st = await status()
+    c = st['counts']
+    check(c.get('pons_dropped_frame_too_big') == 1 and c.get('pons_dropped_bad_frame') == 4
+          and c.get('pons_dropped_address') == 2 and c.get('pons_dropped_unknown_type') == 2
+          and c.get('pons_dropped_text_too_big') == 1 and c.get('pons_dropped_bad_json') == 1
+          and c.get('pons_dropped_outside_session') == 2 and not c.get('dropped_error')
+          and not any(k.startswith('dropped_') for k in c),
+          'each dropped pons message is counted under pons_* (and none under the training counters)',
+          json.dumps({k: v for k, v in c.items() if 'dropped' in k}))
+    check(st['pons']['live'] is True and st['pons']['publisher'] is not None and st['live'] is True,
+          'both publishers stay connected and live after pons junk')
+
+    section('pons frames: at most 5 per second per viewer, newest wins; training frames unaffected')
+    await asyncio.sleep(0.3)
+    mark = len(A.msgs)
+    fin0 = st['pons']['frames_in']
+
+    async def pons_burst():
+        t0 = time.perf_counter()
+        for i in range(60):                                              # 20 fps for 3 s
+            d = t0 + i * 0.05 - time.perf_counter()
+            if d > 0:
+                await asyncio.sleep(d)
+            await PP.send(pons_frame(1000 + i, size=60 * 1024))
+
+    async def train_burst():
+        t0 = time.perf_counter()
+        for i in range(75):                                              # 25 fps for 3 s
+            d = t0 + i * 0.04 - time.perf_counter()
+            if d > 0:
+                await asyncio.sleep(d)
+            await T.send(make_frame(2000 + i))
+    await asyncio.gather(pons_burst(), train_burst())
+    await asyncio.sleep(0.6)
+    seq = A.msgs[mark:]
+    tks = [frame_k(m) for _, m in seq if isinstance(m, bytes) and not is_pons(m)]
+    check(tks == list(range(2000, 2075)), 'every training frame still arrives, in order (25 fps next to the pons frames)',
+          f'{len(tks)}/75')
+    pf = [(t, pons_k(m)) for t, m in seq if is_pons(m)]
+    ks = [k for _, k in pf]
+    gaps = [b[0] - a[0] for a, b in zip(pf, pf[1:])]
+    span = pf[-1][0] - pf[0][0] if len(pf) > 1 else 0
+    rate = (len(pf) - 1) / span if span > 0 else 0
+    check(12 <= len(pf) <= 17 and rate <= 5.5, 'a viewer gets about 5 pons frames per second of the 20 sent',
+          f'{len(pf)} of 60, {rate:.1f} fps')
+    check(gaps and min(gaps) >= 0.12, 'pons frames reach a viewer spaced out (0.2 s apart by design)',
+          f'min gap {min(gaps) * 1000 if gaps else -1:.0f} ms')
+    check(ks == sorted(set(ks)) and ks and ks[-1] == 1059, 'in order, and the last one is the newest (older ones dropped)',
+          f'last {ks[-1] if ks else "-"}')
+    st = await status()
+    check(st['pons']['frames_in'] - fin0 == 60 and st['counts'].get('pons_frames_skipped_for_rate', 0) > 0
+          and st['pons']['max_frame_bytes'] == 256 * 1024 and st['pons']['viewer_fps'] == 5,
+          '/status pons: frames_in counts all 60, the skipped ones are counted, caps shown',
+          f"frames_in +{st['pons']['frames_in'] - fin0}, skipped {st['counts'].get('pons_frames_skipped_for_rate')}")
+
+    section('pons channel: a late joiner, and /status')
+    res = {'type': 'pons_result', 'session': 'buy-0001', 'ok': True, 'simulated': True, 'eth_in': '0.0001',
+           'labrat_out': '792.7593'}
+    await PP.send(json.dumps(res))
+    await T.send(make_frame(3000))
+    await until(lambda: A.find_text(lambda d: d.get('type') == 'pons_result') is not None, 3)
+    await asyncio.sleep(0.1)
+    B = await Rec('B').start()
+    closers.append(B.close)
+    await until(lambda: len(B.msgs) >= 4, 3)
+    m = [x for _, x in B.msgs[:4]]
+    ok = (len(m) == 4 and isinstance(m[0], str) and strict(m[0]).get('type') == 'state' and strict(m[0]).get('live') is True
+          and m[1] == make_frame(3000) and isinstance(m[2], str) and m[3] == pons_frame(1059, size=60 * 1024))
+    check(ok, 'a late joiner gets: the training state, its last frame, the pons state, the last pons frame',
+          str([('text', strict(x).get('type')) if isinstance(x, str) else ('pons' if is_pons(x) else 'frame') for x in m]))
+    ps = strict(m[2]) if len(m) > 2 and isinstance(m[2], str) else {}
+    check(ps == {'type': 'pons_state', 'channel': 'pons', 'live': True, 'hello': as_pons(PHELLO), 'step': as_pons(step2),
+                 'result': as_pons(res)}, 'the pons state: live, with the session\'s hello, its latest step and result')
+    st = await status()
+    p = st['pons']
+    check(p['live'] is True and p['hello'] == as_pons(PHELLO) and p['step'] == as_pons(step2) and p['result'] == as_pons(res)
+          and p['publisher']['in_session'] is True and p['last_frame_bytes'] == 60 * 1024,
+          '/status pons: live, hello, step, result, publisher, last frame size')
+
+    section('pons bye, a new session, and a disconnect: the training stream never notices')
+    mark = len(A.msgs)
+    await PP.send(json.dumps({'type': 'pons_bye', 'session': 'buy-0001'}))
+    await until(lambda: A.find_text(lambda d: d.get('type') == 'pons_idle', mark) is not None, 3)
+    got = A.texts(mark)
+    check(got == [{'type': 'pons_bye', 'session': 'buy-0001', 'channel': 'pons'},
+                  {'type': 'pons_idle', 'channel': 'pons', 'reason': 'bye'}],
+          'pons_bye: viewers get it, then pons_idle (bye), both marked "channel":"pons"', str(got))
+    st = await status()
+    check(st['pons']['live'] is False and st['pons']['hello'] == as_pons(PHELLO) and st['live'] is True,
+          '/status after the bye: pons not live (last session kept), training still live')
+    await T.send(make_frame(3001))
+    G = await Rec('G').start()
+    closers.append(G.close)
+    await until(lambda: len(G.msgs) >= 4, 3)
+    gp = [strict(x) for _, x in G.msgs if isinstance(x, str) and strict(x).get('type') == 'pons_state']
+    gf = [x for _, x in G.msgs if is_pons(x)]
+    check(gp and gp[0]['live'] is False and gp[0]['result'] == as_pons(res) and gf == [pons_frame(1059, size=60 * 1024)],
+          'a viewer joining after the session: pons state live=false with its result, and the final frame')
+    mark = len(A.msgs)
+    await PP.send(pons_frame(4000))                                      # after the bye: dropped
+    await PP.send(json.dumps(PHELLO2))
+    await until(lambda: A.find_text(lambda d: d.get('type') == 'pons_hello', mark) is not None, 3)
+    await asyncio.sleep(0.3)
+    check(not [x for _, x in A.msgs[mark:] if is_pons(x)], 'a frame between the bye and the next hello is dropped')
+    st = await status()
+    check(st['pons']['live'] is True and st['pons']['step'] is None and st['pons']['result'] is None
+          and st['pons']['last_frame_bytes'] == 0, 'a new session starts from nothing (no step, result or frame)')
+    Hn = await Rec('H').start()
+    closers.append(Hn.close)
+    await until(lambda: any(isinstance(x, str) and strict(x).get('type') == 'pons_state' for _, x in Hn.msgs), 3)
+    await asyncio.sleep(0.4)
+    hp = [strict(x) for _, x in Hn.msgs if isinstance(x, str) and strict(x).get('type') == 'pons_state']
+    check(hp and hp[0]['live'] is True and hp[0]['hello'] == as_pons(PHELLO2) and not [x for _, x in Hn.msgs if is_pons(x)],
+          'a viewer joining now gets the new session\'s state and no frame from the old one')
+    mark = len(A.msgs)
+    t_close = time.perf_counter()
+    await PP.close()
+    await until(lambda: A.find_text(lambda d: d.get('type') == 'pons_idle', mark) is not None, 3)
+    hit = A.find_text(lambda d: d.get('type') == 'pons_idle', mark)
+    dt = (hit[1] - t_close) if hit else -1
+    check(hit and hit[2] == {'type': 'pons_idle', 'channel': 'pons', 'reason': 'disconnected'} and dt < 1.0,
+          'the buy rig disconnecting: viewers get pons_idle (disconnected) at once', f'after {dt * 1000:.0f} ms')
+    await asyncio.sleep(0.2)
+    st = await status()
+    check(st['live'] is True and not A.find_text(lambda d: d.get('type') in ('idle', 'bye'), 0)
+          and st['pons']['publisher'] is None,
+          'the training stream stayed live throughout; no training idle or bye was sent')
+
+    section('pons channel honesty: only the buy rig, no test sessions')
+    for hello, what, want in [(dict(PHELLO, source='training'), 'a pons_hello with source "training"', 'buyrig'),
+                              (dict(PHELLO, test=True), 'a test session ("test": true)', 'RELAY_ALLOW_TEST'),
+                              (dict(PHELLO, label='TEST session'), 'a TEST label', 'RELAY_ALLOW_TEST')]:
+        Q = await connect(PONS_PUB, additional_headers=AUTH, open_timeout=5)
+        mark = len(A.msgs)
+        await Q.send(json.dumps(hello))
+        await Q.send(pons_frame(5000))
+        code = await close_code_of(Q, 5)
+        reason = Q.close_reason or ''
+        await asyncio.sleep(0.2)
+        st = await status()
+        check(code == 1008 and want in reason and st['pons']['live'] is False and A.msgs[mark:] == [],
+              f'{what} is refused (1008) and never shown', f'close {code} {reason!r}')
+    Q = await connect(PONS_PUB, additional_headers=AUTH, open_timeout=5)
+    closers.append(Q.close)
+    await Q.send(json.dumps(dict(PHELLO, session='')))
+    await Q.send(json.dumps(dict(PHELLO, session='x' * 65)))
+    await asyncio.sleep(0.3)
+    st = await status()
+    check(st['pons']['live'] is False and st['counts'].get('pons_dropped_bad_hello') == 2,
+          'a pons_hello without a short session id is dropped (not live)')
+    await Q.close()
+
+    section('pons channel: quiet for 15 s -> idle; resume; a newer publisher replaces a quiet one')
+    stop = asyncio.Event()
+
+    async def keep_training():                                           # the training stream stays fresh meanwhile
+        k = 6000
+        while not stop.is_set():
+            await T.send(make_frame(k))
+            k += 1
+            await asyncio.sleep(0.5)
+    kt = asyncio.create_task(keep_training())
+    try:
+        P5 = await connect(PONS_PUB, additional_headers=AUTH, open_timeout=5)
+        closers.append(P5.close)
+        await P5.send(json.dumps(PHELLO))
+        await until_status(lambda s: s['pons']['live'] is True, 3)
+        mark = len(A.msgs)
+        await P5.send(pons_frame(6000))
+        t_quiet = time.perf_counter()
+        await until(lambda: A.find_text(lambda d: d.get('type') == 'pons_idle', mark) is not None, 20, step=0.05)
+        hit = A.find_text(lambda d: d.get('type') == 'pons_idle', mark)
+        dt = (hit[1] - t_quiet) if hit else -1
+        check(hit and hit[2].get('reason') == 'quiet' and 15.0 <= dt <= 16.5,
+              'a buy rig that sends nothing for 15 s: viewers get pons_idle (quiet)', f'after {dt:.2f} s')
+        st = await status()
+        check(st['live'] is True and not A.find_text(lambda d: d.get('type') == 'idle', mark),
+              'the training stream is not affected by the pons channel going quiet')
+        mark = len(A.msgs)
+        await P5.send(pons_frame(6001))
+        await until(lambda: any(is_pons(x) and pons_k(x) == 6001 for _, x in A.msgs[mark:]), 3)
+        seq = [x for _, x in A.msgs[mark:] if isinstance(x, str) or is_pons(x)]
+        ok = (len(seq) >= 2 and isinstance(seq[0], str) and strict(seq[0]).get('type') == 'pons_state'
+              and strict(seq[0]).get('live') is True and seq[1] == pons_frame(6001))
+        check(ok, 'when the quiet buy rig sends again: a fresh pons_state (live), then the frame')
+        mark = len(A.msgs)
+        await until(lambda: A.find_text(lambda d: d.get('type') == 'pons_idle', mark) is not None, 20, step=0.05)
+        P6 = await connect(PONS_PUB, additional_headers=AUTH, open_timeout=5)
+        closers.append(P6.close)
+        check(True, 'a new pons publisher replaces one that has been quiet for 15 s')
+        code = await close_code_of(P5, 5)
+        check(code == 4001, 'the replaced pons publisher is closed (4001)', f'close {code}')
+        await P6.send(json.dumps(PHELLO2))
+        st = await until_status(lambda s: s['pons']['live'] is True, 3)
+        check(st['pons']['live'] is True and st['pons']['hello'] == as_pons(PHELLO2) and st['live'] is True,
+              'the new pons publisher is live; training still live')
+    finally:
+        stop.set()
+        await kt
+
+
 async def amain():
     await main_relay()
+    await pons_relay()
     await other_relays()
 
 

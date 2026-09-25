@@ -22,9 +22,10 @@ local relay started with `RELAY_ALLOW_TEST=1` lets one through. The relay holds 
 
 | | |
 |---|---|
-| `WS /publish` | the publisher. Needs `Authorization: Bearer <LABRAT_PUBLISH_TOKEN>`. Only one publisher at a time |
-| `WS /live` | public viewers. They can only receive. A viewer may send `ping` (or `{"type":"ping"}`) and gets `{"type":"pong","t":<unix s>}` back |
-| `GET /status` | JSON with `live`, `hello`, `metrics` (the last log.jsonl row), `viewers`, and also `checkpoint`, `episode`, `publisher` (`in_session`, `quiet_s`), `history_rows` (kept), `state_rows` (in the state message), `allow_test_streams`, `frames_in`, `fps_in`, `max_viewers`, `max_viewers_per_address`, `counts`. Readable cross-origin, with no IP addresses |
+| `WS /publish` | the training publisher (the default channel). Needs `Authorization: Bearer <LABRAT_PUBLISH_TOKEN>`. Only one publisher at a time |
+| `WS /publish?channel=pons` | the buy rig (`live/buyrig.py`), same token: the rat clicking through a $LABRAT buy on the real pons page, as masked JPEG frames plus step messages. One at a time, independent of the training publisher. See [The pons channel](#the-pons-channel) |
+| `WS /live` | public viewers. They can only receive. A viewer may send `ping` (or `{"type":"ping"}`) and gets `{"type":"pong","t":<unix s>}` back. Viewers get both channels on this one socket |
+| `GET /status` | JSON with `live`, `hello`, `metrics` (the last log.jsonl row), `viewers`, and also `checkpoint`, `episode`, `publisher` (`in_session`, `quiet_s`), `history_rows` (kept), `state_rows` (in the state message), `allow_test_streams`, `frames_in`, `fps_in`, `max_viewers`, `max_viewers_per_address`, `counts`, and `pons` (`live`, `hello`, `step`, `result`, `publisher`, `frames_in`, `fps_in`, `last_frame_bytes`, `max_frame_bytes`, `viewer_fps`). Readable cross-origin, with no IP addresses |
 | `GET /healthz` | `{"ok":true}` |
 | `GET /` | the site when `SERVE_SITE=1`, otherwise a small JSON pointer |
 
@@ -63,14 +64,41 @@ relay without `RELAY_ALLOW_TEST=1`, closes the publisher with **1008**. The clos
 `publish_training.py` does not mistake it for an auth failure.
 
 Anyone can try `/publish`, so refused handshakes are logged at most 3 times a minute, then as one summary line; the
-full totals are in `/status` `counts` (`publishers_refused_auth`, `_busy`, `_disabled`).
+full totals are in `/status` `counts` (`publishers_refused_auth`, `_busy`, `_disabled`, `_channel`).
+
+### The pons channel
+
+`live/buyrig.py --relay wss://<relay>/publish` connects to `/publish?channel=pons` (an unknown `channel` is refused
+with **400**). The channel has its own publisher slot, its own 15 s idle timer and its own state, so the training
+stream never notices it, and the other way round. Viewers get it on the same `/live` socket, marked so that the 3D
+view (`site/js/live.js`) skips it and the site's "Rat on pons" panel picks it out:
+
+- **Text.** The rig sends `pons_hello` (`"source":"buyrig"` and a short `session` id; any other source closes it with
+  **1008**, and so does a test session, `"test": true` or a label starting with `TEST`, unless `RELAY_ALLOW_TEST=1`),
+  then `pons_step`, `pons_result` and `pons_bye`. The relay adds `"channel":"pons"` when forwarding, and sends
+  `{"type":"pons_idle","channel":"pons","reason":"bye"|"quiet"|"disconnected"}` itself. Each text is at most 4,096
+  bytes. **Any text with an address-like `0x` string in it (checked on its ASCII JSON, so an escape cannot hide one)
+  is dropped**: nothing on this channel may show an address.
+- **Frames.** `b"PJPG"` + one JPEG (it must start with SOI and end with EOI), at most 256 KB, forwarded unchanged with
+  the prefix, so the site can tell them from the rat's pose frames (which are unchanged too). The rig masks every
+  frame before sending it (wallet chip, balances, any `0x` string); the relay cannot look inside a JPEG.
+- **Rate.** A viewer gets at most 5 pons frames a second. Each viewer holds one pending pons frame: a newer one
+  replaces it (`pons_frames_skipped_for_rate` in `counts`). It goes out after any queued text and ahead of queued
+  training frames, so neither channel starves the other.
+- **Late joiners** get, after the training state (and its frame), `{"type":"pons_state","channel":"pons","live":bool,
+  "hello":..,"step":..,"result":..}` and then the channel's last frame. Both are kept after a session ends, so the
+  site shows the last session's final frame between sessions. Nothing is sent for the channel before its first
+  session. A `pons_hello` with a new `session` (or `started`) clears the last step, result and frame.
+- Frames and steps sent before a `pons_hello`, or after a `pons_bye`, are dropped. Drops are counted under `pons_*`
+  in `counts`.
 
 ### Caps
 
 - Publisher: binary frames of at most 4096 bytes that start with the float32 magic 7.0, and text of at most 64 KB
   (`hello`, `checkpoint` and `episode` at most 8 KB, since they are kept for the state message). A message over a cap
   is dropped and counted in `/status` `counts`, and the connection stays open. The same goes for bad JSON, including
-  junk nested too deep to parse. The Procfile's `--ws-max-size 131072` closes anything over 128 KB at the protocol level.
+  junk nested too deep to parse. Pons frames may be up to 256 KB (see above). The Procfile's `--ws-max-size 266240`
+  closes anything over 260 KB at the protocol level.
 - NaN and Infinity in the publisher's JSON (Python's `json` writes them; browsers reject them), and numbers too big
   for a float (`1e400`), become `null`.
 - Viewers: at most 500 (`RELAY_MAX_VIEWERS` can lower it). Past the cap a viewer is accepted and closed at once with
@@ -116,7 +144,9 @@ The Procfile turns off per-message compression (`--ws-per-message-deflate false`
 and compressing each frame once per viewer costs a lot of CPU.
 
 **Traffic:** while live, each viewer receives 1868 bytes × 25 fps ≈ 46.7 KB/s, or about 168 MB per viewer-hour, plus
-websocket framing. When nobody is publishing, viewers get almost nothing besides keep-alive pings.
+websocket framing. During a pons session each viewer also gets up to 5 masked JPEG frames a second (about 40 to 65
+KB each at 1280x900), so up to about 300 KB/s per viewer for the minute or two a session lasts. When nobody is
+publishing, viewers get almost nothing besides keep-alive pings.
 
 **Measured capacity** (2026-09-24, the owner's Windows 11 PC, one relay process, viewers on the same machine, 20 s
 of 25 fps rat-sized frames): 50, 150, 300 and 500 viewers each received every frame, with the relay using 5.7%,
@@ -133,7 +163,7 @@ cd relay
 pip install -r requirements.txt
 $env:LABRAT_PUBLISH_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32))"
 $env:SERVE_SITE = '1'
-uvicorn relay:app --host 127.0.0.1 --port 4720 --ws-max-size 131072 --ws-per-message-deflate false
+uvicorn relay:app --host 127.0.0.1 --port 4720 --ws-max-size 266240 --ws-per-message-deflate false
 # open http://localhost:4720/ ; in another shell with the same LABRAT_PUBLISH_TOKEN:
 # python live/publish_training.py --watch runs/ --relay ws://localhost:4720/publish
 ```
@@ -148,9 +178,10 @@ ws://localhost:4720/publish`. Its label starts with `TEST`, and the page shows a
 python relay/test_relay.py
 ```
 
-This starts the relay with the Procfile's own command line on `127.0.0.1:4723`, then drives it with a fake publisher,
-two fast viewers, a deliberately slow viewer and a stuck one (raw sockets with a 4 KB receive buffer), plus short-lived
-viewers for the caps. It checks:
+This starts the relay with the Procfile's own command line on `127.0.0.1:4762` (`RELAY_TEST_PORT` overrides it), then
+drives it with a fake publisher, two fast viewers, a deliberately slow viewer and a stuck one (raw sockets with a 4 KB
+receive buffer), plus short-lived viewers for the caps, and then, on a fresh relay, a fake buy rig on the pons channel
+next to a training publisher. It checks:
 
 - auth, including with no token set or a short one
 - state replay to late joiners, and the state size cap with big rows
@@ -162,5 +193,9 @@ viewers for the caps. It checks:
 - that refused publisher handshakes are logged at most 3 times a minute
 - the idle timer (the real 15 s), resuming, publisher replacement and bye
 - refusing replay and test streams, and `RELAY_ALLOW_TEST=1`
+- the pons channel: its own slot and token check, forwarding with `"channel":"pons"` and the `PJPG` prefix, the
+  training stream unchanged next to it, the 256 KB cap and junk frames, dropping any text with a `0x` string (even
+  JSON-escaped), at most 5 pons frames a second per viewer with the newest winning, late joiners, bye, a new
+  session, disconnects, the 15 s idle timer, resuming, replacement, and refusing other sources and test sessions
 
-It takes about a minute (94 checks) and only stops the relay processes it started.
+It takes about a minute and a half (140 checks) and only stops the relay processes it started.
