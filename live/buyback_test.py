@@ -534,7 +534,9 @@ class TestEncoding(unittest.TestCase):
         with self.assertRaises(ValueError):
             cfg(max_buy_wei=10 ** 18)
         with self.assertRaises(ValueError):
-            cfg(hourly_budget_wei=10 ** 17)                  # over the 0.01 ETH hard ceiling
+            cfg(hourly_budget_wei=10 ** 17 + 1)              # over the owner's 0.1 ETH hard ceiling
+        with self.assertRaises(ValueError):
+            cfg(max_day_wei=24 * 10 ** 17 + 1)               # over the 2.4 ETH/day hard ceiling
         with self.assertRaises(ValueError):
             cfg(hourly_budget_wei=0)                         # unset is None, not 0
         with self.assertRaises(ValueError):
@@ -544,7 +546,7 @@ class TestEncoding(unittest.TestCase):
         with self.assertRaises(ValueError):
             cfg(window_s=7)                                  # must divide the hour
         with self.assertRaises(SystemExit):
-            bb.main(['--max-total-eth', '5'])
+            bb.main(['--max-total-eth', '6'])                # over the 5 ETH hard ceiling
         with self.assertRaises(SystemExit):
             bb.main(['--hourly-budget-eth', '1'])
 

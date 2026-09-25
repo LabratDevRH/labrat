@@ -311,9 +311,11 @@ class Config:
 
 
 HARD = {   # ceilings in code: a typo on the command line can never lift these
-    'hourly_budget_wei': 10 ** 16, 'preview_budget_wei': 10 ** 16,
-    'max_buy_wei': 10 ** 16, 'max_hour_wei': 2 * 10 ** 16, 'max_day_wei': 5 * 10 ** 16,
-    'max_total_wei': 25 * 10 ** 16, 'claim_max_wei': 10 ** 17,
+    # the owner's budget (2026-09-25): 0.1 ETH x hit rate per hour -> at most 0.1 per buy and per hour, 2.4 a day
+    # (24 perfect hours), and a 5 ETH lifetime safety cap
+    'hourly_budget_wei': 10 ** 17, 'preview_budget_wei': 10 ** 16,
+    'max_buy_wei': 10 ** 17, 'max_hour_wei': 10 ** 17, 'max_day_wei': 24 * 10 ** 17,
+    'max_total_wei': 5 * 10 ** 18, 'claim_max_wei': 10 ** 17,
     'max_gas_price_wei': 10 * 10 ** 9, 'slippage_bps': 1000, 'max_gas_share_bps': 5000,
     'max_gas_day_wei': 10 ** 16, 'max_gas_total_wei': 5 * 10 ** 16,
 }
