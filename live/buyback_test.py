@@ -16,17 +16,22 @@ NOTHING here reads .env, holds a real key or sends a transaction:
   * --real-run reads the real chain (eth_call, eth_estimateGas and reads only: ReadRpc refuses anything else) and the
     public relay; the .env and signing traps stay on, and it asserts that no send method was ever called
 
-What is covered: hit counting (live / not live / TEST / other sources, validation, gaps, frames, the lever task off
-by default), reconnect and restart de-dup (in memory, over a real websocket with a relay drop, and across a restart
-from the journal), the reconnect backoff, batching, every cap (per buy, hourly, daily, total, max pending, claimed fees
-minus the gas reserve, claim threshold and claim max, gas price, gas share, the daily and total gas caps), the public
-status (capped hits shown as adding nothing, "next buy" following the caps and skips, test streams marked, status.json
-retried and refreshed), value == amountIn, the graduation / pin stops, claim-before-buy ordering, DRY never touching
-.env or a send method, every LIVE gate (including the fixed journal place, RATBRAIN_RPC, the nonce check against the
-chain, --first-nonce, a replayed stop and --clear-stop, unreadable journal lines), and the LIVE executor (write-ahead
-journal, one booking record per receipt so a crash cannot re-buy, nonces, receipts, unconfirmed -> re-broadcast of the
-same bytes, dropped only when every RPC agrees twice, a lagging RPC, a nonce mismatch stop, excess value never signed)
-against the fake chain with the mock signer.
+What is covered: counting (hits, misses and wrong clicks; live / not live / TEST / other sources, validation, gaps,
+frames, the lever task off by default; Rat Tiles' missed tiles from the episode or from its tile events, each tile
+once), reconnect and restart de-dup (in memory, over a real websocket with a relay drop, and across a restart from the
+journal), the reconnect backoff, the HOURLY rule (windows aligned to the UTC hour, buy = hourly budget x hit rate
+rounded down to 8 decimals, the minimum buy, no attempts / no hits, a restart mid-hour, an hour closed late, a buy
+that expires when the next hour closes first, a journal written before the hourly rule), the PREVIEW buy while the
+budget is not set (marked, cut to the per-buy cap only, never using up a cap), the buyer (every DRY buy simulated from
+the hand-funded buyback wallet, no creator-fee claim), every cap (per buy, hourly, daily, total, gas price, gas share,
+the daily and total gas caps), the public status (window, last_window, next_buy_at, budget; "next buy" following the
+hour, the caps and skips; no address; test streams marked; status.json retried and refreshed), value == amountIn, the
+graduation / pin stops, DRY never touching .env or a send method, the budget flags, every LIVE gate (LIVE paused, a
+budget and hour windows required, the fixed journal place, RATBRAIN_RPC, the nonce check against the chain,
+--first-nonce, a replayed stop and --clear-stop, unreadable journal lines), and the LIVE executor (claim before buy,
+write-ahead journal, one booking record per receipt so a crash cannot re-buy, nonces, receipts, unconfirmed ->
+re-broadcast of the same bytes, dropped only when every RPC agrees twice, a lagging RPC, a nonce mismatch stop, excess
+value never signed) against the fake chain with the mock signer.
 """
 import argparse
 import base64
@@ -192,7 +197,9 @@ class FakeChain:
         self.chain_id = bb.CHAIN_ID
         self.block, self.ts = 71_720_000, int(time.time())
         self.gas_price = 44_000_000
-        self.balance = 4_319_354_622_052_000
+        self.balance = 4_319_354_622_052_000                  # the launch wallet
+        self.buyback_balance = 0                              # the hand-funded buyback wallet (not funded yet)
+        self.froms = []                                       # (to, selector, from, override addresses) of eth_calls
         self.escrow = 1_166_469_550_052_640_996
         self.phase, self.graduated = 2, True
         self.token_curve, self.rec_token, self.rec_curve = bb.CURVE, bb.TOKEN, bb.CURVE
@@ -217,7 +224,7 @@ class FakeChain:
         if method == 'eth_gasPrice':
             return hex(self.gas_price), None
         if method == 'eth_getBalance':
-            return hex(self.balance), None
+            return hex(self.balance_of(params[0])), None
         if method == 'eth_getTransactionCount':
             return hex(self.nonce + (len(self.pending_txs) if params[1] == 'pending' else 0)), None
         if method == 'eth_call':
@@ -236,11 +243,23 @@ class FakeChain:
             return (None if self.forget else self.pending_txs.get(params[0])), None
         return None, {'code': -32601, 'message': f'fake chain: {method} not supported'}
 
+    def balance_of(self, addr):
+        """The buyback wallet has its own balance; any other address has the launch wallet's (as before)."""
+        a = to_checksum_address(addr) if addr else None
+        return self.buyback_balance if a == bb.BUYBACK_WALLET else self.balance
+
     def _call(self, c, override, log=True):
         to, data, sel = to_checksum_address(c['to']), c['data'], c['data'][:10]
         val = int(c.get('value', '0x0'), 16)
         frm = c.get('from')
-        bal = int(override[bb.WALLET]['balance'], 16) if override and bb.WALLET in override else self.balance
+        if log:
+            self.froms.append((to, sel, frm and to_checksum_address(frm), sorted(override or {})))
+        over = {to_checksum_address(k): v for k, v in (override or {}).items()}
+        f_cs = to_checksum_address(frm) if frm else None
+        # the buyback wallet: its override or its own balance; anything else: the launch wallet's override or the
+        # launch wallet's balance (live/buyrig_test.py relies on that for its page wallet)
+        who = bb.BUYBACK_WALLET if f_cs == bb.BUYBACK_WALLET else bb.WALLET
+        bal = int(over[who]['balance'], 16) if who in over else self.balance_of(f_cs)
         if to == bb.TOKEN and sel == bb.SEL['curve']:
             return W(A(self.token_curve)), None
         if to == bb.FACTORY and sel == bb.SEL['record']:
@@ -369,9 +388,15 @@ class MockSigner:
         return SimpleNamespace(raw_transaction=raw, hash=keccak(raw))
 
 
+HOUR = 3600
+
+
 class Clock:
+    """A frozen clock. By default one minute into the current UTC hour, so a test only crosses an hour boundary
+    where it says so (close_hour)."""
+
     def __init__(self, t=None):
-        self.t = float(t if t is not None else time.time())
+        self.t = float(t if t is not None else bb.window_start(time.time()) + 60)
 
     def __call__(self):
         return self.t
@@ -429,6 +454,35 @@ def records(engine, ev=None):
     return [r for r in engine.journal.records() if ev is None or r['ev'] == ev]
 
 
+def next_hour(clock, extra=1):
+    """Move the clock just past the end of the current UTC hour window."""
+    clock.t = bb.window_start(clock.t) + HOUR + extra
+    return clock.t
+
+
+def close_hour(engine, clock, extra=1):
+    """The hour ends: the next tick closes it and tries its buy."""
+    next_hour(clock, extra)
+    engine.tick()
+
+
+def feed(engine, attempts, start_n=0, hello=HELLO):
+    """attempts: [(hits, misses), ...] of the steering task (hits <= 4 each); returns the next n."""
+    engine.on_relay_text(json.dumps(hello))
+    n = start_n
+    for h, m in attempts:
+        engine.on_relay_text(ep(n, h, m))
+        n += 1
+    return n
+
+
+TILES_HELLO = dict(HELLO, task='tiles', run='tiles_live')
+
+
+def tile(tid, result='miss', lane=0, note_i=0):
+    return json.dumps({'type': 'tile', 'id': tid, 'lane': lane, 'result': result, 'note_i': note_i, 'song': 'ode'})
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix='buyback_test_')
@@ -444,12 +498,17 @@ class Base(unittest.TestCase):
 
     def check_invariants(self, engine):
         L, c = engine.ledger, engine.cfg
-        self.assertLessEqual(L.spent, L.claimed - c.gas_reserve_wei if L.n_buys else L.claimed,
-                             'spent more than the claimed fees minus the gas reserve')
-        self.assertLessEqual(L.bought, c.max_total_wei)
+        if engine.executor.fee_funded:          # LIVE: paid from the claimed creator fees only
+            self.assertLessEqual(L.spent, L.claimed - c.gas_reserve_wei if L.n_buys else L.claimed,
+                                 'spent more than the claimed fees minus the gas reserve')
+        self.assertLessEqual(L.cap_bought, c.max_total_wei)
         for r in records(engine, 'buy'):
             self.assertLessEqual(r['amount_wei'], c.max_buy_wei)
             self.assertGreaterEqual(r['amount_wei'], c.min_buy_wei)
+            self.assertEqual(r['amount_wei'] % bb.AMOUNT_STEP_WEI, 0, 'at most 8 decimals (what the buy rig types)')
+        # each closed hour bought at most once
+        wins = [r['window'] for r in records(engine, 'buy') if r.get('window') is not None]
+        self.assertEqual(len(wins), len(set(wins)), 'an hour bought twice')
 
 
 # ---------------------------------------------------------------------------------------------------- tests
@@ -475,11 +534,58 @@ class TestEncoding(unittest.TestCase):
         with self.assertRaises(ValueError):
             cfg(max_buy_wei=10 ** 18)
         with self.assertRaises(ValueError):
-            cfg(per_hit_wei=10 ** 15)
+            cfg(hourly_budget_wei=10 ** 17)                  # over the 0.01 ETH hard ceiling
+        with self.assertRaises(ValueError):
+            cfg(hourly_budget_wei=0)                         # unset is None, not 0
+        with self.assertRaises(ValueError):
+            cfg(preview_budget_wei=10 ** 17)
         with self.assertRaises(ValueError):
             cfg(min_buy_wei=2 * 10 ** 15)                    # over max_buy
+        with self.assertRaises(ValueError):
+            cfg(window_s=7)                                  # must divide the hour
         with self.assertRaises(SystemExit):
             bb.main(['--max-total-eth', '5'])
+        with self.assertRaises(SystemExit):
+            bb.main(['--hourly-budget-eth', '1'])
+
+    def test_budget_flags(self):
+        """--hourly-budget-eth: an amount, or unset (preview); without the flag the process environment's
+        BUYBACK_HOURLY_BUDGET_ETH (never .env), else unset."""
+        saved = os.environ.pop(bb.BUDGET_ENV, None)
+        try:
+            c = bb.build_config(bb.parse_args([]))
+            self.assertIsNone(c.hourly_budget_wei)
+            self.assertTrue(c.preview)
+            self.assertEqual((c.base_wei, c.window_s), (10 ** 15, 3600))
+            for v in ('unset', 'UNSET', 'none', ''):
+                self.assertIsNone(bb.build_config(bb.parse_args(['--hourly-budget-eth', v])).hourly_budget_wei, v)
+            c = bb.build_config(bb.parse_args(['--hourly-budget-eth', '0.0008']))
+            self.assertEqual((c.hourly_budget_wei, c.preview, c.base_wei), (8 * 10 ** 14, False, 8 * 10 ** 14))
+            c = bb.build_config(bb.parse_args(['--preview-budget-eth', '0.0005']))
+            self.assertEqual(c.base_wei, 5 * 10 ** 14)
+            os.environ[bb.BUDGET_ENV] = '0.0006'
+            self.assertEqual(bb.build_config(bb.parse_args([])).hourly_budget_wei, 6 * 10 ** 14)
+            self.assertIsNone(bb.build_config(bb.parse_args(['--hourly-budget-eth', 'unset'])).hourly_budget_wei,
+                              'the flag wins over the environment')
+            os.environ[bb.BUDGET_ENV] = 'not eth'
+            with self.assertRaises(SystemExit):
+                bb.main([])
+        finally:
+            os.environ.pop(bb.BUDGET_ENV, None)
+            if saved is not None:
+                os.environ[bb.BUDGET_ENV] = saved
+
+    def test_the_hour_arithmetic(self):
+        self.assertEqual(bb.window_start(1_790_000_000.5), 1_790_000_000 - 1_790_000_000 % 3600)
+        self.assertEqual(bb.iso(bb.window_start(1_790_003_599))[14:], '00:00Z')
+        self.assertIsNone(bb.hit_rate(0, 0, 0))
+        self.assertEqual(bb.hit_rate(3, 1, 0), 0.75)
+        self.assertEqual(bb.hit_rate(6, 1, 1), 0.75)
+        self.assertEqual(bb.hour_amount(10 ** 15, 3, 1, 0), 75 * 10 ** 13)
+        self.assertEqual(bb.hour_amount(10 ** 15, 1, 2, 0), 333_330_000_000_000, 'rounded DOWN to 8 decimals')
+        self.assertEqual(bb.eth_str(bb.hour_amount(10 ** 15, 1, 2, 0)), '0.00033333')
+        self.assertEqual(bb.hour_amount(10 ** 15, 0, 5, 5), 0)
+        self.assertEqual(bb.hour_amount(10 ** 15, 0, 0, 0), 0)
 
 
 class TestHitCounter(unittest.TestCase):
@@ -569,7 +675,7 @@ class TestHitCounter(unittest.TestCase):
         songs = tiles_env.load_songs()
         self.assertLessEqual(max(len(s['notes']) for s in songs), bb.TILES_MAX_HITS)
         self.assertEqual(tiles_env.MAX_SONG_NOTES, bb.TILES_MAX_HITS)
-        tiles_hello = dict(HELLO, task='tiles', run='tiles_live')
+        tiles_hello = TILES_HELLO
         c = bb.HitCounter()
         out = c.on_text(json.dumps(tiles_hello))
         self.assertEqual((out[0]['task'], out[0]['countable']), ('tiles', True))
@@ -585,13 +691,79 @@ class TestHitCounter(unittest.TestCase):
         tmp = tempfile.mkdtemp(prefix='buyback_test_')
         try:
             e = make_engine(tmp, chain)
-            self.assertIn('in Rat Tiles, each tile it taps', e.public_status()['rule'])
+            self.assertIn('in Rat Tiles a hit is a tile tapped in time, a miss a tile that slid past untapped and a '
+                          'wrong click a press with no tile to tap', e.public_status()['rule'])
             e.on_relay_text(json.dumps(tiles_hello))
+            e.on_relay_text(tile(7))
             e.on_relay_text(ep(0, 12, 2))
             self.assertEqual(e.ledger.hits, 12)
-            self.assertEqual(e.ledger.pending, 12 * e.cfg.per_hit_wei)
+            w = e.public_status()['window']
+            self.assertEqual((w['hits'], w['misses'], w['wrong'], w['attempts']), (12, 1, 2, 1))
+            self.assertEqual(w['hit_rate'], 0.8)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_rat_tiles_misses_and_wrong_clicks(self):
+        """Rat Tiles: misses = tiles that slid past untapped, wrong = presses with no tile to tap. From the episode's
+        "missed" when the publisher sends it, else from its tile events (each tile id once); an episode carrying
+        "wrong" is read as misses = tiles that slid past."""
+        def one(*msgs, hello=TILES_HELLO):
+            c = bb.HitCounter()
+            c.on_text(json.dumps(hello))
+            out = []
+            for m in msgs:
+                out += c.on_text(m)
+            return out
+        # 1. the episode says it: hits 9, wrong clicks 2 (its "misses"), 3 tiles slid past ("missed")
+        e, = one(ep(0, 9, 2, missed=3))
+        self.assertEqual((e['w_hits'], e['w_misses'], e['w_wrong'], e['missed_from']), (9, 3, 2, 'episode'))
+        # 2. no "missed": the tile events of that attempt, each tile once (a repeated event is not a second miss);
+        #    hits and wrong clicks do not count as missed tiles; the tally starts again for the next song
+        out = one(tile(1), tile(1), tile(2), tile(3, 'hit'), tile(4, 'wrong'), ep(0, 9, 2), tile(5), ep(1, 4, 0))
+        eps = [e for e in out if e['ev'] == 'episode']
+        self.assertEqual([(e['w_hits'], e['w_misses'], e['w_wrong'], e['missed_from']) for e in eps],
+                         [(9, 2, 2, 'tile events'), (4, 1, 0, 'tile events')])
+        # 3. "wrong" given: misses = tiles that slid past, presses = hits + wrong
+        e, = one(json.dumps({'type': 'episode', 'n': 0, 'presses': 11, 'hits': 9, 'misses': 3, 'wrong': 2,
+                             'fell': False}))
+        self.assertEqual((e['w_hits'], e['w_misses'], e['w_wrong']), (9, 3, 2))
+        # bad counts are rejected
+        for m in (ep(0, 9, 2, missed=-1), ep(0, 9, 2, missed=True), ep(0, 9, 2, missed=bb.TILES_MAX_HITS + 1),
+                  json.dumps({'type': 'episode', 'n': 0, 'presses': 12, 'hits': 9, 'misses': 3, 'wrong': 2}),
+                  json.dumps({'type': 'episode', 'n': 0, 'presses': 11, 'hits': 9, 'misses': 3, 'wrong': '2'})):
+            self.assertEqual([x['ev'] for x in one(m)], ['rejected'], m)
+        # tile events of a stream that is not counted, or not live, count nothing
+        c = bb.HitCounter()
+        c.on_text(json.dumps(dict(TILES_HELLO, label='TEST x', test=True)))
+        c.on_text(tile(1))
+        self.assertEqual(c.tiles_missed, set())
+        c = bb.HitCounter()
+        c.on_text(state(live=False, hello=TILES_HELLO))
+        c.on_text(tile(1))
+        self.assertEqual(c.tiles_missed, set())
+        # the steering task: misses = clicks off the target, never "wrong"
+        e, = [x for x in one(ep(0, 3, 2), hello=HELLO) if x['ev'] == 'episode']
+        self.assertEqual((e['w_hits'], e['w_misses'], e['w_wrong']), (3, 2, 0))
+        # joined mid-song (the relay's state on connect, or a publisher resync): that song's missed tiles are
+        # unknown, so it stays out of the hit rate (it could only raise it); the next song is followed whole
+        c = bb.HitCounter()
+        c.on_text(state(True, hello=TILES_HELLO))
+        c.on_text(tile(1))
+        e, = [x for x in c.on_text(ep(0, 9, 2)) if x['ev'] == 'episode']
+        self.assertEqual((e['partial'], e['missed_from'], e['hits'], e['w_hits'], e['w_misses'], e['w_wrong']),
+                         (True, 'unknown', 9, 0, 0, 0))
+        c.on_text(tile(2))
+        e, = [x for x in c.on_text(ep(1, 5, 0)) if x['ev'] == 'episode']
+        self.assertEqual((e['partial'], e['w_hits'], e['w_misses']), (False, 5, 1))
+        c.on_text(json.dumps(TILES_HELLO))                          # the same session again: a resync
+        c.on_text(tile(3))
+        e, = [x for x in c.on_text(ep(2, 5, 0)) if x['ev'] == 'episode']
+        self.assertTrue(e['partial'])
+        e, = [x for x in c.on_text(ep(3, 4, 1, missed=2)) if x['ev'] == 'episode']
+        self.assertEqual((e['partial'], e['w_misses'], e['w_wrong']), (False, 2, 1), '"missed" in the episode: whole')
+        c.on_text(state(True, hello=TILES_HELLO))
+        e, = [x for x in c.on_text(ep(4, 4, 1, missed=2)) if x['ev'] == 'episode']
+        self.assertFalse(e['partial'], 'an episode that says its missed tiles needs no events')
 
     def test_frames_feed_only_the_unconfirmed_tally(self):
         c = bb.HitCounter()
@@ -613,129 +785,274 @@ class TestEngineDry(Base):
         e = make_engine(self.tmp, self.chain)
         e.on_relay_text(state(True, episode=None))
         e.on_relay_text(ep(0, 3))
-        e.on_relay_text(ep(1, 2))
-        self.assertEqual((e.ledger.hits, e.ledger.pending), (5, 5 * 10 ** 13))
-        e2 = make_engine(self.tmp, self.chain)                       # a restart: the same journal
-        self.assertEqual((e2.ledger.hits, e2.ledger.pending), (5, 5 * 10 ** 13))
-        e2.on_relay_text(state(True, episode=json.loads(ep(1, 2))))  # the relay repeats the last episode
+        e.on_relay_text(ep(1, 2, 1))
+        self.assertEqual(e.ledger.hits, 5)
+        self.assertEqual(e.public_status()['window']['misses'], 1)
+        e2 = make_engine(self.tmp, self.chain)                       # a restart: the same journal, the same hour
+        self.assertEqual(e2.ledger.hits, 5)
+        w = e2.public_status()['window']
+        self.assertEqual((w['hits'], w['misses'], w['wrong'], w['attempts']), (5, 1, 0, 2), 'the hour survives it')
+        e2.on_relay_text(state(True, episode=json.loads(ep(1, 2, 1))))  # the relay repeats the last episode
         e2.on_relay_text(ep(0, 3))                                    # and the publisher resyncs
         e2.on_relay_text(ep(2, 4))
         self.assertEqual(e2.ledger.hits, 9)
         self.assertEqual([r['n'] for r in records(e2, 'hit')], [0, 1, 2])
+        self.assertEqual(e2.public_status()['window']['hits'], 9)
 
-    def test_batching_and_claim_before_buy(self):
+    def test_hourly_buy_is_budget_times_hit_rate(self):
+        """Once an hour, on the hour: the hour's buy = the hourly budget x hits / (hits + misses + wrong), rounded
+        down to 8 decimals, simulated from the hand-funded buyback wallet, with no creator-fee claim."""
         clock = Clock()
-        e = make_engine(self.tmp, self.chain, clock=clock)
-        feed_hits(e, 9)
+        e = make_engine(self.tmp, self.chain, cfg(hourly_budget_wei=10 ** 15), clock)
+        hour0 = bb.window_start(clock.t)
+        feed(e, [(4, 0), (4, 1), (4, 3)])             # 12 hits, 4 misses: hit rate 0.75
         e.tick()
-        self.assertEqual(e.note, 'pending is below the minimum buy')
-        feed_hits(e, 3, start_n=3)                   # 12 hits = 0.00012 ETH: over min_buy, under the 0.0005 trigger
-        e.tick()
-        self.assertEqual(e.note, 'waiting for the batch')
-        self.assertEqual(records(e, 'buy'), [])
-        clock.t += 601                               # the 10-minute batch
-        e.tick()
-        buys, claims = records(e, 'buy'), records(e, 'claim')
-        self.assertEqual(len(buys), 1)
-        self.assertEqual(buys[0]['amount_wei'], 12 * 10 ** 13)
-        self.assertEqual(buys[0]['hits_covered'], 12)
-        self.assertEqual(buys[0]['tokens_wei'], 12 * 10 ** 13 * self.chain.rate)
-        self.assertEqual(buys[0]['min_out_wei'], 12 * 10 ** 13 * self.chain.rate * 97 // 100)
-        self.assertTrue(buys[0]['simulated'] and buys[0]['quote_checked'])
-        self.assertEqual(buys[0]['venue'], 'pool')
-        self.assertEqual(len(claims), 1)
-        self.assertEqual(claims[0]['amount_wei'], e.cfg.claim_max_wei)
-        # claim before buy: in the journal and in the chain calls
-        evs = [r['ev'] for r in records(e) if r['ev'] in ('claim', 'buy')]
-        self.assertEqual(evs, ['claim', 'buy'])
-        calls = self.chain.calls()
-        i_claim = calls.index((bb.FEE_ESCROW, bb.SEL['claim']))
-        i_buy = calls.index((bb.ROUTER, bb.SEL['execute']))
-        self.assertLess(i_claim, i_buy)
-        self.assertEqual(e.ledger.pending, 0)
-        self.check_invariants(e)
-        # the next buy uses the fees already claimed: no second claim
-        feed_hits(e, 50, start_n=10)                 # 0.0005 ETH: the trigger, no waiting
-        e.tick()
-        self.assertEqual(len(records(e, 'buy')), 2)
-        self.assertEqual(len(records(e, 'claim')), 1)
-        self.check_invariants(e)
-        # DRY claims are virtual: the next claim treats the escrow as holding less by what DRY claimed
+        self.assertEqual(records(e, 'buy'), [], 'nothing is bought before the hour ends')
         st = e.public_status()
-        self.assertEqual(st['label'], bb.DRY_LABEL)
-        self.assertEqual(st['buys']['count'], 2)
+        self.assertEqual(st['window'], {'start': bb.iso(hour0), 'end': bb.iso(hour0 + HOUR), 'hits': 12, 'misses': 4,
+                                        'wrong': 0, 'hit_rate': 0.75, 'attempts': 3, 'preview': False,
+                                        'projected_eth': '0.00075'})
+        self.assertEqual((st['next_buy_note'], st['next_buy_at']), ('waiting for the hour', bb.iso(hour0 + HOUR)))
+        self.assertEqual(st['next_buy_in_s'], HOUR - 60)
+        self.assertIsNone(st['last_window'])
+        self.assertEqual(st['budget'], {'hourly_eth': '0.001', 'rule': 'hourly budget x hit rate', 'set': True,
+                                        'preview_eth': None, 'funding': 'a separate buyback wallet, funded by hand'})
+        self.assertEqual((st['hits']['pending'], st['pending']), (12, {'eth': '0', 'hits': 12}))
+        self.assertIsNone(st['per_hit_eth'])
+        close_hour(e, clock)
+        win, = records(e, 'window')
+        self.assertEqual({k: win[k] for k in ('start', 'hits', 'misses', 'wrong', 'attempts', 'hit_rate', 'budget_wei',
+                                              'preview', 'amount_wei', 'cap', 'late', 'note')},
+                         {'start': bb.iso(hour0), 'hits': 12, 'misses': 4, 'wrong': 0, 'attempts': 3, 'hit_rate': 0.75,
+                          'budget_wei': 10 ** 15, 'preview': False, 'amount_wei': 75 * 10 ** 13, 'cap': None,
+                          'late': False, 'note': None})
+        b, = records(e, 'buy')
+        self.assertEqual((b['amount_wei'], b['window'], b['hits_covered'], b['hit_rate'], b['preview']),
+                         (75 * 10 ** 13, hour0, 12, 0.75, False))
+        self.assertEqual(b['tokens_wei'], 75 * 10 ** 13 * self.chain.rate)
+        self.assertEqual(b['min_out_wei'], 75 * 10 ** 13 * self.chain.rate * 97 // 100)
+        self.assertTrue(b['simulated'] and b['quote_checked'])
+        self.assertEqual((b['venue'], b['buyer'], b['buyer_funded']), ('pool', bb.BUYBACK_WALLET, False))
+        # the buyer: every buy call from the buyback wallet, with a balance override on it; no claim at all
+        buys = [f for f in self.chain.froms if f[0] == bb.ROUTER]
+        self.assertTrue(buys and all(f[2] == bb.BUYBACK_WALLET and f[3] == [bb.BUYBACK_WALLET] for f in buys), buys)
+        self.assertNotIn((bb.FEE_ESCROW, bb.SEL['claim']), self.chain.calls())
+        self.assertEqual(records(e, 'claim'), [])
+        st = e.public_status()
+        lw = st['last_window']
+        self.assertEqual({k: lw[k] for k in ('start', 'end', 'hits', 'misses', 'wrong', 'hit_rate', 'preview',
+                                             'budget_eth', 'amount_eth')},
+                         {'start': bb.iso(hour0), 'end': bb.iso(hour0 + HOUR), 'hits': 12, 'misses': 4, 'wrong': 0,
+                          'hit_rate': 0.75, 'preview': False, 'budget_eth': '0.001', 'amount_eth': '0.00075'})
+        self.assertEqual({k: lw['buy'][k] for k in ('state', 'eth_in', 'simulated', 'preview', 'venue')},
+                         {'state': 'simulated', 'eth_in': '0.00075', 'simulated': True, 'preview': False,
+                          'venue': 'pool'})
+        r0 = st['buys']['recent'][0]
+        self.assertEqual((r0['eth_in'], r0['hits_covered'], r0['window'], r0['hit_rate'], r0['preview'], r0['simulated']),
+                         ('0.00075', 12, bb.iso(hour0), 0.75, False, True))
+        self.assertEqual((st['hits']['in_buys'], st['hits']['pending'], st['pending']['eth']), (12, 0, '0'))
+        self.assertEqual(st['window']['start'], bb.iso(hour0 + HOUR))
+        self.assertEqual(st['next_buy_at'], bb.iso(hour0 + 2 * HOUR))
+        # a funded buyback wallet is journalled as such
+        self.chain.buyback_balance = 10 ** 16
+        feed(e, [(4, 0)], start_n=3)
+        close_hour(e, clock)
+        self.assertTrue(records(e, 'buy')[-1]['buyer_funded'])
+        self.assertEqual(records(e, 'buy')[-1]['amount_wei'], 10 ** 15, '100 % of the budget')
+        # an hour with no attempts, an hour with no hits, an hour whose buy is under the minimum: recorded, no buy
+        close_hour(e, clock)
+        feed(e, [(0, 3)], start_n=4)
+        close_hour(e, clock)
+        feed(e, [(1, 0)] + [(0, 4)] * 5, start_n=5)    # 1 / 21 of 0.001 ETH = 0.0000476 < 0.0001
+        close_hour(e, clock)
+        self.assertEqual([r['note'] for r in records(e, 'window')][2:],
+                         ['no attempts in the hour', 'no hits in the hour', 'hit rate too low for the minimum buy'])
+        self.assertEqual(len(records(e, 'buy')), 2)
+        self.assertEqual(e.public_status()['last_window']['buy'], {'state': 'none',
+                                                                   'note': 'hit rate too low for the minimum buy'})
+        self.check_invariants(e)
+
+    def test_preview_buy_while_the_budget_is_not_set(self):
+        """No budget yet: every hour is still recorded and runs a SIMULATED PREVIEW buy of the nominal amount x the
+        hit rate, clearly marked, cut to the per-buy cap only and never using up a cap or the gas caps."""
+        clock = Clock()
+        c = cfg(max_total_wei=10 ** 15, max_day_wei=10 ** 15, max_hour_wei=10 ** 15, max_gas_total_wei=10 ** 12)
+        e = make_engine(self.tmp, self.chain, c, clock)
+        st = e.public_status()
+        self.assertEqual(st['budget'], {'hourly_eth': None, 'rule': 'hourly budget x hit rate', 'set': False,
+                                        'preview_eth': '0.001', 'funding': 'a separate buyback wallet, funded by hand'})
+        self.assertIn('The hourly budget is not set yet: until it is, each hour runs a simulated preview buy of 0.001 '
+                      'ETH x the hit rate.', st['rule'])
+        self.assertTrue(st['window']['preview'])
+        for h in range(3):                            # 3 hours at 3/4: 0.00075 each, over the 0.001 total cap
+            feed(e, [(3, 1)], start_n=h)
+            close_hour(e, clock)
+        buys = records(e, 'buy')
+        self.assertEqual([b['amount_wei'] for b in buys], [75 * 10 ** 13] * 3, 'previews use no cap')
+        self.assertTrue(all(b['preview'] and b['simulated'] for b in buys))
+        self.assertTrue(all(w['preview'] and w['budget_wei'] is None and w['base_wei'] == 10 ** 15
+                            for w in records(e, 'window')))
+        L = e.ledger
+        self.assertEqual((L.cap_bought, len(L.buys), L.gas_total, L.n_previews), (0, 0, 0, 3))
+        st = e.public_status()
+        self.assertIsNone(st['stopped'])
+        self.assertEqual(st['next_buy_note'], 'waiting for the hour')
+        self.assertEqual((st['buys']['count'], st['buys']['previews'], st['buys']['eth_in']), (3, 3, '0.00225'))
+        r0 = st['buys']['recent'][0]
+        self.assertEqual((r0['preview'], r0['label'], r0['simulated']), (True, bb.PREVIEW_LABEL, True))
+        self.assertEqual((st['last_window']['preview'], st['last_window']['preview_eth'],
+                          st['last_window']['budget_eth'], st['last_window']['buy']['preview']),
+                         (True, '0.001', None, True))
+        # a perfect hour with a preview amount over the per-buy cap: cut to it
+        e2 = make_engine(os.path.join(self.tmp, 'p'), self.chain,
+                         cfg(preview_budget_wei=5 * 10 ** 15, max_buy_wei=10 ** 15), clock)
+        feed(e2, [(4, 0)])
+        close_hour(e2, clock)
+        self.assertEqual((records(e2, 'window')[0]['cap'], records(e2, 'buy')[0]['amount_wei']), ('per-buy', 10 ** 15))
+        self.check_invariants(e)
 
     def test_every_cap(self):
         clock = Clock()
-        c = cfg(min_buy_wei=10 ** 14, batch_trigger_wei=10 ** 14, max_buy_wei=2 * 10 ** 14, max_hour_wei=3 * 10 ** 14,
-                max_day_wei=5 * 10 ** 14, max_total_wei=6 * 10 ** 14, max_pending_wei=9 * 10 ** 14)
+        c = cfg(hourly_budget_wei=10 ** 15, min_buy_wei=10 ** 14, max_buy_wei=10 ** 15, max_hour_wei=10 ** 15,
+                max_day_wei=25 * 10 ** 14, max_total_wei=3 * 10 ** 15)
         e = make_engine(self.tmp, self.chain, c, clock)
-        feed_hits(e, 100)                            # 0.001 ETH of hits, but max_pending is 0.0009
-        self.assertEqual(e.ledger.pending, 9 * 10 ** 14)
-        self.assertEqual(e.ledger.capped, 10 ** 14)
-        self.assertEqual(sum(r['capped_wei'] for r in records(e, 'hit')), 10 ** 14)
-        amounts = []
+        amounts, n = [], 0
 
-        def step(dt=1):
-            clock.t += dt
-            n = len(records(e, 'buy'))
-            e.tick()
+        def hour(extra=1):
+            nonlocal n
+            n = feed(e, [(4, 0)], start_n=n)
+            k = len(records(e, 'buy'))
+            close_hour(e, clock, extra)
             b = records(e, 'buy')
-            amounts.append(b[-1]['amount_wei'] if len(b) > n else 0)
+            amounts.append(b[-1]['amount_wei'] if len(b) > k else 0)
+            return records(e, 'window')[-1]
 
-        step()                                       # per-buy cap: 0.0002
-        step()                                       # hourly room 0.0001
-        step()                                       # hourly cap reached
-        self.assertEqual(e.note, 'the hourly cap is reached')
-        step(3601)                                   # a new hour: per-buy 0.0002 (day 0.0005 now)
-        step()                                       # daily cap reached
-        self.assertEqual(e.note, 'the daily cap is reached')
-        step(86401)                                  # a new day: total room 0.0001
-        step(3601)
-        self.assertEqual(e.note, 'the total cap is reached')
-        self.assertEqual(amounts, [2 * 10 ** 14, 10 ** 14, 0, 2 * 10 ** 14, 0, 10 ** 14, 0])
-        self.assertEqual(e.ledger.bought, c.max_total_wei)
+        self.assertIsNone(hour()['cap'])               # 0.001
+        self.assertIsNone(hour()['cap'])               # 0.001: the rolling hour holds one buy
+        w = hour()                                     # the day has 0.0005 left: cut to it
+        self.assertEqual((w['cap'], w['amount_wei']), ('daily', 5 * 10 ** 14))
+        w = hour()
+        self.assertEqual((w['cap'], w['note'], w['amount_wei']), ('daily', 'the daily cap is reached', 0))
+        self.assertEqual(e.public_status()['next_buy_note'], 'daily cap reached')
+        self.assertIsNone(e.public_status()['next_buy_in_s'])
+        clock.t += 86400                               # a new day: the total has 0.0005 left
+        w = hour()
+        self.assertEqual((w['cap'], w['amount_wei']), ('total', 5 * 10 ** 14))
+        st = e.public_status()
+        self.assertEqual((st['next_buy_in_s'], st['next_buy_note']), (None, 'total cap reached'))
+        self.assertEqual(st['stopped'], 'the total cap is reached: no more buybacks')
+        w = hour()
+        self.assertEqual((w['note'], w['amount_wei']), ('the total cap is reached', 0))
+        self.assertEqual(amounts, [10 ** 15, 10 ** 15, 5 * 10 ** 14, 0, 5 * 10 ** 14, 0])
+        self.assertEqual(e.ledger.cap_bought, c.max_total_wei)
         self.check_invariants(e)
 
-    def test_fee_caps_threshold_reserve_and_gas(self):
+    def test_a_skipped_buy_retries_until_the_next_hour_then_expires(self):
+        """A passing problem (gas price over the cap) retries the hour's buy; when the next hour closes first, the
+        old buy expires and only the new hour's buy is tried. Gas too large a share of the buy: no buy that hour."""
         clock = Clock()
-        self.chain.escrow = 5 * 10 ** 14                     # under the 0.001 claim threshold
-        c = cfg(batch_trigger_wei=10 ** 14, claim_max_wei=4 * 10 ** 14, claim_min_wei=4 * 10 ** 14)
-        e = make_engine(self.tmp, self.chain, c, clock)
-        feed_hits(e, 30)
-        self.chain.escrow = 3 * 10 ** 14
-        e.tick()
-        self.assertEqual([r['ev'] for r in records(e) if r['ev'] in ('claim_skip', 'buy_skip', 'claim', 'buy')],
-                         ['claim_skip', 'buy_skip'])
-        self.assertIn('not enough claimed creator fees', records(e, 'buy_skip')[0]['why'])
-        self.assertNotIn((bb.FEE_ESCROW, bb.SEL['claim']), self.chain.calls(), 'no claim under the threshold')
-        # enough in the escrow now: the claim is capped at claim_max and the buy is cut to fees - reserve - gas
-        self.chain.escrow = 10 ** 18
-        clock.t += 301
-        e.tick()
-        cl, b = records(e, 'claim'), records(e, 'buy')
-        self.assertEqual(cl[0]['amount_wei'], 4 * 10 ** 14)
-        reserve_buy = int(bb.GAS_GUESS['pool'] * bb.GAS_MULT) * self.chain.gas_price * bb.FEE_MULT
-        room = 4 * 10 ** 14 - cl[0]['gas_cost_wei'] - c.gas_reserve_wei - reserve_buy
-        self.assertEqual(b[0]['amount_wei'], room)
-        self.assertLess(b[0]['amount_wei'], 3 * 10 ** 14)
-        self.check_invariants(e)
-        # gas price over the cap: skipped, nothing simulated
-        feed_hits(e, 30, start_n=20)
+        e = make_engine(self.tmp, self.chain, cfg(hourly_budget_wei=10 ** 15), clock)
+        hour0 = bb.window_start(clock.t)
+        feed(e, [(4, 0)])
         self.chain.gas_price = 2 * 10 ** 9
         n_calls = len(self.chain.calls())
-        clock.t += 301
-        e.tick()
+        close_hour(e, clock)
         self.assertIn('gas price', records(e, 'buy_skip')[-1]['why'])
         self.assertEqual(len(self.chain.calls()), n_calls + 4, 'only the pinned checks ran (4 eth_calls)')
-        # gas share over the cap: skipped after the simulation, nothing booked
+        st = e.public_status()
+        self.assertEqual(st['next_buy_note'], 'gas price over the cap')
+        self.assertTrue(290 <= st['next_buy_in_s'] <= 301, st['next_buy_in_s'])
+        self.assertEqual(st['next_buy_at'], bb.iso(clock.t + st['next_buy_in_s']))
+        self.assertEqual((st['last_window']['buy']['state'], st['pending']), ('due', {'eth': '0.001', 'hits': 4}))
+        clock.t += 100
+        e.tick()
+        self.assertEqual(len(records(e, 'buy_skip')), 1, 'waits for its retry time')
+        clock.t += 250
+        e.tick()
+        self.assertEqual(len(records(e, 'buy_skip')), 2)
+        feed(e, [(2, 2)], start_n=1)
+        close_hour(e, clock)                           # still over the cap: the first hour's buy expires
+        exp, = records(e, 'buy_expired')
+        self.assertEqual((exp['window'], exp['amount_wei']), (hour0, 10 ** 15))
         self.chain.gas_price = 44_000_000
+        clock.t += 301
+        e.tick()
+        b, = records(e, 'buy')
+        self.assertEqual((b['window'], b['amount_wei']), (hour0 + HOUR, 5 * 10 ** 14))
+        # gas share over the cap: no buy for that hour (the amount will not grow)
         e2 = make_engine(os.path.join(self.tmp, 'g'), self.chain,
-                         cfg(min_buy_wei=2 * 10 ** 13, batch_trigger_wei=2 * 10 ** 13, max_gas_share_bps=1000))
-        feed_hits(e2, 2)
-        e2.tick()
-        self.assertIn('gas would be', records(e2, 'buy_skip')[-1]['why'])
+                         cfg(hourly_budget_wei=10 ** 15, max_gas_share_bps=50), clock)
+        feed(e2, [(4, 0)])
+        close_hour(e2, clock)
         self.assertEqual(records(e2, 'buy'), [])
+        nb, = records(e2, 'window_nobuy')
+        self.assertIn('gas would be', nb['why'])
+        st = e2.public_status()
+        self.assertEqual(st['last_window']['buy'], {'state': 'none', 'note': 'gas too large a share of the buy'})
+        self.assertEqual((st['next_buy_note'], st['pending']['eth']), ('waiting for the hour', '0'))
+        clock.t += 500
+        e2.tick()
+        self.assertEqual(records(e2, 'buy'), [], 'never retried')
+
+    def test_restart_mid_hour_and_an_hour_closed_late(self):
+        """The hour survives a restart; an hour that ended while the engine was down is closed on the restart: the
+        hour just ended still buys, an older one closes late without a buy."""
+        clock = Clock()
+        c = cfg(hourly_budget_wei=10 ** 15)
+        e = make_engine(self.tmp, self.chain, c, clock)
+        hour0 = bb.window_start(clock.t)
+        feed(e, [(4, 0), (2, 2)])
+        clock.t += 1200
+        e2 = make_engine(self.tmp, self.chain, c, clock)          # a restart in the same hour
+        feed(e2, [(4, 0)], start_n=2)
+        self.assertEqual(e2.public_status()['window']['hits'], 10)
+        next_hour(clock, 600)                                     # down over the hour's end, back 10 min later
+        e3 = make_engine(self.tmp, self.chain, c, clock)
+        e3.tick()
+        w, = records(e3, 'window')
+        self.assertEqual((w['start_t'], w['hits'], w['misses'], w['late'], w['amount_wei']),
+                         (hour0, 10, 2, False, bb.hour_amount(10 ** 15, 10, 2, 0)))
+        self.assertEqual(records(e3, 'buy')[0]['window'], hour0)
+        # hits in the next hour, then down for more than an hour: that hour closes late, without a buy
+        feed(e3, [(4, 0)], start_n=3)
+        clock.t += 2 * HOUR
+        e4 = make_engine(self.tmp, self.chain, c, clock)
+        e4.tick()
+        late = records(e4, 'window')[-1]
+        self.assertEqual((late['start_t'], late['late'], late['amount_wei'], late['hits']), (hour0 + HOUR, True, 0, 4))
+        self.assertEqual(late['note'], 'closed late; the engine was not running at the hour')
+        self.assertEqual(len(records(e4, 'buy')), 1)
+        e5 = make_engine(self.tmp, self.chain, c, clock)          # and it is not closed twice
+        e5.tick()
+        self.assertEqual(len(records(e5, 'window')), 2)
+        self.check_invariants(e5)
+
+    def test_a_journal_from_before_the_hourly_rule(self):
+        """Old per-hit records replay: their hits and buys count, their pending amount is dropped (shown as counted,
+        bought nothing), and the first hour after the switch buys only its own hour."""
+        clock = Clock()
+        path = os.path.join(self.tmp, 'journal.jsonl')
+        t = clock.t - 5000
+        old = [{'t': t, 'mode': 'DRY', 'ev': 'hit', 'key': 'steer_live|steer|x#0', 'hits': 50, 'added_wei': 5 * 10 ** 14,
+                'capped_wei': 0},
+               {'t': t + 1, 'mode': 'DRY', 'ev': 'claim', 'amount_wei': 2 * 10 ** 16, 'gas_cost_wei': 10 ** 12},
+               {'t': t + 2, 'mode': 'DRY', 'ev': 'buy', 'amount_wei': 5 * 10 ** 14, 'hits_covered': 50,
+                'tokens_wei': 10 ** 18, 'venue': 'pool', 'simulated': True, 'gas_cost_wei': 7 * 10 ** 12},
+               {'t': t + 3, 'mode': 'DRY', 'ev': 'hit', 'key': 'steer_live|steer|x#1', 'hits': 7, 'added_wei': 7 * 10 ** 13,
+                'capped_wei': 0}]
+        with _real_open(path, 'w', encoding='utf-8') as f:
+            for r in old:
+                f.write(json.dumps(r) + '\n')
+        e = make_engine(self.tmp, self.chain, cfg(hourly_budget_wei=10 ** 15), clock)
+        st = e.public_status()
+        self.assertEqual((e.ledger.pending, e.ledger.windows, e.ledger.n_buys), (0, {}, 1))
+        self.assertEqual({k: st['hits'][k] for k in ('counted', 'in_buys', 'pending', 'over_caps')},
+                         {'counted': 57, 'in_buys': 50, 'pending': 0, 'over_caps': 7})
+        self.assertEqual(st['buys']['recent'][0]['preview'], False)
+        feed(e, [(4, 0)])
+        close_hour(e, clock)
+        self.assertEqual([b['amount_wei'] for b in records(e, 'buy')], [5 * 10 ** 14, 10 ** 15])
+        self.assertEqual(e.public_status()['hits']['in_buys'], 54)
 
     def test_graduation_and_pin_stops(self):
         def run(**chain_attrs):
@@ -743,21 +1060,28 @@ class TestEngineDry(Base):
             for k, v in chain_attrs.items():
                 setattr(ch, k, v)
             venue = chain_attrs.pop('venue', 'auto') if 'venue' in chain_attrs else 'auto'
-            e = make_engine(tempfile.mkdtemp(dir=self.tmp), ch, cfg(batch_trigger_wei=10 ** 14, venue=venue))
+            clock = Clock()
+            e = make_engine(tempfile.mkdtemp(dir=self.tmp), ch, cfg(hourly_budget_wei=12 * 10 ** 13, venue=venue),
+                            clock)
             feed_hits(e, 12)
-            e.tick()
-            return e, ch
+            close_hour(e, clock)
+            return e, ch, clock
 
-        e, ch = run(venue='curve')                   # the literal rule: the curve graduated -> stop
+        e, ch, _ = run(venue='curve')                  # the literal rule: the curve graduated -> stop
         self.assertIn('graduated', e.stopped)
         self.assertEqual(e.public_status()['stopped'], 'the curve graduated (buys set to the curve only)')
         self.assertEqual(records(e, 'buy'), [])
         self.assertNotIn((bb.ROUTER, bb.SEL['execute']), ch.calls())
-        e, ch = run(phase=0, graduated=False)        # a live curve: bought on the curve, never the router
+        e, ch, _ = run(phase=0, graduated=False)       # a live curve: bought on the curve, never the router
         b = records(e, 'buy')
         self.assertEqual(b[0]['venue'], 'curve')
         self.assertEqual(b[0]['tokens_wei'], 12 * 10 ** 13 * ch.curve_rate)
         self.assertNotIn((bb.ROUTER, bb.SEL['execute']), ch.calls())
+        cb = [f for f in ch.froms if f[0] == bb.CURVE and f[1] == bb.SEL['curve_buy']]
+        self.assertTrue(cb and all(f[2] == bb.BUYBACK_WALLET for f in cb), 'the curve buy is the buyback wallet\'s')
+        calldata = bb.cd_curve_buy(1, 0, bb.BUYBACK_WALLET)
+        self.assertEqual(decode(['uint256', 'uint256', 'address'], bytes.fromhex(calldata[10:]))[2].lower(),
+                         bb.BUYBACK_WALLET.lower(), 'a curve buy sends the tokens to the buyer')
         e.tick()
         for attrs, what in (({'phase': 1}, 'phase 1'), ({'phase': 2, 'graduated': False}, 'phase 2'),
                             ({'token_curve': '0x' + '12' * 20}, 'token.curve()'),
@@ -765,77 +1089,72 @@ class TestEngineDry(Base):
                             ({'fee_recipient': '0x' + '34' * 20}, 'creator-fee recipient'),
                             ({'hook': '0x' + '56' * 20}, 'memeHook'), ({'tick': 60}, 'tick spacing'),
                             ({'buyback_enabled': 1}, 'buyback switch'), ({'pair': '0x' + '78' * 20}, 'pair token')):
-            e, ch = run(**attrs)
+            e, ch, clock = run(**attrs)
             self.assertIsNotNone(e.stopped, what)
             self.assertIn(what.split()[0], e.stopped)
             self.assertEqual(records(e, 'buy'), [], what)
             self.assertEqual(e.public_status()['stopped'], 'the chain no longer matches the pinned coin')
             feed_hits(e, 60, start_n=10)
-            e.tick()
+            close_hour(e, clock)
             self.assertEqual(records(e, 'buy'), [], 'stopped stays stopped')
 
     def test_status_is_public_safe(self):
-        e = make_engine(self.tmp, self.chain, cfg(batch_trigger_wei=10 ** 14))
+        clock = Clock()
+        e = make_engine(self.tmp, self.chain, cfg(hourly_budget_wei=10 ** 15), clock)
         feed_hits(e, 12)
-        e.tick()
+        close_hour(e, clock)
+        feed_hits(e, 3, start_n=5)
         st = json.dumps(e.public_status())
         self.assertNotIn(bb.WALLET[2:].lower(), st.lower())
+        self.assertNotIn(bb.BUYBACK_WALLET[2:].lower(), st.lower())
         import re
         self.assertIsNone(re.search(r'0x[0-9a-fA-F]{40}', st), 'no address of any kind')
-        for k in ('claim', 'budget', 'escrow', 'claimable', 'reserve'):
+        for k in ('claim', 'escrow', 'claimable', 'reserve'):
             self.assertNotIn(k, st.lower().replace('claimed creator fees', ''), k)
+        # "budget" is the owner's hourly budget (the contract's status.budget), never the creator fees
+        self.assertEqual(set(e.public_status()['budget']), {'hourly_eth', 'rule', 'set', 'preview_eth', 'funding'})
         self.assertIn(bb.DRY_LABEL, st)
         self.assertIn('does not understand money', st)
         self.assertIn('in the live view (the newest saved training checkpoint, playing in its own simulation)', st)
-        self.assertIn('hits over the caps are counted but add nothing', st)
+        self.assertIn('The hit rate is hits / (hits + misses + wrong clicks)', st)
+        self.assertIn("that hour's $LABRAT buyback is the hourly budget x the hit rate, cut to the per-buy, hourly, "
+                      'daily and total caps', st)
+        # every string the status gives the site's "next buy" line is a fixed phrase the site accepts
+        import re as _re
+        self.assertTrue(_re.match(r'^[a-z][a-z ;.-]{0,59}$', e.public_status()['next_buy_note']))
 
-    def test_status_counts_capped_hits_and_never_says_due_while_blocked(self):
-        """Review findings: hits that add nothing are shown as such; next_buy follows the caps, skips and the total
-        cap instead of saying "due now"."""
+    def test_status_splits_hits_and_never_says_due_while_blocked(self):
+        """Hits counted = in buys + pending (this hour and a booked buy) + counted, bought nothing; "next buy"
+        follows the hour, the caps and the skips; never "due now" while blocked."""
         clock = Clock()
-        c = cfg(min_buy_wei=10 ** 14, batch_trigger_wei=10 ** 14, max_buy_wei=2 * 10 ** 14, max_hour_wei=3 * 10 ** 14,
-                max_day_wei=5 * 10 ** 14, max_total_wei=6 * 10 ** 14, max_pending_wei=9 * 10 ** 14)
+        c = cfg(hourly_budget_wei=10 ** 15, max_day_wei=10 ** 15, max_hour_wei=10 ** 15, max_total_wei=10 ** 16)
         e = make_engine(self.tmp, self.chain, c, clock)
-        feed_hits(e, 100)
+        feed_hits(e, 12)
         st = e.public_status()
-        self.assertEqual((st['next_buy_in_s'], st['next_buy_note']), (0, 'due'))
-        self.assertEqual(st['hits']['over_caps'], 10)
-        for dt in (1, 1, 1):
-            clock.t += dt
-            e.tick()
+        self.assertEqual((st['next_buy_in_s'], st['next_buy_note']), (HOUR - 60, 'waiting for the hour'))
+        close_hour(e, clock)
+        feed_hits(e, 8, start_n=3)
         st = e.public_status()
-        self.assertEqual(e.note, 'the hourly cap is reached')
-        self.assertEqual((st['next_buy_in_s'], st['next_buy_note']), (None, 'hourly cap reached'))
+        self.assertEqual((st['next_buy_in_s'], st['next_buy_note']), (None, 'daily cap reached'))
+        close_hour(e, clock)                                  # bought nothing: the daily cap
+        feed_hits(e, 4, start_n=5)
+        st = e.public_status()
         self.assertEqual({k: st['hits'][k] for k in ('counted', 'in_buys', 'pending', 'over_caps')},
-                         {'counted': 100, 'in_buys': 30, 'pending': 60, 'over_caps': 10})
+                         {'counted': 24, 'in_buys': 12, 'pending': 4, 'over_caps': 8})
         self.assertIsNone(st['stopped'])
-        clock.t += 3601
-        e.tick()
-        e.tick()
-        self.assertEqual(e.public_status()['next_buy_note'], 'daily cap reached')
-        feed_hits(e, 90, start_n=30)                 # pending 0.0004 -> the 0.0009 max: 50 add, 40 add nothing
-        self.assertEqual(e.public_status()['hits']['over_caps'], 50)
-        clock.t += 86401
-        e.tick()
-        st = e.public_status()
-        self.assertEqual(e.ledger.bought, c.max_total_wei)
-        self.assertEqual((st['next_buy_in_s'], st['next_buy_note']), (None, 'total cap reached'))
-        self.assertEqual(st['stopped'], 'the total cap is reached: no more buybacks')
-        # a skip (gas price) is shown with its wait and a fixed reason, not "due now"
-        e2 = make_engine(os.path.join(self.tmp, 'g'), self.chain, cfg(batch_trigger_wei=10 ** 14), clock)
-        feed_hits(e2, 12)
+        # a skip is shown with its wait and a fixed reason, not "due now"; the booked hour's hits stay pending
+        e2 = make_engine(os.path.join(self.tmp, 'g'), self.chain, cfg(hourly_budget_wei=10 ** 15), clock)
+        feed_hits(e2, 4)
         self.chain.gas_price = 2 * 10 ** 9
-        e2.tick()
+        close_hour(e2, clock)
+        feed_hits(e2, 2, start_n=1)
         st = e2.public_status()
         self.assertEqual(st['next_buy_note'], 'gas price over the cap')
         self.assertTrue(250 <= st['next_buy_in_s'] <= 301, st['next_buy_in_s'])
-        # batching: the interval is shown
-        self.chain.gas_price = 44_000_000
-        e3 = make_engine(os.path.join(self.tmp, 'b'), self.chain, cfg(), clock)
-        feed_hits(e3, 12)
-        st = e3.public_status()
-        self.assertEqual(st['next_buy_note'], 'batching')
-        self.assertTrue(590 <= st['next_buy_in_s'] <= 600)
+        self.assertEqual((st['hits']['pending'], st['pending']), (6, {'eth': '0.001', 'hits': 6}))
+        # stopped: no next buy
+        e2._stop('test', 'repeated failures')
+        self.assertEqual((e2.public_status()['next_buy_in_s'], e2.public_status()['next_buy_note']), (None, 'stopped'))
 
     def test_status_marks_test_streams_and_other_relays(self):
         e = make_engine(self.tmp, self.chain)
@@ -855,26 +1174,32 @@ class TestEngineDry(Base):
 
     def test_gas_has_its_own_cap(self):
         clock = Clock()
-        c = cfg(batch_trigger_wei=10 ** 14, max_gas_day_wei=3 * 10 ** 13)
+        c = cfg(hourly_budget_wei=10 ** 15, max_gas_day_wei=25 * 10 ** 12)
         e = make_engine(self.tmp, self.chain, c, clock)
         feed_hits(e, 12)
-        e.tick()
+        close_hour(e, clock)
         self.assertEqual(len(records(e, 'buy')), 1)
         feed_hits(e, 12, start_n=3)
-        clock.t += 700
-        e.tick()
+        close_hour(e, clock)
         self.assertEqual(len(records(e, 'buy')), 1)
         self.assertIn('daily gas cap', records(e, 'buy_skip')[-1]['why'])
         self.assertEqual(e.public_status()['next_buy_note'], 'daily gas cap reached')
-        clock.t += 86401
-        e.tick()
+        clock.t += 86400
+        feed_hits(e, 12, start_n=6)
+        close_hour(e, clock)
         self.assertEqual(len(records(e, 'buy')), 2)
-        e2 = make_engine(os.path.join(self.tmp, 't'), self.chain, cfg(batch_trigger_wei=10 ** 14,
+        e2 = make_engine(os.path.join(self.tmp, 't'), self.chain, cfg(hourly_budget_wei=10 ** 15,
                                                                         max_gas_total_wei=10 ** 13), clock)
         feed_hits(e2, 12)
-        e2.tick()
+        close_hour(e2, clock)
         self.assertEqual(records(e2, 'buy'), [])
         self.assertIn('total gas cap', records(e2, 'buy_skip')[-1]['why'])
+        # a preview uses no gas cap
+        e3 = make_engine(os.path.join(self.tmp, 'p'), self.chain, cfg(max_gas_total_wei=10 ** 13), clock)
+        for h in range(2):
+            feed_hits(e3, 12, start_n=h * 3)
+            close_hour(e3, clock)
+        self.assertEqual(len(records(e3, 'buy')), 2)
 
     def test_value_must_equal_what_the_tx_spends(self):
         """Review finding: the router keeps any msg.value above amountIn, so value == amountIn == SETTLE_ALL."""
@@ -988,8 +1313,9 @@ class TestDryNeverTouchesEnvOrSend(Base):
             bb.LiveExecutor(rpc, MockSigner(), None, None, None, cfg())
 
     def test_main_dry_end_to_end(self):
-        """main() in DRY with the fake chain and the mock relay: hits, a claim and a buy simulated, status served,
-        and no .env read, no signer, no send method anywhere."""
+        """main() in DRY with the fake chain and the mock relay: hits counted into an hour window (a 2 s window here,
+        --window-s, tests only), the window closed and its PREVIEW buy simulated from the buyback wallet, status
+        served, and no .env read, no signer, no claim, no send method anywhere."""
         from websockets.sync.server import serve
         msgs = [state(True, episode=None)] + [ep(n, 4) for n in range(13)]
 
@@ -1009,7 +1335,8 @@ class TestDryNeverTouchesEnvOrSend(Base):
 
         def run():
             out['rc'] = bb.main(['--relay', f'ws://127.0.0.1:{MOCK_RELAY_PORT}/live', '--journal-dir', self.tmp,
-                                 '--duration', '4', '--status-port', str(STATUS_PORT), '--tick', '0.2'])
+                                 '--duration', '5', '--status-port', str(STATUS_PORT), '--tick', '0.2',
+                                 '--window-s', '2', '--hourly-budget-eth', 'unset'])
         t = threading.Thread(target=run)
         t.start()
         status = None
@@ -1032,8 +1359,12 @@ class TestDryNeverTouchesEnvOrSend(Base):
         self.assertEqual(status['mode'], 'DRY')
         self.assertEqual(status['label'], 'DRY - simulated, not executed')
         self.assertEqual(status['hits']['counted'], 52)
-        self.assertEqual(status['buys']['count'], 1)
+        self.assertGreaterEqual(status['buys']['count'], 1)
+        self.assertTrue(status['buys']['recent'][0]['preview'])
+        self.assertEqual(status['budget']['hourly_eth'], None)
+        self.assertIsNotNone(status['last_window'])
         self.assertNotIn(bb.WALLET[2:].lower(), json.dumps(status).lower())
+        self.assertNotIn(bb.BUYBACK_WALLET[2:].lower(), json.dumps(status).lower())
         self.assertFalse(bb.STATE['env_read'], '.env was read in DRY')
         methods = {m for m, _t, _s in self.chain.log}
         self.assertFalse(methods & {'eth_sendRawTransaction', 'eth_sendTransaction'})
@@ -1041,7 +1372,11 @@ class TestDryNeverTouchesEnvOrSend(Base):
         with _real_open(os.path.join(self.tmp, 'journal.jsonl'), encoding='utf-8') as f:
             j = [json.loads(l) for l in f]
         self.assertTrue(all(r['mode'] == 'DRY' for r in j))
-        self.assertEqual([r['ev'] for r in j if r['ev'] in ('claim', 'buy')], ['claim', 'buy'])
+        self.assertEqual([r['ev'] for r in j if r['ev'] == 'claim'], [], 'DRY buys come from the buyback wallet')
+        buys = [r for r in j if r['ev'] == 'buy']
+        self.assertTrue(buys and all(b['preview'] and b['buyer'] == bb.BUYBACK_WALLET for b in buys))
+        self.assertEqual(sum(w['hits'] for w in j if w['ev'] == 'window'), 52)
+        self.assertEqual(sum(b['hits_covered'] for b in buys), 52)
         self.assertTrue(os.path.exists(os.path.join(self.tmp, 'status.json')))
         self.assertFalse(os.path.exists(os.path.join(self.tmp, 'journal_live.jsonl')))
 
@@ -1055,6 +1390,8 @@ class TestLiveGates(Base):
         super().setUp()
         self._reader = bb._env_file_reader
         self._live_dir = bb.LIVE_JOURNAL_DIR
+        self._ready = bb.LIVE_BUYER_READY
+        bb.LIVE_BUYER_READY = True                     # past the pause gate, to test the gates behind it
         bb.LIVE_JOURNAL_DIR = self.tmp                 # LIVE's one fixed journal place, for the test
         self.env = {}
         bb._env_file_reader = lambda: dict(self.env)
@@ -1064,6 +1401,7 @@ class TestLiveGates(Base):
     def tearDown(self):
         bb._env_file_reader = self._reader
         bb.LIVE_JOURNAL_DIR = self._live_dir
+        bb.LIVE_BUYER_READY = self._ready
         os.environ.update(self._env_keys)
         super().tearDown()
 
@@ -1079,12 +1417,24 @@ class TestLiveGates(Base):
 
     def test_cli_and_env_gates(self):
         from eth_account import Account
-        L = ['--live', '--confirm', 'LABRAT']
+        L = ['--live', '--confirm', 'LABRAT', '--hourly-budget-eth', '0.001']
         self.refused(['--confirm', 'LABRAT'], '--live was not given')
         self.refused(['--clear-stop'], '--live was not given')
         self.refused(['--first-nonce', '1'], '--live was not given')
         self.refused(['--live'], '--confirm must be LABRAT')
         self.refused(['--live', '--confirm', 'labrat'], '--confirm must be LABRAT')
+        # the pause: this LIVE path signs from the launch wallet, the buys are now the buyback wallet's
+        bb.LIVE_BUYER_READY = False
+        try:
+            bb.STATE['env_read'] = False
+            self.env = {'BUYBACK_LIVE': '1', 'BUYBACK_RH_KEY': 'anything'}
+            self.refused(L, 'LIVE is paused')
+            self.assertFalse(bb.STATE['env_read'], 'refused before .env is read')
+        finally:
+            bb.LIVE_BUYER_READY = True
+        # LIVE never runs a preview, and buys only once per UTC hour
+        self.refused(['--live', '--confirm', 'LABRAT', '--hourly-budget-eth', 'unset'], 'never runs a preview')
+        self.refused(L + ['--window-s', '2'], 'once per UTC hour')
         self.refused(L + ['--accept-test-streams'], 'DRY tests only')
         self.refused(L + ['--relay', f'ws://127.0.0.1:{MOCK_RELAY_PORT}/live'], 'only to the public relay')
         self.refused(L + ['--origin', 'https://evil.example'], 'only to the public relay')
@@ -1125,7 +1475,7 @@ class TestLiveGates(Base):
 
     def gate(self, chain, *extra, c=None):
         a = bb.parse_args(['--live', '--confirm', 'LABRAT', *extra])
-        return bb.live_gate(a, c or cfg(), self.tmp, transport=chain, nodes=[chain])
+        return bb.live_gate(a, c or cfg(hourly_budget_wei=10 ** 15), self.tmp, transport=chain, nodes=[chain])
 
     def gate_refused(self, chain, contains, *extra, c=None):
         with self.assertRaises(SystemExit) as cm:
@@ -1150,7 +1500,7 @@ class TestLiveGates(Base):
             ch = FakeChain()
             ch.fee_recipient = '0x' + '34' * 20
             self.gate_refused(ch, 'pinned chain checks failed')
-            self.gate_refused(FakeChain(), 'graduated', c=cfg(venue='curve'))
+            self.gate_refused(FakeChain(), 'graduated', c=cfg(venue='curve', hourly_budget_wei=10 ** 15))
             # every gate passes -> the gated LiveRpc and the lock; a second one is refused by the lock
             rpc, acct, lock = self.gate(FakeChain())
             self.assertIsInstance(rpc, bb.LiveRpc)
@@ -1210,14 +1560,16 @@ class TestLiveGates(Base):
 
 
 class TestLiveExecutorOnTheFakeChain(Base):
-    """The LIVE path's sequencing with MockSigner (no key) and FakeChain (no network)."""
+    """The LIVE path's sequencing with MockSigner (no key) and FakeChain (no network). LIVE is paused (live_gate
+    refuses it); these tests build the executor directly, as live_gate would after every gate. The hourly budget
+    is 0.00012 ETH, so a perfect hour buys 0.00012 ETH."""
     live_test = True
 
     def make(self, clock, c=None, transport=None, nodes=None, journal_name='journal_live.jsonl'):
-        c = c or cfg(batch_trigger_wei=10 ** 14)
+        c = c or cfg(hourly_budget_wei=12 * 10 ** 13)
         journal = bb.Journal(os.path.join(self.tmp, journal_name), clock=clock)
         rpc = bb.LiveRpc(transport or self.chain, _gate=bb._GATE_PASSED, nodes=nodes or [self.chain])
-        sim = bb.Sim(rpc, c, clock=clock)
+        sim = bb.Sim(rpc, c, clock=clock, buyer=bb.WALLET)
         self.signer = MockSigner()
         ex = bb.LiveExecutor(rpc, self.signer, journal, bb.Ledger(c), sim, c, sleep=lambda s: None, poll_s=0)
         eng = bb.Engine(c, 'LIVE', journal, rpc, ex, sim, clock=clock)
@@ -1241,6 +1593,8 @@ class TestLiveExecutorOnTheFakeChain(Base):
         e = self.make(clock)
         feed_hits(e, 12)
         e.tick()
+        self.assertEqual(self.signer.signed, [], 'nothing before the hour ends')
+        close_hour(e, clock)
         tos = [to_checksum_address(t['to']) for t in self.signer.signed]
         self.assertEqual(tos, [bb.FEE_ESCROW, bb.ROUTER], 'the claim is signed and mined before the buy')
         self.assertEqual([t['nonce'] for t in self.signer.signed], [1, 2])
@@ -1278,7 +1632,7 @@ class TestLiveExecutorOnTheFakeChain(Base):
                 raise OSError(28, 'No space left on device')
             return real_append(rec)
         e.journal.append = crash_on_buy
-        e.tick()
+        close_hour(e, clock)
         self.assertIsNotNone(e.stopped, 'a journal that cannot be written stops the engine')
         self.assertEqual(len(self.signer.signed), 2)
         self.assertEqual(len(self.chain.receipts), 2, 'the buy WAS mined')
@@ -1309,7 +1663,7 @@ class TestLiveExecutorOnTheFakeChain(Base):
         e = self.make(clock)
         feed_hits(e, 12)
         self.chain.auto_mine = False
-        e.tick()                                      # the claim is sent but not mined
+        close_hour(e, clock)                          # the claim is sent but not mined
         self.assertEqual([r['ev'] for r in records(e) if r['ev'] in ('signed', 'unconfirmed')], ['signed', 'unconfirmed'])
         self.assertEqual(len(self.signer.signed), 1)
         clock.t += 200
@@ -1338,8 +1692,7 @@ class TestLiveExecutorOnTheFakeChain(Base):
         # never re-sent
         feed_hits(e2, 12, start_n=10)
         self.chain.auto_mine = False
-        clock.t += 700
-        e2.tick()
+        close_hour(e2, clock)
         stuck = [r for r in records(e2, 'signed')][-1]
         self.chain.pending_txs.clear()
         self.chain.forget = True
@@ -1367,7 +1720,7 @@ class TestLiveExecutorOnTheFakeChain(Base):
         lag = Lagging(self.chain)
         e = self.make(clock, transport=lag, nodes=[lag, self.chain])
         feed_hits(e, 12)
-        e.tick()                                      # the claim: 'unconfirmed' on the lagging primary
+        close_hour(e, clock)                          # the claim: 'unconfirmed' on the lagging primary
         self.assertEqual(len(self.chain.receipts), 1, 'it WAS mined')
         clock.t += 200
         e.tick()                                      # the second node has the receipt: booked, then the buy
@@ -1380,8 +1733,7 @@ class TestLiveExecutorOnTheFakeChain(Base):
         e2 = self.make(clock, transport=lag2, nodes=[lag2, lambda m, p: (_ for _ in ()).throw(OSError('down'))],
                        journal_name='j2.jsonl')
         feed_hits(e2, 12)
-        clock.t += 1
-        e2.tick()
+        close_hour(e2, clock)
         for _ in range(3):
             clock.t += 200
             e2.tick()
@@ -1394,10 +1746,11 @@ class TestLiveExecutorOnTheFakeChain(Base):
         clock = Clock()
         e = self.make(clock)
         feed_hits(e, 12)
-        e.tick()                                      # claim + buy
+        close_hour(e, clock)                          # claim + buy
         feed_hits(e, 12, start_n=3)
         self.chain.rate = 0                           # every buy now reverts in simulation
-        for _ in range(3):
+        close_hour(e, clock)                          # the hour's buy fails, and is retried twice
+        for _ in range(2):
             clock.t += 700
             e.tick()
         self.assertIsNotNone(e.stopped)
@@ -1437,10 +1790,25 @@ class TestLiveExecutorOnTheFakeChain(Base):
         e = self.make(clock)
         feed_hits(e, 12)
         self.chain.nonce = 5
-        e.tick()
+        close_hour(e, clock)
         self.assertEqual(self.signer.signed, [])
         self.assertIn('expects 1', e.stopped)
         self.assertEqual(e.public_status()['stopped'], 'stopped for an operator check')
+
+    def test_live_never_sends_a_preview_and_simulates_from_the_signer(self):
+        clock = Clock()
+        e = self.make(clock, cfg())                   # no hourly budget
+        feed_hits(e, 12)
+        close_hour(e, clock)
+        w, = records(e, 'window')
+        self.assertEqual((w['note'], w['amount_wei']), ('budget not set', 0))
+        self.assertEqual((self.signer.signed, self.chain.sent), ([], []))
+        with self.assertRaises(bb.LiveRefused):
+            e.executor.buy('pool', 10 ** 14, {'timestamp': self.chain.ts, 'preview': True, 'window': 0}, e._book)
+        rpc = bb.LiveRpc(self.chain, _gate=bb._GATE_PASSED, nodes=[self.chain])
+        with self.assertRaises(bb.LiveRefused):         # the buyback wallet as the buyer: not the signer
+            bb.LiveExecutor(rpc, MockSigner(), e.journal, bb.Ledger(e.cfg), bb.Sim(rpc, e.cfg), e.cfg)
+        self.assertEqual(self.signer.signed, [])
 
     def test_excess_value_is_never_signed(self):
         clock = Clock()
@@ -1571,8 +1939,7 @@ def real_run(a):
         try:
             bb.main(['--relay', f'ws://127.0.0.1:{FAKE_RELAY_PORT}/live', '--accept-test-streams',
                      '--journal-dir', dB, '--duration', str(a.demo_seconds), '--status-port',
-                     str(REAL_STATUS_PORT), '--min-buy-eth', '0.00005', '--batch-trigger-eth', '0.0001',
-                     '--batch-interval', '30'])
+                     str(REAL_STATUS_PORT), '--window-s', '30', '--hourly-budget-eth', 'unset'])
         finally:
             srv.shutdown()
         linesB = journal_tail(pB, startB)
@@ -1583,7 +1950,13 @@ def real_run(a):
         got = sum(r['hits'] for r in recs if r['ev'] == 'hit')
         print(f'\nhits in the recording: {want}; hits counted (after a relay drop and resent episodes): {got}')
         ok &= got == want
-        ok &= any(r['ev'] == 'buy' for r in recs) and any(r['ev'] == 'claim' for r in recs)
+        # 30 s windows stand in for the hour here: each closed window with hits books a PREVIEW buy from the buyback
+        # wallet, simulated on the real chain (no claim: DRY buys are the hand-funded buyback wallet's)
+        ok &= any(r['ev'] == 'buy' and r['preview'] and r['buyer'] == bb.BUYBACK_WALLET for r in recs)
+        ok &= not any(r['ev'] == 'claim' for r in recs)
+        wins = [r for r in recs if r['ev'] == 'window']
+        print('windows: ' + '; '.join(f"{w['start'][11:]} {w['hits']}/{w['misses']}/{w['wrong']} rate {w['hit_rate']} "
+                                      f"-> {bb.eth_str(w['amount_wei'])} ETH" for w in wins if w['attempts']))
         with _real_open(os.path.join(dB, 'status.json'), encoding='utf-8') as f:
             st = json.load(f)
         print(f"status.json: hits {st['hits']}, source {st['source']}, next buy {st['next_buy_in_s']} "

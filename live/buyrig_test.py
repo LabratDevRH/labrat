@@ -815,7 +815,7 @@ class EngineBase(bt.Base):
         self.clock = clock or bt.Clock()
         e = bt.make_engine(self.tmp, self.chain, clock=self.clock)
         bt.feed_hits(e, 50)
-        e.tick()
+        bt.close_hour(e, self.clock)                      # one buy an hour: the hour's (preview) buy
         buys = e.public_status()['buys']['recent']
         self.assertEqual(len(buys), 1)
         return e, buys[0]
