@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<base href="/">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>labrat · trial: rat buybacks</title>
+<meta name="description" content="Watch Subject R-01 train live, count the targets it hits, and click through each $LABRAT buyback itself on the real pons page.">
+<meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="labrat">
+<meta property="og:title" content="labrat · a virtual rat launches a coin">
+<meta property="og:description" content="A simulated rat with a brain of two trained neural networks. Its head is the mouse, a lever press is the click. It launches $LABRAT on pons itself: every click is the rat's.">
+<meta property="og:image" content="https://lab-rat.net/assets/labrat-logo.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1254">
+<meta property="og:image:height" content="1254">
+<meta property="og:image:alt" content="The labrat logo: a pixel-art rat in yellow, pink and violet on black">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="labrat · a virtual rat launches a coin">
+<meta name="twitter:description" content="A simulated rat with a brain of two trained neural networks. Its head is the mouse, a lever press is the click. It launches $LABRAT on pons itself.">
+<meta name="twitter:image" content="https://lab-rat.net/assets/labrat-logo.jpg">
+<meta name="twitter:image:alt" content="The labrat logo: a pixel-art rat in yellow, pink and violet on black">
+<link rel="icon" href="assets/labrat-logo.jpg" type="image/jpeg">
+<link rel="apple-touch-icon" href="assets/labrat-logo.jpg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="css/site.css">
+<script>document.documentElement.classList.add('js');</script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+}, "integrity": {
+  "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js": "sha384-61S/Nu32S3E5+n+KpCOTb2eRYps6fVKm+9Gz1QBvSePFthb46f063Aa/qe/lykFZ"
+} }
+</script>
+<link rel="modulepreload" href="js/live.js">
+<link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" integrity="sha384-61S/Nu32S3E5+n+KpCOTb2eRYps6fVKm+9Gz1QBvSePFthb46f063Aa/qe/lykFZ" crossorigin="anonymous">
+<script src="config.js"></script>
+<script src="coin.js"></script>
+<script src="buyback.js"></script>
+<script>/* which coin state to show before site.js fills it in: "live" only with a real contract address in coin.js */
+(function () { var c = window.LABRAT_COIN;
+  document.documentElement.setAttribute('data-coin', c && /^0x[0-9a-fA-F]{40}$/.test(String(c.address || '')) ? 'live' : 'soon'); })();</script>
+<script type="module" src="js/site.js"></script>
+<style>.trial-hd{padding-top:28px;padding-bottom:6px}.trial-h{font-size:clamp(26px,3.4vw,44px);line-height:1.08;letter-spacing:-.02em;margin:10px 0 8px}.trial-lead{max-width:760px;color:var(--dim,#cbb8f0);font-size:17px;line-height:1.55;margin:0 0 18px}</style>
+</head>
+<body>
+
+<!-- shared drawing defs: the logo-palette gradients and the icons (kept out of layout, not display:none, so gradients resolve) -->
+<svg class="defs" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="g-mark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8808B5"/><stop offset=".35" stop-color="#D60C94"/>
+      <stop offset=".65" stop-color="#EA3560"/><stop offset="1" stop-color="#F5AC29"/></linearGradient>
+    <linearGradient id="g-ramp" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4B04C4"/><stop offset=".22" stop-color="#8808B5"/><stop offset=".45" stop-color="#D60C94"/>
+      <stop offset=".62" stop-color="#EA3560"/><stop offset=".78" stop-color="#E86E3D"/><stop offset=".9" stop-color="#F5AC29"/>
+      <stop offset="1" stop-color="#FCF010"/></linearGradient>
+    <linearGradient id="g-gold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#E86E3D"/><stop offset=".55" stop-color="#F5AC29"/><stop offset="1" stop-color="#FCF010"/></linearGradient>
+    <radialGradient id="g-glow"><stop offset="0" stop-color="#FFF40F" stop-opacity=".9"/><stop offset=".35" stop-color="#F5AC29" stop-opacity=".45"/>
+      <stop offset="1" stop-color="#E86E3D" stop-opacity="0"/></radialGradient>
+    <radialGradient id="g-glow-m"><stop offset="0" stop-color="#D60C94" stop-opacity=".7"/><stop offset="1" stop-color="#8808B5" stop-opacity="0"/></radialGradient>
+    <symbol id="i-ext" viewBox="0 0 16 16"><path d="M6 3h7v7M13 3 4 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-gh" viewBox="0 0 16 16"><path fill="currentColor" d="M8 .2a8 8 0 0 0-2.5 15.6c.4 0 .5-.2.5-.4v-1.5c-2.2.5-2.7-1-2.7-1-.4-.9-.9-1.2-.9-1.2-.7-.5.1-.5.1-.5.8.1 1.2.8 1.2.8.7 1.3 1.9.9 2.3.7.1-.5.3-.9.5-1.1-1.8-.2-3.6-.9-3.6-4 0-.9.3-1.6.8-2.1-.1-.2-.4-1 .1-2.1 0 0 .7-.2 2.2.8a7.4 7.4 0 0 1 4 0c1.5-1 2.2-.8 2.2-.8.4 1.1.2 1.9.1 2.1.5.6.8 1.3.8 2.1 0 3.1-1.9 3.8-3.6 4 .3.3.5.8.5 1.5v2.2c0 .2.1.5.6.4A8 8 0 0 0 8 .2Z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.9c0-.8-.6-1.4-1.4-1.4H3.9c-.8 0-1.4.6-1.4 1.4v5.2c0 .8.6 1.4 1.4 1.4h1.6"/></g></symbol>
+    <symbol id="i-check" viewBox="0 0 16 16"><path d="m3.5 8.4 2.9 2.9 6.1-6.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+
+<a class="skip" href="/trial#main">Skip to content</a>
+
+<div class="sky" aria-hidden="true"><i class="neb n1"></i><i class="neb n2"></i><i class="neb n3"></i><i class="stars"></i></div>
+
+<header class="nav" id="nav">
+  <div class="nav-in">
+    <a class="brand" href="/" aria-label="labrat, home">
+      <img class="brand-mark" src="assets/labrat-logo.jpg" width="1254" height="1254" alt="" decoding="async">
+      <span class="brand-word">lab<b>rat</b></span>
+    </a>
+    <nav class="links" id="links" aria-label="Sections">
+      <a href="/">Home</a>
+      <a href="/trial#live">Live</a>
+      <a href="/trial#buybacks">Buybacks</a>
+      <a href="/trial#rat-on-pons">Rat on pons</a>
+      <a href="/#watching">Watching</a>
+      <a href="/trial" aria-current="page">Trial</a>
+    </nav>
+    <a class="nav-status conn" id="nav-status" href="/trial#live" title="Status of the live panel"><i></i><span id="nav-status-t">connecting</span></a>
+    <a class="nav-gh" href="https://github.com/LabratDevRH/labrat" target="_blank" rel="noopener"><svg aria-hidden="true"><use href="#i-gh"/></svg><span>GitHub</span></a>
+    <button class="menu" id="menu" type="button" aria-expanded="false" aria-controls="links"><span class="menu-bars" aria-hidden="true"><i></i><i></i></span><span class="sr">Menu</span></button>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero trial" id="top">
+  <div class="wrap wide trial-hd">
+    <p class="eyebrow"><span class="dot"></span>Trial &middot; Subject R-01 &middot; $LABRAT buybacks</p>
+    <h1 class="trial-h">Every hit, a buyback. Every buy, clicked by the rat.</h1>
+    <p class="trial-lead">R-01 trains live below. Each target it hits adds to the next $LABRAT buyback, and each buyback is clicked through by the rat itself on the real pons page, step by step.</p>
+  </div>
+
+  <!-- the live panel: js/live.js renders the 3D view into #live-view; site.js owns the badge, readout and charts -->
+  <div class="wrap wide">
+    <section class="live-panel reveal" id="live" aria-labelledby="live-title" data-mode="connecting">
+      <h2 class="sr" id="live-title">Live simulation</h2>
+      <div class="live-bar">
+        <span class="badge conn" id="badge"><i aria-hidden="true"></i><b id="badge-t">CONNECTING</b></span>
+        <span class="live-label" id="live-label" aria-live="polite">Connecting to the lab&hellip;</span>
+        <a class="live-help" href="/#watching">What am I watching?</a>
+      </div>
+      <div class="live-body">
+        <div class="stage" id="stage">
+          <div class="live-view" id="live-view"></div>
+          <div class="ph" id="live-ph">
+            <canvas id="ph-canvas" aria-hidden="true"></canvas>
+            <div class="ph-t"><b id="ph-title">Connecting to the lab</b><span id="ph-sub">loading the 3D view of Subject R-01</span></div>
+          </div>
+          <span class="brk" aria-hidden="true"></span>
+        </div>
+        <aside class="hud" id="hud" aria-label="Training readout">
+          <div class="hud-hd"><span class="hud-k">Readout</span><span class="hud-mode" id="hud-mode">waiting</span></div>
+          <dl class="hud-kv">
+            <div><dt>Task</dt><dd id="h-task">&mdash;</dd></div>
+            <div><dt>Run</dt><dd id="h-run" class="mono">&mdash;</dd></div>
+            <div><dt id="h-steps-k">Checkpoint</dt><dd id="h-steps" class="mono">&mdash;</dd></div>
+          </dl>
+          <figure class="chart" id="c-reward">
+            <figcaption><span class="c-l">Reward per attempt</span><b class="c-v">&mdash;</b></figcaption>
+            <div class="c-box"><canvas role="img" aria-label="Reward per practice attempt over training steps"></canvas><div class="c-tip" hidden></div></div>
+          </figure>
+          <figure class="chart" id="c-success">
+            <figcaption><span class="c-l">Success</span><b class="c-v">&mdash;</b></figcaption>
+            <div class="c-box"><canvas role="img" aria-label="Success over training steps"></canvas><div class="c-tip" hidden></div></div>
+          </figure>
+          <div class="hud-foot">
+            <div class="hud-stat"><span>Falls</span><b id="h-falls">&mdash;</b></div>
+            <div class="hud-stat"><span>Steps logged</span><b id="h-logged">&mdash;</b></div>
+          </div>
+          <p class="hud-note" id="hud-note">Training charts appear here while a training run is streaming.</p>
+        </aside>
+      </div>
+    </section>
+  </div>
+
+  <!-- rat buybacks panel (buyback.js, site.js) -->
+  <div class="wrap wide" id="bb-wrap" hidden>
+    <section class="bb" id="buybacks" aria-labelledby="bb-title">
+      <div class="bb-bar">
+        <h2 class="bb-title" id="bb-title">Rat buybacks</h2>
+        <span class="bb-mode" id="bb-mode">Simulated</span>
+        <span class="bb-mode dry" id="bb-test" hidden>Test stream</span>
+        <span class="bb-conn" id="bb-conn">loading</span>
+      </div>
+      <p class="bb-rule">Every target the rat hits during live training adds <b id="bb-per">a small amount of ETH</b> to the next $LABRAT buyback, funded by the coin's trading fees. Buybacks are batched and capped per hour and per day.<span id="bb-lever" hidden> In the lever task, each clean press counts as a hit.</span> The rule is fixed in code; the rat's hits trigger it.</p>
+      <dl class="bb-kv">
+        <div><dt>Hits counted</dt><dd id="bb-hits">&mdash;</dd></div>
+        <div><dt>Pending</dt><dd id="bb-pending">&mdash;</dd></div>
+        <div><dt id="bb-buys-k">Simulated buys</dt><dd id="bb-buys">&mdash;</dd></div>
+        <div><dt id="bb-out-k">LABRAT (simulated)</dt><dd id="bb-out">&mdash;</dd></div>
+      </dl>
+      <p class="bb-split" id="bb-split"></p>
+      <ol class="bb-list" id="bb-list" aria-label="Recent buybacks"></ol>
+      <p class="bb-note" id="bb-note"></p>
+    </section>
+  </div>
+
+  <!-- the rat on pons: each buyback clicked through by the rat on the real pons page (site.js; frames via the relay's
+       pons channel). Hidden until there is a session to show. -->
+  <div class="wrap wide" id="rp-wrap" hidden>
+    <section class="rp" id="rat-on-pons" aria-labelledby="rp-title" data-state="connecting">
+      <div class="bb-bar">
+        <h2 class="bb-title" id="rp-title">Rat on pons</h2>
+        <span class="badge conn" id="rp-badge"><i aria-hidden="true"></i><b id="rp-badge-t">CONNECTING</b></span>
+        <span class="bb-mode dry" id="rp-sim">Simulated</span>
+        <span class="bb-conn" id="rp-conn"></span>
+      </div>
+      <p class="bb-rule">For each buyback, R-01 clicks through the buy itself on the $LABRAT page on pons. The rig lights one target at a time, the rat steers the cursor onto it with its head, and a lever press clicks; presses off the target are ignored. After the rat clicks the amount field, the rig types the batch amount. Wallet details on the page are hidden in this stream.</p>
+      <div class="rp-body">
+        <figure class="rp-screen" id="rp-screen">
+          <canvas id="rp-canvas" width="1280" height="900" role="img" aria-label="The pons page as the rat works through the buy"></canvas>
+          <div class="rp-empty" id="rp-empty"><b id="rp-empty-t">Opening the $LABRAT page on pons</b><span id="rp-empty-s">the first frame appears in a moment</span></div>
+          <figcaption class="rp-cap" id="rp-cap" hidden></figcaption>
+          <span class="rp-now" id="rp-now" aria-hidden="true" hidden></span>
+        </figure>
+        <aside class="rp-side" aria-label="Buy session">
+          <p class="rp-k" id="rp-k">Buy session</p>
+          <div aria-live="polite">
+            <p class="rp-target" id="rp-target">&mdash;</p>
+            <p class="rp-phase" id="rp-phase"></p>
+          </div>
+          <ol class="rp-steps" id="rp-steps" aria-label="Targets in this session"></ol>
+          <dl class="bb-kv rp-kv">
+            <div><dt id="rp-amt-k">Buy size</dt><dd id="rp-amt">&mdash;</dd></div>
+            <div><dt id="rp-out-k">LABRAT (simulated)</dt><dd id="rp-out">&mdash;</dd></div>
+            <div><dt>Transaction checks</dt><dd id="rp-checks">&mdash;</dd></div>
+            <div><dt>Rat's clicks</dt><dd id="rp-clicks">&mdash;</dd></div>
+          </dl>
+          <p class="rp-next" id="rp-next" hidden></p>
+          <p class="bb-note rp-note" id="rp-note"></p>
+        </aside>
+      </div>
+    </section>
+  </div>
+</section>
+</main>
+
+<!-- ================================================================ FOOTER -->
+<footer class="foot">
+  <div class="wrap">
+    <div class="foot-top">
+      <a class="brand big" href="/" aria-label="labrat, home">
+        <img class="brand-mark" src="assets/labrat-logo.jpg" width="1254" height="1254" alt="" loading="lazy" decoding="async">
+        <span class="brand-word">lab<b>rat</b></span>
+      </a>
+      <p class="foot-honest">Subject R-01 is a simulated rat driven by two trained artificial neural networks. It is not a biological brain, and no animal was involved. labrat is an independent project, not affiliated with DeepMind, Robinhood or pons. Nothing on this site signs or sends a transaction. $LABRAT is an experiment, not financial advice.</p>
+    </div>
+    <div class="foot-cols">
+      <div>
+        <p class="foot-k">Credits</p>
+        <ul>
+          <li>Body: DeepMind's rodent model from <a href="https://github.com/google-deepmind/dm_control" target="_blank" rel="noopener">dm_control</a> (Apache-2.0), the rat from Aldarondo et al., <i>Nature</i> 2024</li>
+          <li>Physics: <a href="https://mujoco.org" target="_blank" rel="noopener">MuJoCo</a></li>
+          <li>3D view: <a href="https://threejs.org" target="_blank" rel="noopener">three.js</a> (MIT)</li>
+        </ul>
+      </div>
+      <div>
+        <p class="foot-k">Links</p>
+        <ul>
+          <li><a href="https://github.com/LabratDevRH/labrat" target="_blank" rel="noopener">github.com/LabratDevRH/labrat</a></li>
+          <li class="if-soon">$LABRAT: launching soon</li>
+          <li class="if-live"><a class="js-pons" target="_blank" rel="noopener">$LABRAT on pons</a></li>
+          <li class="if-live"><a class="js-explorer" target="_blank" rel="noopener">Contract on the explorer</a></li>
+        </ul>
+      </div>
+      <div>
+        <p class="foot-k">Sections</p>
+        <ul class="foot-nav">
+          <li><a href="/#live">Live</a></li><li><a href="/#subject">Subject</a></li><li><a href="/#brain">Brain</a></li>
+          <li><a href="/#launch">Launch</a></li><li><a href="/#proof">Proof</a></li><li><a href="/#watching">Watching</a></li><li><a href="/trial">Trial</a></li>
+        </ul>
+      </div>
+    </div>
+    <p class="foot-base"><span>labrat &middot; operant lab &middot; Subject R-01</span><span class="mono if-soon">$LABRAT &middot; launching soon</span><span class="mono if-live">$LABRAT &middot; CA <span class="js-addr-short"></span></span></p>
+  </div>
+</footer>
+
+</body>
+</html>
