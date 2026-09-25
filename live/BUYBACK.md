@@ -140,6 +140,31 @@ passed and pending is at least `min_buy`. The buy is pending cut down by every c
 - **Before it can go public**, the engine needs a public host for `statusUrl`. The relay is public, so the engine can
   run anywhere, for example next to the relay on Railway.
 
+## The rat on pons (simulated buys clicked through pons's own page)
+
+For a simulated buy the engine booked, `live/buyrig_runner.py` has the rat click through pons's BUY flow for that
+batch on the real $LABRAT page (`live/buyrig.py`, research in `live/BUYRIG_RESEARCH.md`, container notes in
+`buyrig/README.md`). pons builds the transaction, and the rig checks it field by field, simulates it with `eth_call`
+and refuses to sign. The session is streamed to the relay's `pons` channel with wallet details masked, and recorded
+with a session proof.
+
+- **The report.** After the session's replay prints `MATCH`, the runner sends `POST /pons_session` to the status
+  server. It carries only fixed fields: `buy_at`, `eth_in`, `labrat_out`, `session_at`, `proof`, `replay`,
+  `targets_hit`, `misses`, `checks_passed`, `checks_total` and `simulation`.
+- **When the endpoint is open.** Only when the engine runs DRY and the process environment holds `BUYBACK_RIG_TOKEN`
+  (24+ characters, never read from `.env`). The request needs `Authorization: Bearer <token>`. It is closed in LIVE
+  and without the token.
+- **What is checked.** The buy must be one this engine booked, and `eth_in` must be its batch amount. Every check
+  must have passed, the simulation must be ok, and there is one report per buy. The session time must fall between
+  the buy and now.
+- **What it changes.** The report is journalled (`pons_session`), so it survives a restart. It is shown on that buy
+  in the public status as `buys.recent[i].pons`: `{label: "Simulated buy · clicked by the rat on pons",
+  clicked_by_rat, simulated, at (the session time), eth_in, labrat_out (a fresh quote for pons's exact swap),
+  targets_hit, misses, checks, proof, replay}`, and it adds to `buys.pons_sessions`. It never changes a cap, the
+  pending amount or any figure the engine computed.
+- **Tests.** `live/buyrig_test.py` covers this endpoint, the runner, the rig's checks and the mask. `--real-session`
+  runs one real session.
+
 ## LIVE (implemented, not used)
 
 Every one of these is needed, in this order. Any failure exits with "LIVE refused, nothing was signed or sent":

@@ -56,6 +56,15 @@ DRY (the default; the only mode that runs now)
   next to it, and --status-port) says "DRY - simulated, not executed". DRY never reads .env, never builds a signer
   and its RPC object can only read (eth_sendRawTransaction / eth_sendTransaction raise SendRefused).
 
+THE RAT ON PONS (DRY only; live/buyrig.py, live/buyrig_runner.py)
+  For a simulated buy booked here, the buy rig's runner can have the rat click through pons's own buy flow on the
+  real coin page (pons builds the transaction; the rig checks it, simulates it and refuses to sign) and report the
+  session: POST /pons_session on the status server, enabled only when the PROCESS environment holds
+  BUYBACK_RIG_TOKEN (>= 24 characters; never read from .env) and the engine is DRY. The report is validated field
+  by field (pons_session_record: the buy must exist, eth_in must be its batch amount, every check passed, the
+  simulation ok, only decimals / times / a sha256 / small counts), journalled as 'pons_session', and shown on that buy
+  as "Simulated buy · clicked by the rat on pons". It never changes a cap, the pending amount or any engine figure.
+
 LIVE (implemented, gated like launcher.py / live/brainrig.py, NOT used: the owner said not to buy yet)
   Needs ALL of: --live --confirm LABRAT; the public relay and origin (no --accept-test-streams, no other relay); no
   --journal-dir (LIVE's journal and lock have ONE fixed place, runs/buyback/, so the caps cannot be reset by pointing
@@ -81,8 +90,10 @@ LIVE (implemented, gated like launcher.py / live/brainrig.py, NOT used: the owne
 import argparse
 import collections
 import hashlib
+import hmac
 import json
 import os
+import re
 import struct
 import sys
 import threading
@@ -164,6 +175,22 @@ POSSIBLY_SENT = launcher.POSSIBLY_SENT
 DRY_LABEL = 'DRY - simulated, not executed'
 LIVE_LABEL = 'LIVE - real buys paid from claimed creator fees'
 STATE = {'env_read': False}    # whether this process ever read .env (DRY never does)
+
+# The rat's pons sessions (live/buyrig.py, live/buyrig_runner.py): for a simulated buy the engine booked, the rat
+# clicked through pons's own buy flow on the real coin page; pons built the transaction, the rig checked and simulated
+# it and refused to sign. The runner reports each such session here (POST /pons_session, DRY only, Bearer
+# BUYBACK_RIG_TOKEN from the process environment, never .env). It adds a label to that buy in the public status; it
+# never changes a cap, the pending amount, the budget or any figure the engine computed.
+PONS_LABEL = 'Simulated buy · clicked by the rat on pons'
+RIG_TOKEN_ENV = 'BUYBACK_RIG_TOKEN'
+RIG_TOKEN_MIN = 24
+PONS_BODY_MAX = 4096
+PONS_KEYS = frozenset({'buy_at', 'eth_in', 'labrat_out', 'session_at', 'proof', 'replay', 'targets_hit', 'misses',
+                       'checks_passed', 'checks_total', 'simulation'})
+PONS_KEEP = 200                # pons sessions (and buy times) kept in memory for matching; the journal keeps all
+ISO_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+DEC_RE = re.compile(r'^\d{1,15}(\.\d{1,18})?$')
+HEX64_RE = re.compile(r'^[0-9a-f]{64}$')
 
 
 # ---------------------------------------------------------------------------------------------------- config
@@ -256,6 +283,14 @@ class RpcError(RuntimeError):
     def __init__(self, method, err):
         self.method, self.err = method, err
         super().__init__(f'{method}: {short_err(err)}')
+
+
+class PonsRefused(ValueError):
+    """A pons session report the engine does not take. status: the HTTP status for the reporting endpoint."""
+
+    def __init__(self, why, status=400):
+        super().__init__(why)
+        self.status = status
 
 
 # ---------------------------------------------------------------------------------------------------- helpers
@@ -835,6 +870,9 @@ class Ledger:
         self.failures = 0                          # consecutive failed claims / buys (LIVE replays it)
         self.stop_rec = None                       # the last uncleared 'stop' record (LIVE replays it)
         self.since = None
+        self.buy_amounts = collections.OrderedDict()   # buy time (iso) -> amount wei, the last PONS_KEEP buys
+        self.pons = collections.OrderedDict()          # buy time (iso) -> the public note of the rat's pons session
+        self.n_pons = 0
 
     def budget(self):
         return self.claimed - self.spent
@@ -919,9 +957,16 @@ class Ledger:
             self.hits_bought += int(r.get('hits_covered', 0))
             self.tokens += int(r.get('tokens_wei', 0))
             self.failures = 0
-            self.recent.append({'at': iso(r['t']), 'eth_in': eth_str(amt), 'labrat_out': token_str(r.get('tokens_wei', 0)),
+            at = iso(r['t'])
+            self.recent.append({'at': at, 'eth_in': eth_str(amt), 'labrat_out': token_str(r.get('tokens_wei', 0)),
                                 'venue': r.get('venue'), 'simulated': bool(r.get('simulated')),
                                 'hits_covered': int(r.get('hits_covered', 0))})
+            if r.get('simulated'):
+                self.buy_amounts[at] = amt
+                while len(self.buy_amounts) > PONS_KEEP:
+                    self.buy_amounts.popitem(last=False)
+        elif ev == 'pons_session':
+            self._pons(r)
         elif ev == 'gas':
             self._gas(r)
         elif ev == 'signed':
@@ -948,6 +993,79 @@ class Ledger:
         for r in records:
             if r.get('mode') == mode:
                 self.apply(r)
+
+    def _pons(self, r):
+        """A 'pons_session' record: the public note shown on that simulated buy (never a figure the engine uses)."""
+        pub = {'label': PONS_LABEL, 'clicked_by_rat': True, 'simulated': True, 'at': r['session_at'],
+               'eth_in': eth_str(r['amount_wei']), 'labrat_out': token_str(r['tokens_wei']),
+               'targets_hit': int(r['targets_hit']), 'misses': int(r['misses']),
+               'checks': f"{int(r['checks_passed'])}/{int(r['checks_total'])}", 'proof': r['proof'],
+               'replay': r.get('replay')}
+        self.pons[r['buy_at']] = pub
+        while len(self.pons) > PONS_KEEP:
+            self.pons.popitem(last=False)
+        self.n_pons += 1
+        for e in self.recent:
+            if e['at'] == r['buy_at'] and e.get('simulated') and 'pons' not in e:
+                e['pons'] = pub
+                break
+
+
+def pons_session_record(obj, ledger, now, mode):
+    """Validate one pons session report from the runner -> the journal record, or PonsRefused. Only fixed fields in
+    fixed formats (decimals, times, a sha256, small counts), for a simulated buy this engine booked, reported once,
+    with every check passed and the simulation ok. Nothing free-form reaches the public status."""
+    if mode != 'DRY':
+        raise PonsRefused("the rat's pons sessions are simulated: a LIVE engine does not take them", 409)
+    if not isinstance(obj, dict):
+        raise PonsRefused('the report is not a JSON object')
+    extra = set(obj) - PONS_KEYS
+    missing = (PONS_KEYS - {'replay'}) - set(obj)
+    if extra:
+        raise PonsRefused(f'unknown field(s): {", ".join(sorted(extra))[:120]}')
+    if missing:
+        raise PonsRefused(f'missing field(s): {", ".join(sorted(missing))}')
+    for k in ('buy_at', 'session_at'):
+        if not isinstance(obj[k], str) or not ISO_RE.match(obj[k]):
+            raise PonsRefused(f'{k} must be a UTC time like 2026-09-25T03:22:58Z')
+    for k in ('eth_in', 'labrat_out'):
+        if not isinstance(obj[k], str) or not DEC_RE.match(obj[k]):
+            raise PonsRefused(f'{k} must be a plain decimal string')
+    if not isinstance(obj['proof'], str) or not HEX64_RE.match(obj['proof']):
+        raise PonsRefused('proof must be the session proof: 64 lowercase hex characters')
+    if obj.get('replay') not in (None, 'MATCH'):
+        raise PonsRefused('replay must be "MATCH" (or left out)')
+    ints = {}
+    for k, hi in (('targets_hit', 50), ('misses', 100_000), ('checks_passed', 100), ('checks_total', 100)):
+        v = obj[k]
+        if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= hi:
+            raise PonsRefused(f'{k} must be an integer 0..{hi}')
+        ints[k] = v
+    if ints['checks_total'] < 1 or ints['checks_passed'] != ints['checks_total']:
+        raise PonsRefused('only a session whose checks all passed is shown')
+    if ints['targets_hit'] < 1:
+        raise PonsRefused('the rat hit no target in that session')
+    if obj['simulation'] != 'ok':
+        raise PonsRefused('only a session whose simulation succeeded is shown')
+    buy_at = obj['buy_at']
+    if buy_at not in ledger.buy_amounts:
+        raise PonsRefused('no simulated buy was booked at that time', 404)
+    if buy_at in ledger.pons:
+        raise PonsRefused('that buy already has a pons session', 409)
+    amount = ledger.buy_amounts[buy_at]
+    if parse_eth(obj['eth_in']) != amount:
+        raise PonsRefused(f'eth_in must be the batch amount ({eth_str(amount)} ETH): the rat buys exactly the batch')
+    tokens = parse_eth(obj['labrat_out'])
+    if not 0 < tokens <= 10 ** 30:
+        raise PonsRefused('labrat_out must be above 0')
+
+    def ts(s):
+        return datetime.strptime(s, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc).timestamp()
+    t_buy, t_sess = ts(buy_at), ts(obj['session_at'])
+    if not t_buy - 60 <= t_sess <= now + 60:
+        raise PonsRefused('session_at must be after the buy was booked and not in the future')
+    return {'buy_at': buy_at, 'amount_wei': amount, 'tokens_wei': tokens, 'session_at': obj['session_at'],
+            'proof': obj['proof'], 'replay': obj.get('replay'), **ints, 'simulation': 'ok', 'simulated': True}
 
 
 # ---------------------------------------------------------------------------------------------------- journal
@@ -1328,6 +1446,19 @@ class Engine:
                 f"{token_str(info['tokens_wei'])} LABRAT on the {info['venue']} (gas {info['gas']}, "
                 f"{info['gas_share_bps'] / 100:.1f}% of the buy)")
 
+    def add_pons_session(self, obj):
+        """The runner's report of the rat's pons session for one simulated buy (see PONS_LABEL). Validated by
+        pons_session_record, journalled, and shown on that buy in the public status. -> the journal record; raises
+        PonsRefused. It changes no cap, no pending amount and no figure the engine computed."""
+        with self.lock:
+            rec = pons_session_record(obj, self.ledger, self.clock(), self.mode)
+            r = self.journal.append({'mode': self.mode, 'ev': 'pons_session', **rec})
+            self.ledger.apply(r)
+            self.changed = True
+        log(f"the rat's pons session for the simulated buy of {rec['buy_at']}: {eth_str(rec['amount_wei'])} ETH -> "
+            f"{token_str(rec['tokens_wei'])} LABRAT (simulated), replay {rec.get('replay') or 'not reported'}")
+        return r
+
     def _stop(self, why, public):
         with self.lock:
             self.stopped, self.stopped_public = why, public
@@ -1520,7 +1651,8 @@ class Engine:
                 'source': {'public_relay': public_relay, 'accept_test_streams': self.accept_test,
                            'test': (not public_relay) or self.accept_test or test_stream},
                 'buys': {'count': L.n_buys, 'eth_in': eth_str(L.bought), 'labrat_out': token_str(L.tokens),
-                         'simulated': self.mode != 'LIVE', 'recent': list(L.recent)[::-1]},
+                         'simulated': self.mode != 'LIVE', 'recent': [dict(e) for e in L.recent][::-1],
+                         'pons_sessions': L.n_pons},
                 'next_buy_in_s': due,
                 'next_buy_note': due_why,
                 'caps': {'min_buy_eth': eth_str(c.min_buy_wei), 'per_buy_eth': eth_str(c.max_buy_wei),
@@ -1603,7 +1735,24 @@ class RelayListener:
 
 
 # ---------------------------------------------------------------------------------------------------- status HTTP
-def serve_status(engine, host, port):
+def _bearer(header):
+    parts = str(header or '').split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != 'bearer' or not parts[1].strip():
+        return None
+    return parts[1].strip()
+
+
+def _same_secret(a, b):
+    return hmac.compare_digest(hashlib.sha256(a.encode('utf-8')).digest(), hashlib.sha256(b.encode('utf-8')).digest())
+
+
+def serve_status(engine, host, port, rig_token=None):
+    """GET /status (public), GET /healthz. With rig_token (DRY only, >= RIG_TOKEN_MIN characters): also POST
+    /pons_session for the buy rig's runner (Authorization: Bearer <token>, a JSON body of at most PONS_BODY_MAX
+    bytes, validated by pons_session_record). Browsers cannot call it: it needs an Authorization header, and
+    the CORS preflight that would need is not answered."""
+    rig_token = rig_token if (rig_token and len(rig_token) >= RIG_TOKEN_MIN and engine.mode == 'DRY') else None
+
     class H(BaseHTTPRequestHandler):
         def _send(self, code, obj):
             body = json.dumps(obj, separators=(',', ':')).encode()
@@ -1623,6 +1772,35 @@ def serve_status(engine, host, port):
                 self._send(200, {'ok': True})
             else:
                 self._send(404, {'error': 'not found'})
+
+        def do_POST(self):
+            path = self.path.split('?', 1)[0]
+            if path != '/pons_session' or not rig_token:
+                self.close_connection = True
+                return self._send(404, {'error': 'not found'})
+            got = _bearer(self.headers.get('Authorization'))
+            if got is None or not _same_secret(got, rig_token):
+                self.close_connection = True
+                return self._send(401, {'error': 'unauthorized'})
+            try:
+                n = int(self.headers.get('Content-Length') or '-1')
+            except ValueError:
+                n = -1
+            if not 0 < n <= PONS_BODY_MAX:
+                self.close_connection = True
+                return self._send(413 if n > PONS_BODY_MAX else 411, {'error': f'a JSON body of 1..{PONS_BODY_MAX} '
+                                                                               'bytes with a Content-Length'})
+            try:
+                obj = json.loads(self.rfile.read(n).decode('utf-8'))
+            except (ValueError, UnicodeDecodeError):
+                return self._send(400, {'error': 'the body is not JSON'})
+            try:
+                rec = engine.add_pons_session(obj)
+            except PonsRefused as e:
+                return self._send(e.status, {'error': str(e)[:200]})
+            except OSError as e:
+                return self._send(503, {'error': f'the journal could not be written ({type(e).__name__})'})
+            return self._send(200, {'ok': True, 'buy_at': rec['buy_at'], 'label': PONS_LABEL})
 
         def log_message(self, *a):
             pass
@@ -1893,9 +2071,15 @@ def main(argv=None):
             log(f'chain check failed at startup ({e}); it runs again before every batch')
         stop = threading.Event()
         listener = RelayListener(a.relay, a.origin, engine, stop).start()
-        srv = serve_status(engine, a.status_host, a.status_port) if a.status_port else None
+        # the buy rig's reports (POST /pons_session): DRY only, and only with a token in the PROCESS environment
+        rig_token = os.environ.get(RIG_TOKEN_ENV, '').strip() if not live else ''
+        if rig_token and len(rig_token) < RIG_TOKEN_MIN:
+            log(f'{RIG_TOKEN_ENV} is shorter than {RIG_TOKEN_MIN} characters: POST /pons_session stays off')
+            rig_token = ''
+        srv = serve_status(engine, a.status_host, a.status_port, rig_token or None) if a.status_port else None
         if srv:
-            log(f'status on http://{a.status_host}:{a.status_port}/status')
+            log(f'status on http://{a.status_host}:{a.status_port}/status'
+                + (' (+ POST /pons_session for the buy rig)' if rig_token else ''))
         status_file = StatusFile(os.path.join(jdir, 'status.json'))
         t_end = time.monotonic() + a.duration if a.duration else None
         try:

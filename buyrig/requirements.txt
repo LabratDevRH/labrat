@@ -1,0 +1,16 @@
+# The buy rig image's Python packages (Linux x86_64, CPython 3.13), pinned to the versions on the owner's PC where
+# the rig was built and its real session ran. No torch: the brain session reads the networks with ptload (numpy).
+--only-binary=:all:
+
+playwright==1.62.0
+numpy==2.4.2
+mujoco==3.13.0
+eth-account==0.13.7
+eth-abi==6.0.0b1
+eth-utils==5.3.1
+websockets==15.0.1
+requests==2.32.5
+pillow==12.2.0
+# brainrig.py imports its web server at module level (the buy rig does not serve anything)
+fastapi==0.128.0
+uvicorn==0.40.0

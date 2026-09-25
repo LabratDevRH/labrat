@@ -1,0 +1,27 @@
+# Build context of the buy rig image (buyrig/Dockerfile; BuildKit reads this file instead of the root .dockerignore):
+# ONLY the files below. .env, .env.*, launch_journal.json, old runs, site/, relay/, videos never reach the build.
+*
+!env.py
+!cursor_env.py
+!steer_env.py
+!session.py
+!ptload.py
+!replay_session.py
+!launcher.py
+!assets/
+!runs/final/policy.pt
+!runs/final/steer.pt
+!live/brainrig.py
+!live/ponsbot.py
+!live/buyback.py
+!live/buyrig.py
+!live/buyrig_runner.py
+!buyrig/
+
+# never, even inside a whitelisted directory
+**/__pycache__
+**/*.pyc
+**/.env
+**/.env.*
+**/launch_journal.json
+**/*.mp4
