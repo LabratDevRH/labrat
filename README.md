@@ -128,41 +128,65 @@ wss://labrat-relay-production.up.railway.app/publish` (token from `LABRAT_PUBLIS
 `tiles_env.py`: our own falling-tiles rhythm game, played by the same two-network brain. The rat's screen has 4
 lanes; one black tile per note of a public-domain melody (`assets/songs.json`, identical to
 `site/assets/songs.json`: Ode to Joy, Twinkle Twinkle Little Star, Frère Jacques, the opening of Für Elise) slides
-down its lane. The rat turns its head to put the cursor on the lowest tile and presses the lever to tap it before it
-passes the bottom; each tap plays that tile's note, so the tiles in order spell the melody (a note's lane comes from
-its pitch, see `tiles_env.song_lanes`).
+down its lane toward a red button on a hit line near the bottom. The rat turns its head to move between the lanes
+and presses the lever as the tile reaches the button; each tap plays that tile's note, so the tiles in order spell
+the melody (a note's lane comes from its pitch, see `tiles_env.song_lanes`).
 
-- **Rules:** a tap on the lowest tile is a hit (+50, as a target click in the cursor task); a click anywhere else is
-  wrong (-3); a tile that passes the bottom untapped is a miss (-10, its note is skipped). A tap is a press the
-  steering network asked for: only the first click of each press counts. Each press is a trial, as each step is in
-  the launch rig: when the lever-press network hands the body back, the rat is put back in its standing start pose
-  (without that, a paw left on the lever froze the cursor and kept the lever from re-arming). A fall costs 40 and
-  the rat is put back on its feet the same way; the song goes on. Until a tile is on screen the brain rests, as during
-  the rig's holds. The steering network's head-down commands are cut while the head is pitched far down (most falls
-  in the cursor tasks were the head driven into the floor); head up and sideways stay free. A small shaping reward
-  leads the cursor to the middle and lower part of the tile, where a press that takes its time still lands on it.
-- **What the steering network sees:** the lowest tile as the lit target (the cursor task's cue), plus 9 inputs
-  appended to its observation: the tiles' speed, time until the tile passes the bottom, when it reaches and leaves
-  the cursor's row, whether the cursor is in its lane, where the next tile is, and tiles left.
-  `train.py --resume runs/final/steer.pt` widens the 21-input steering network to 30 inputs with zero weights on the
-  new ones, so it starts out playing exactly as the steering network did.
-- **Curriculum** (`--curriculum`): from one slow, tall tile at a time (0.07 screen heights a second) to a column
-  scrolling in on the song's rhythm (up to 0.5 a second, 1.2 s a beat), stepped up when the rat taps more than 75% of
-  the tiles at its level (twice as fast over 95%) and down under 45%.
+- **Rules (game rule v2):** a press is a hit only if the cursor is in the lowest tile's lane and that tile overlaps
+  the hit band (the hit line ± the level's window) when the click registers: +50 (as a target click in the cursor
+  task) plus a timing bonus of up to +40, `40 × (1 − |timing| / half the time the tile overlaps the band)`, where
+  timing is how many seconds early or late the tile's centre was on the hit line (with +10, 0.84M steps of training
+  halved the wrong presses but did not move the timing at all). The hit and its bonus are valued at
+  the moment the tile is centred: a press that lands early is paid that value discounted back to the click with
+  training's discount (0.99 per 20 ms step), and one-at-a-time tiles appear a fixed time after the previous tile's
+  centred moment. Without that, being paid up to 1.35 s sooner outweighed the bonus, and the best policy was to press
+  as the tile entered the band; with it, pressing early gains nothing. Any other press is wrong (−3): the
+  wrong lane, or nothing on the band in that lane yet. A tile that passes the band untapped is a miss (−10, its note
+  is skipped). The click lands 0.12–0.16 s after the steering network asks for a press (measured: every press
+  program clicked on its 7th to 9th control step), and the cursor is frozen meanwhile, so the rat has to press a
+  little before the tile is centred. A tap is a press the steering network asked for: only the first click of each
+  press counts. Each press is a trial, as each step is in the launch rig: when the lever-press network hands the
+  body back, the rat is put back in its standing start pose (without that, a paw left on the lever froze the cursor
+  and kept the lever from re-arming). A fall costs 40 and the rat is put back on its feet the same way; the song
+  goes on. Until a tile is on screen the brain rests, as during the rig's holds. The steering network's head-down
+  commands are cut while the head is pitched far down (most falls in the cursor tasks were the head driven into the
+  floor); head up and sideways stay free. A small shaping reward leads the cursor to the middle of the lit button.
+- **What the steering network sees:** the red button of the lowest tile's lane as the lit target (the cursor task's
+  cue; its "on target" input says the cursor is on that button, not whether a press now would be on time), plus 22
+  inputs appended to its observation: the tiles' speed, when the lowest tile reaches, passes and leaves the hit line,
+  when it is perfect (coarse, and fine within ±0.5 s), whether the cursor is in its lane, where the next tile is,
+  tiles left, half the timing window in seconds, for each lane when its lowest tile on screen enters and leaves the
+  hit band, and the cursor's position. `train.py --resume` widens the 21-input steering network (or a 30-input rule
+  v1 tiles network) to 43 inputs with zero weights on the new ones, so it starts out playing exactly as it did. (A
+  first version lit the "on target" input only while a press would hit: the networks pressed the moment it lit, as
+  the tile entered the band, and training did not change that. With the input on the button, an early press is a
+  wrong press, and the timing inputs are what tell the rat when to press.)
+- **Curriculum** (`--curriculum`): from one slow, tall tile at a time with a wide hit band (0.2 screen heights a
+  second, a band 0.24 tall: on time within ±1.35 s) to a column scrolling in on the song's rhythm (0.5 a second,
+  1.7 s a beat, a band 0.06 tall: ±0.23 s), stepped up when the rat taps more than 75% of the tiles at its level
+  (twice as fast over 95%) and down under 45%. A checkpoint of another rule version starts the curriculum at 0.
 - **Training** plays 8-note phrases of random songs; the **live view** plays whole songs in turn (one episode per
-  song) and also streams the board (`tiles`, up to 10 a second) and every tile's outcome (`tile`); see
-  `live/publish_training.py`. A tile tapped counts as a hit for the buybacks, like a target hit in the steering task.
-- **Measured** (`runs/tiles_sanity`, a local sanity run: the steering network plus 1.35M steps with 6 × 6 envs, about
-  11 minutes on a 12-thread PC; its `log.jsonl` is kept): the curriculum reached the top level (0.5 screen heights a
-  second, 1.2 s a beat) after 0.53M steps. There the rat's tile rate fell to 79% (the log's low point) and was back
-  at 97% by the end. With mean actions at the top level (`tiles_env.py --eval`, 36 phrases) the steering network as
-  it started taps 1.5 of 8 tiles (every phrase ends on the third missed tile), the trained one 7.8 of 8 (99%); whole
-  songs at that level (`--full-songs`, 12 plays of Twinkle, Twinkle, 42 notes), 99%. Up to difficulty 0.6 the
-  steering network already played at 98% before any tiles training.
+  song) and also streams the board (`tiles`, up to 10 a second, with the hit line `hit_y`, the band's `window` and
+  `pressing`) and every tile's outcome (`tile`, with `timing` for a hit); see `live/publish_training.py`. A tile
+  tapped counts as a hit for the buybacks, like a target hit in the steering task.
+- **Measured** (`runs/tiles_v2_sanity`, a local sanity run under rule v2, resumed from the rule v1 sanity network
+  `runs/tiles_sanity/policy_final.pt`: +2.0M steps with 6 × 6 envs, about 16 minutes on a 12-thread PC; its
+  `log.jsonl` is kept, as is the rule v1 run's): the curriculum held at 0 for the first 0.66M steps while the rat
+  unlearned pressing as soon as its cursor reached the button (wrong presses per 8-tile phrase 18.3 → 5.6), then
+  climbed to 0.65 (0.4 screen heights a second, on time within ±0.43 s) by the end; the tile rate never fell below
+  98%. With mean actions (`tiles_env.py --eval`, 24 phrases each), the network it started from → the trained one:
+  - at 0.65: hits per phrase 7.42 → 8.00, missed 0.58 → 0, wrong presses 11.96 → 0, |timing| 214 → 137 ms (the
+    buyback engine's hit rate, hits / (hits + misses + wrong), 0.37 → 1.00); whole songs at that level
+    (`--full-songs`, 8 plays of Twinkle, Twinkle, 42 notes): 36.75 → 42 hits, 59 → 0 wrong presses, |timing|
+    225 → 134 ms.
+  - at 0 and 0.3 the wrong presses fell from 20.0 → 0 and 16.9 → 1.9 per phrase, but the hits there still land early
+    in the wide bands (−840 ms and −368 ms): the timing is learnt at the level being trained.
+  - at 1.0 (not reached yet) the trained network taps 0.8 of 8 tiles, late (the one it started from, 2.4); the live
+    job goes on from 0.65. `trainer/tiles_v2_start.pt` is this network (see `trainer/README.md`).
 
 ```
-python train.py --task tiles --name tiles_rw1 --resume runs/final/steer.pt --steps 4152000 --curriculum
-python tiles_env.py --eval runs/tiles_rw1/policy_last.pt --difficulty 0.3     # mean actions, 24 phrases
+python train.py --task tiles --name tiles_v2_sanity --resume runs/tiles_sanity/policy_final.pt --steps 4502144 --workers 6 --envs-per-worker 6 --curriculum
+python tiles_env.py --eval runs/tiles_v2_sanity/policy_final.pt --difficulty 0.65     # mean actions, 24 phrases
 ```
 
 ## Rat buybacks (built, DRY only)

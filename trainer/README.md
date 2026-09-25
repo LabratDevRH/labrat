@@ -18,14 +18,15 @@ tini -> entry.py -> train.py + its workers   (CPU)
 `trainer/Dockerfile` builds from the repo root. The root `.dockerignore` lets only these files into the build:
 `train.py policy.py env.py cursor_env.py steer_env.py tiles_env.py ptload.py`, `assets/` (the scene, and
 `songs.json`: Rat Tiles' melodies), `runs/final/policy.pt`, `runs/final/steer.pt`, `live/publish_training.py`,
-`live/labrat_frame.py`, `live/assets/rat.json` and `trainer/`.
+`live/labrat_frame.py`, `live/assets/rat.json` and `trainer/` (with `trainer/tiles_v2_start.pt`, a Rat Tiles start).
 `.env`, `.env.*`, `launch_journal.json`, old runs, `site/`, `relay/`, `build/`, `shots/` and videos never reach it,
-and the root `.railwayignore` keeps them out of the `railway up` upload as well (21 files, about 6.4 MB).
+and the root `.railwayignore` keeps them out of the `railway up` upload as well (22 files, about 7.3 MB).
 
 Python 3.13 (slim), the **CPU** build of torch, MuJoCo, numpy and websockets, all pinned in
 `trainer/requirements.txt`. The build ends with `python trainer/entry.py --selftest`: the imports, both final
-networks (read with ptload and loaded by torch the way `train.py --resume` loads them), the songs, and a few steps of
-all four environments (lever, cursor, steer, tiles). A broken image fails the build instead of a job.
+networks (read with ptload and loaded by torch the way `train.py --resume` loads them), the Rat Tiles start network
+if the image has one (its game rules and input count must match `tiles_env.py`), the songs, and a few steps of all four
+environments (lever, cursor, steer, tiles). A broken image fails the build instead of a job.
 
 No wallet key is needed or present. The trainer has nothing to do with launching coins; if a variable that looks
 like a key is set on the service, `entry.py` names it in the log (never its value) and passes it to nobody.
@@ -69,16 +70,22 @@ TRAIN_ARGS=--curriculum
 TRAIN_WORKERS=7
 ```
 
-Rat Tiles (`tiles_env.py`) the same way, from the final steering network (its first layer is widened for the tile
-features; the publisher then plays whole songs and sends the board and every tile's outcome):
+Rat Tiles (`tiles_env.py`, game rule v2: red buttons on a hit line, presses timed to the tiles) the same way. The
+publisher then plays whole songs and sends the board and every tile's outcome. Start from the Rat Tiles network
+trained locally under rule v2, which the image carries as `trainer/tiles_v2_start.pt` (the job goes on at the
+curriculum difficulty saved in it):
 
 ```
 TRAIN_TASK=tiles
-TRAIN_NAME=tiles_rw1
+TRAIN_NAME=tiles_v2_live
 TRAIN_STEPS=3000000
-TRAIN_RESUME=runs/final/steer.pt
+TRAIN_RESUME=trainer/tiles_v2_start.pt
 TRAIN_ARGS=--curriculum
 ```
+
+or from the final steering network, `TRAIN_RESUME=runs/final/steer.pt` (its first layer is widened for the 22 tile
+inputs and the curriculum starts at 0). Use a new `TRAIN_NAME`: a rule v1 tiles run (30 inputs) resumed after this
+image is deployed would be widened and start its curriculum over in the same log.
 
 - **Start:** set the variables. The deploy log shows `new job runs/steer_rw1`, `publisher started`, `train.py`'s
   JSON rows, then `publishing steer_rw1 ... connected to wss://...`. The relay's `/status` shows `"live": true`

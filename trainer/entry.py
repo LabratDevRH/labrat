@@ -59,6 +59,7 @@ APP = os.path.dirname(HERE)                        # train.py, env.py, ... live 
 RUNS_LINK = os.path.join(APP, 'runs')              # train.py writes to <its dir>/runs/<name>
 SEED_DIR = os.path.join(APP, 'seed', 'final')      # the image's final networks (trainer/Dockerfile)
 SEED_FILES = ('policy.pt', 'steer.pt')
+TILES_START = os.path.join(HERE, 'tiles_v2_start.pt')   # optional: a trained Rat Tiles network (rule v2) to resume
 DEFAULT_DATA = '/data'
 DEFAULT_RELAY = 'wss://labrat-relay-production.up.railway.app/publish'
 TOKEN_ENV = 'LABRAT_PUBLISH_TOKEN'
@@ -767,6 +768,15 @@ def _selftest():
         ck = torch.load(path, weights_only=False, map_location='cpu')
         Policy(len(ck['mean']), act, hidden=hidden).load_state_dict(ck['net'])   # what train.py --resume does
     log(f'networks: policy.pt {int(pk["steps"]):,} steps, steer.pt {int(sk["steps"]):,} steps; torch loads both')
+    if os.path.isfile(TILES_START):                   # optional Rat Tiles start: TRAIN_RESUME=trainer/tiles_v2_start.pt
+        from tiles_env import OBS_DIM as TILES_OBS, RULES as TILES_RULES
+        tk = load(TILES_START)
+        assert (tk.get('task') == 'tiles' and tk.get('rules') == TILES_RULES and len(tk['mean']) == TILES_OBS
+                and tk['net']['pi.6.weight'].shape[0] == 5), 'tiles_v2_start.pt: not a Rat Tiles network of these rules'
+        Policy(TILES_OBS, 5, hidden=256).load_state_dict(torch.load(TILES_START, weights_only=False,
+                                                                    map_location='cpu')['net'])
+        log(f'Rat Tiles start: trainer/tiles_v2_start.pt, {int(tk["steps"]):,} steps, rules {TILES_RULES}, '
+            f'difficulty {tk.get("difficulty")}; torch loads it')
 
     import train                                      # noqa: F401  (train.make_env, as the publisher uses it)
     from env import LeverEnv

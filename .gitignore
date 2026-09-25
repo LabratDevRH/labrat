@@ -26,6 +26,10 @@ runs/steer_v1/*
 !runs/tiles_sanity/
 runs/tiles_sanity/*
 !runs/tiles_sanity/log.jsonl
+# the rule v2 sanity run's log (red buttons on a hit line, timed presses), behind the same section
+!runs/tiles_v2_sanity/
+runs/tiles_v2_sanity/*
+!runs/tiles_v2_sanity/log.jsonl
 build/
 shots/
 live/dev_shots/

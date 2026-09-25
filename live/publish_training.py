@@ -18,7 +18,7 @@ Messages (the relay contract; binary frames in live/labrat_frame.py's layout):
     {"type":"hello","source":"training","task":..,"run":..,"label":..,"fps":25,"started":iso}
     binary frame (1,868 bytes)            {"type":"metrics","row":{log.jsonl row}}
     {"type":"checkpoint","steps":int,"sha256":str}
-    {"type":"episode","n":int,"presses":int,"hits":int,"misses":int,"fell":bool}      {"type":"bye"}
+    {"type":"episode","n":int,"presses":int,"hits":int,"misses":int,"fell":bool[,"missed":int]}      {"type":"bye"}
 On every (re)connect it first sends hello, the checkpoint playing now and the last --backlog log rows (so a
 restarted relay, or one that starts a fresh history on each hello, gets the run's curve back).
 A relay that closes the stream with 1008 (policy violation: relay/relay.py refuses a hello that is not live
@@ -27,20 +27,26 @@ would be refused the same way.
 "presses" counts presses that registered (lever task: a clean press; cursor tasks: every click), "hits" the
 clean presses / on-target clicks, "misses" the off-target clicks.
 
-Rat Tiles (task "tiles", tiles_env.py): the live view plays WHOLE SONGS, the songs of assets/songs.json in turn (training
-plays EP_TILES-note phrases; the rest is as training builds it), one song per episode, and also sends
-    {"type":"tiles","t":sim_time,"song":id,"speed":screen_heights_per_s,"lanes":4,"cursor":[x,y],
-     "tiles":[[id,lane,y_center,h,state],...],"note_i":int}       every 3rd frame (<= 10 Hz; droppable like a frame)
-    {"type":"tile","id":int,"lane":int,"result":"hit"|"miss"|"wrong","note_i":int,"song":id}   once per outcome
-"tiles" lists every tile on screen (state "up" | "hit": a tapped tile scrolls on, grey; y_center and h in screen
-heights, y down, a tile may reach past the top edge while it slides in); note_i is the lowest untapped tile's note
-(the next note to play; the song's length when none is left). A "tile" message says a tile was tapped ("hit": play
-note_i of the song), passed the bottom untapped ("miss"), or that a click landed anywhere but on the lowest tile
-("wrong": id and note_i are the lowest tile's, lane is the lane the click landed in). The binary frame's target is the
-on-screen part of the lowest untapped tile. Episode messages as for the other tasks: hits = tiles tapped, misses =
-wrong clicks, one episode per song. After every press, and after a fall, tiles_env puts the rat back in its standing
-start pose (a new trial, as the launch rig does between steps; the frames show it); a fall does not end the song, so
-"fell" says it fell at least once during the song.
+Rat Tiles (task "tiles", tiles_env.py, game rule v2): the live view plays WHOLE SONGS, the songs of assets/songs.json in
+turn (training plays EP_TILES-note phrases; the rest is as training builds it), one song per episode, and also sends
+    {"type":"tiles","t":sim_time,"song":id,"speed":screen_heights_per_s,"lanes":4,"hit_y":0.86,"window":half_height,
+     "cursor":[x,y],"pressing":bool,"tiles":[[id,lane,y_center,h,state],...],"note_i":int}
+                                                                   every 3rd frame (<= 10 Hz; droppable like a frame)
+    {"type":"tile","id":int,"lane":int,"result":"hit"|"miss"|"wrong","note_i":int,"song":id[,"timing":s]}
+                                                                   once per outcome
+"tiles" lists every tile on screen (state "up" | "hit" | "miss": a tapped tile scrolls on, grey; a missed one scrolls
+on past the hit line; y_center and h in screen heights, y down, a tile may reach past the top edge while it slides in).
+Each lane has a red button on the hit line at y = hit_y; the hit band is hit_y +- window (screen heights). The cursor's
+x picks the lane (its y does not count); "pressing" is true while a lever press (the lever-press network) is running.
+note_i is the lowest untapped tile's note (the next note to play; the song's length when none is left). A "tile" message
+says a tile was tapped ("hit": the cursor was in its lane while it overlapped the hit band; play note_i of the song;
+"timing" = seconds late (+) or early (-) of perfect, the tile's centre on the hit line), passed the hit band untapped
+("miss"), or that a press was anything else ("wrong": the wrong lane, or no tile on the hit band in that lane; id and
+note_i are the lowest tile's, lane is the lane the cursor was in). The binary frame's target is the on-screen part of
+the lowest untapped tile. Episode messages as for the other tasks: hits = tiles tapped, misses = wrong presses, one
+episode per song, plus "missed" = tiles that passed the hit band untapped. After every press, and after a fall, tiles_env puts the rat back in its standing start pose (a new
+trial, as the launch rig does between steps; the frames show it); a fall does not end the song, so "fell" says it fell
+at least once during the song.
 
 LIVE only while training: a run is live while its log.jsonl was written in the last --silence s (90). When it
 goes silent the script sends bye; --run then exits, --watch waits for the next run whose log.jsonl is written.
@@ -100,8 +106,8 @@ TASK_TEXT = {
     'lever': 'pressing the lever with the whole body',
     'cursor': 'moving a cursor with its head and clicking with a lever press, whole body',
     'steer': 'steering a cursor with its head and clicking with a lever press',
-    'tiles': 'playing Rat Tiles: steering the cursor onto the falling tile with its head and tapping it with a lever '
-             'press',
+    'tiles': 'playing Rat Tiles: moving between the lanes with its head and pressing the lever as each tile reaches '
+             'the red button on the hit line',
 }
 TOKEN_ENV = 'LABRAT_PUBLISH_TOKEN'
 POLL_S = 1.0                 # how often the run's files are checked
@@ -336,8 +342,11 @@ class Player:
         else:
             hits, misses = int(self.inner.hits), int(self.inner.misses)
             presses = hits + misses
-        return {'type': 'episode', 'n': self.episode, 'presses': presses, 'hits': hits, 'misses': misses,
-                'fell': bool(self.fell)}
+        msg = {'type': 'episode', 'n': self.episode, 'presses': presses, 'hits': hits, 'misses': misses,
+               'fell': bool(self.fell)}
+        if self.task == 'tiles':
+            msg['missed'] = int(self.inner.timeouts)          # tiles that passed the hit band untapped
+        return msg
 
 
 # ---------------------------------------------------------------------------------------------- the link

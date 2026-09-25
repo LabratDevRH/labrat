@@ -2,6 +2,8 @@
 
     python train.py --steps 30000000 --workers 11
     python train.py --task tiles --resume runs/final/steer.pt --steps <its steps + N> --curriculum   (Rat Tiles)
+      (a tiles checkpoint of the same game rules, tiles_env.RULES, goes on at its saved difficulty; an older one, or
+      the steering network, is widened for the tile features and starts the curriculum at 0)
 Checkpoints go to runs/<name>/policy_*.pt with obs-normalisation stats inside.
 """
 import argparse, json, os, time
@@ -56,7 +58,7 @@ def worker(conn, n_envs, seed, randomize=False, task='lever', init=None):
                     # every end is a true terminal: global time and time-since-press are both in the obs
                     stats.append((ep_ret[i], ep_len[i], info['pressed'], info['fell'], info['paw_dist'],
                                   info.get('hits', 0), info.get('misses', 0), info.get('timeouts', 0),
-                                  info.get('level', -1.0)))
+                                  info.get('level', -1.0), info.get('timing_abs', float('nan'))))
                     ep_ret[i] = 0; ep_len[i] = 0
                     o = e.reset()
                     dones[i] = 1
@@ -151,8 +153,13 @@ def main():
             from ptload import load as pt_load
             with open(a.resume, 'rb') as f:       # read and closed at once (os.replace of policy_last.pt on Windows)
                 pk = pt_load(io.BytesIO(f.read()))
-            if pk.get('task') == 'tiles' and isinstance(pk.get('difficulty'), float):
+            from tiles_env import RULES
+            # only a checkpoint of the same game rules goes on at its difficulty (rule v1 checkpoints saved none)
+            if (pk.get('task') == 'tiles' and pk.get('rules') == RULES and isinstance(pk.get('difficulty'), float)):
                 tiles_start = float(np.clip(pk['difficulty'], 0.0, 1.0))
+            elif pk.get('task') == 'tiles':
+                print(f'{a.resume}: tiles rules {pk.get("rules", 1)}, now {RULES}: the curriculum starts at 0',
+                      flush=True)
         init = {'difficulty': tiles_start}    # before the workers' first episode (not the envs' default of 1)
     conns, procs = [], []
     for w in range(a.workers):
@@ -294,15 +301,20 @@ def main():
                    'difficulty': round(difficulty, 3)}
             if a.task == 'tiles':
                 from tiles_env import level
-                n_tiles = r[:, 5].sum() + r[:, 7].sum()          # tiles resolved: hit + passed the bottom
+                n_tiles = r[:, 5].sum() + r[:, 7].sum()          # tiles resolved: hit + passed the hit band
                 row['tile_rate'] = round(float(r[:, 5].sum() / n_tiles), 3) if n_tiles else 0.0
                 row['speed'] = round(level(difficulty)['speed'], 3)
+                row['window'] = round(level(difficulty)['window'], 3)
+                # mean |timing| of the hits (ms from perfect, tiles_env rule v2), over the same last 100 episodes
+                tm = [x[9] for x in recent[-100:] if len(x) > 9 and np.isfinite(x[9])]
+                row['timing_ms'] = round(1000 * float(np.mean(tm)), 1) if tm else None
             print(json.dumps(row), flush=True); log.write(json.dumps(row) + '\n'); log.flush()
             ck = {'net': {k: v.detach().cpu() for k, v in net.state_dict().items()}, 'mean': norm.mean, 'var': norm.var,
                   'count': norm.count, 'steps': total, 'obs_dim': obs_dim, 'press_rate': rate, 'clean_rate': clean,
                   'opt_ok': True}
             if a.task == 'tiles':
-                ck.update(task='tiles', difficulty=float(difficulty))   # read by publish_training and a resume
+                from tiles_env import RULES
+                ck.update(task='tiles', difficulty=float(difficulty), rules=RULES)   # read by publish_training/resume
             atomic_save(torch, ck, os.path.join(out, 'policy_last.pt'))
             atomic_save(torch, opt.state_dict(), os.path.join(out, 'opt_last.pt'))
             if total >= next_snap:
