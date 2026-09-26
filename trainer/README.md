@@ -19,7 +19,7 @@ tini -> entry.py -> train.py + its workers   (CPU)
 `train.py policy.py env.py cursor_env.py steer_env.py tiles_env.py maze_env.py ptload.py`, `assets/` (the scene, and
 `songs.json`: Rat Tiles' melodies), `runs/final/policy.pt`, `runs/final/steer.pt`, `live/publish_training.py`,
 `live/labrat_frame.py`, `live/assets/rat.json` and `trainer/` (with `trainer/tiles_v2_start.pt`, a Rat Tiles start,
-and `trainer/maze_v1_start.pt`, a Rat Maze start).
+and `trainer/maze_v2_start.pt`, a Rat Maze start, rule v2).
 `.env`, `.env.*`, `launch_journal.json`, old runs, `site/`, `relay/`, `build/`, `shots/` and videos never reach it,
 and the root `.railwayignore` keeps them out of the `railway up` upload as well (22 files, about 7.3 MB).
 
@@ -90,19 +90,37 @@ or from the final steering network, `TRAIN_RESUME=runs/final/steer.pt` (its firs
 inputs and the curriculum starts at 0). Use a new `TRAIN_NAME`: a rule v1 tiles run (30 inputs) resumed after this
 image is deployed would be widened and start its curriculum over in the same log.
 
-Rat Maze (`maze_env.py`: the rat steers a marker through a maze to the cheese with its head; no lever press) the same
-way. The publisher then plays courses of 4 mazes and sends the maze and every maze's outcome (`maze` / `maze_end`),
-and the relay needs the maze protocol (relay/relay.py with `maze` in its TASKS). Start from the Rat Maze network
-trained locally (`runs/maze_sanity`, 1.5M steps from the final steering network), which the image carries as
-`trainer/maze_v1_start.pt` (the job goes on at the curriculum difficulty saved in it, 0.75: 7x7 mazes):
+Rat Maze (`maze_env.py`, game rule v2: the rat steers a marker through a maze to the cheese with its head; no lever
+press) the same way. The publisher then plays courses of 4 mazes and sends the maze and every maze's outcome (`maze` /
+`maze_end`), and the relay needs the maze protocol (relay/relay.py with `maze` in its TASKS). Start from the Rat Maze
+network trained locally under rule v2, which the image carries as `trainer/maze_v2_start.pt` (the job goes on at the
+curriculum difficulty saved in it, 0.425: 5x5 mazes, and climbs by itself):
 
 ```
 TRAIN_TASK=maze
-TRAIN_NAME=maze_v1_live
-TRAIN_STEPS=6000000
-TRAIN_RESUME=trainer/maze_v1_start.pt
+TRAIN_NAME=maze_v2_live
+TRAIN_STEPS=60000000
+TRAIN_RESUME=trainer/maze_v2_start.pt
 TRAIN_ARGS=--curriculum
 ```
+
+**Why rule v2 (2026-09-26).** The rule v1 network (`maze_v1_start.pt`, 2.65M steps) raced its curriculum to 7x7 mazes
+on the strength of open rooms and never learnt to go round a wall: on the live page it flicked left-right against
+walls (6.4 reversals of the marker a second) instead of finding the cheese. Rule v2 (`maze_env.py`, `RULES = 2`) adds
+a "which way is open / blocked" cue to the observation (51 inputs, was 40), rewards progress toward the cheese without
+rewarding reversals (anti-dither shaping), charges a small cost for neck commands past the actuator's range (the
+commands that did nothing to the body but killed the exploration noise at a wall), and steps the curriculum up only on
+a sustained 85% escape rate over 100 mazes (`train.py`, `MAZE_CURR_*`). Measured the way the live page plays (the
+policy's mean action, courses of 4 mazes, 32 courses per row, `python maze_env.py --eval <ckpt> --course`):
+
+| network | level 0.4 (5x5) escapes | level 0.5 (5x5) escapes | marker reversals / s | wall bumps per maze |
+|---|---|---|---|---|
+| rule v1, `maze_v1_start.pt` (2.65M steps) | 26% | 8% (48 mazes, one maze per episode) | 6.4 | 16.9 |
+| rule v2, `maze_v2_start.pt` (10.1M steps: variant B of the A/B, with the saturation cost, continued) | 76% | 56% | 2.0 | 3.2 |
+
+At 7.1M steps (the end of the A/B) variant B escaped 63% / 51% and variant A (rule v2 without the saturation cost)
+56% / 43%; the A/B started from one 5.9M-step rule v2 network. `maze_v2_start.pt` is variant B continued to 10.1M
+steps (`runs/maze_v2_B_cont/policy_last.pt`, curriculum level 0.425).
 
 or from the final steering network, `TRAIN_RESUME=runs/final/steer.pt` (widened for the 19 maze inputs; the
 curriculum starts at 0 and climbs by itself). Use a new `TRAIN_NAME`.
@@ -147,9 +165,9 @@ it, and only then this service (the relay sends nothing for the channel until a 
    RAILWAY_DOCKERFILE_PATH=trainer/Dockerfile
    RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30
    TRAIN_TASK=maze
-   TRAIN_NAME=maze_v1_live
-   TRAIN_STEPS=6000000
-   TRAIN_RESUME=trainer/maze_v1_start.pt
+   TRAIN_NAME=maze_v2_live
+   TRAIN_STEPS=60000000
+   TRAIN_RESUME=trainer/maze_v2_start.pt
    TRAIN_ARGS=--curriculum
    TRAIN_WORKERS=<the service's vCPU limit - 1>
    LABRAT_RELAY_CHANNEL=maze
@@ -159,8 +177,8 @@ it, and only then this service (the relay sends nothing for the channel until a 
 
    Nothing else. In particular no wallet variable of any kind: `entry.py` names one in the log and passes it to nobody.
 6. **Deploy** (`railway up --service labrat-trainer-maze` from the repo root, or the dashboard's deploy). The log
-   should show `runs/ -> /data/runs (a mounted volume)`, `new job runs/maze_v1_live: maze, 6,000,000 steps from
-   trainer/maze_v1_start.pt`, `publisher started (pid ...) -> wss://.../publish (channel maze)`, then the
+   should show `runs/ -> /data/runs (a mounted volume)`, `new job runs/maze_v2_live: maze, 60,000,000 steps from
+   trainer/maze_v2_start.pt`, `publisher started (pid ...) -> wss://.../publish (channel maze)`, then the
    publisher's `publishing on the relay's 'maze' channel (wss://.../publish?channel=maze)` and `connected to`.
    The relay's `/status` then shows `"maze_channel": {"live": true, "hello": {"task": "maze", ...}}` once the
    first checkpoint is saved (every 5 PPO iterations), while its top-level `live`/`hello` keep describing

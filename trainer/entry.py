@@ -66,7 +66,7 @@ RUNS_LINK = os.path.join(APP, 'runs')              # train.py writes to <its dir
 SEED_DIR = os.path.join(APP, 'seed', 'final')      # the image's final networks (trainer/Dockerfile)
 SEED_FILES = ('policy.pt', 'steer.pt')
 TILES_START = os.path.join(HERE, 'tiles_v2_start.pt')   # optional: a trained Rat Tiles network (rule v2) to resume
-MAZE_START = os.path.join(HERE, 'maze_v1_start.pt')     # optional: a trained Rat Maze network (rule v1) to resume
+MAZE_START = os.path.join(HERE, 'maze_v2_start.pt')     # optional: a trained Rat Maze network (rule v2) to resume
 DEFAULT_DATA = '/data'
 DEFAULT_RELAY = 'wss://labrat-relay-production.up.railway.app/publish'
 TOKEN_ENV = 'LABRAT_PUBLISH_TOKEN'
@@ -813,14 +813,14 @@ def _selftest():
                                                                     map_location='cpu')['net'])
         log(f'Rat Tiles start: trainer/tiles_v2_start.pt, {int(tk["steps"]):,} steps, rules {TILES_RULES}, '
             f'difficulty {tk.get("difficulty")}; torch loads it')
-    if os.path.isfile(MAZE_START):                    # optional Rat Maze start: TRAIN_RESUME=trainer/maze_v1_start.pt
+    if os.path.isfile(MAZE_START):                    # optional Rat Maze start: TRAIN_RESUME=trainer/maze_v2_start.pt
         from maze_env import OBS_DIM as MAZE_OBS, RULES as MAZE_RULES
         mk = load(MAZE_START)
         assert (mk.get('task') == 'maze' and mk.get('rules') == MAZE_RULES and len(mk['mean']) == MAZE_OBS
-                and mk['net']['pi.6.weight'].shape[0] == 5), 'maze_v1_start.pt: not a Rat Maze network of these rules'
+                and mk['net']['pi.6.weight'].shape[0] == 5), 'maze_v2_start.pt: not a Rat Maze network of these rules'
         Policy(MAZE_OBS, 5, hidden=256).load_state_dict(torch.load(MAZE_START, weights_only=False,
                                                                   map_location='cpu')['net'])
-        log(f'Rat Maze start: trainer/maze_v1_start.pt, {int(mk["steps"]):,} steps, rules {MAZE_RULES}, '
+        log(f'Rat Maze start: trainer/maze_v2_start.pt, {int(mk["steps"]):,} steps, rules {MAZE_RULES}, '
             f'difficulty {mk.get("difficulty")}; torch loads it')
 
     import train                                      # noqa: F401  (train.make_env, as the publisher uses it)

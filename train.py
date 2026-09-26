@@ -51,12 +51,18 @@ def game_rules(task):
 # have ended; success = tiles hit / (tiles hit + tiles missed + 0.5 per wrong click). Falls are left to the reward
 # (tiles_env: the rat is set back on its feet and pays for it): the difficulty is about the tiles. Up 0.05 over 75%
 # (0.10 over 95%: the steering network plays the easy levels well from the start), down 0.05 under 45%.
-# Rat Maze (--task maze --curriculum) uses the same rule: success = mazes escaped / (escaped + timed out); there are no
-# wrong clicks (maze_env ignores the PRESS output).
+# Rat Maze (--task maze --curriculum, maze_env rule v2): success = mazes escaped / (escaped + timed out); there are no
+# wrong clicks (maze_env ignores the PRESS output). It steps up only on a SUSTAINED escape rate, MAZE_CURR_UP over the
+# last MAZE_CURR_MIN mazes played at the level (one maze per training episode), in steps of MAZE_CURR_STEP (a double
+# step over MAZE_CURR_EASY), and down under MAZE_CURR_DOWN. Rule v1 used the tiles rule (16 episodes, 75%, 0.05) and
+# raced to 7x7 mazes on the strength of the open rooms, before the rat had learnt to go round a wall.
 TILES_CURR_MIN = 16
 TILES_CURR_WINDOW = 48
 TILES_CURR_UP, TILES_CURR_DOWN, TILES_CURR_STEP = 0.75, 0.45, 0.05
 TILES_CURR_EASY = 0.95          # a level played this well is skipped faster: a double step up
+MAZE_CURR_MIN = 100             # mazes at the level before the curriculum judges it (the window is the same 100)
+MAZE_CURR_UP, MAZE_CURR_DOWN, MAZE_CURR_STEP = 0.85, 0.35, 0.025
+MAZE_CURR_EASY = 0.97
 
 
 def worker(conn, n_envs, seed, randomize=False, task='lever', init=None):
@@ -79,7 +85,8 @@ def worker(conn, n_envs, seed, randomize=False, task='lever', init=None):
                     stats.append((ep_ret[i], ep_len[i], info['pressed'], info['fell'], info['paw_dist'],
                                   info.get('hits', 0), info.get('misses', 0), info.get('timeouts', 0),
                                   info.get('level', -1.0), info.get('timing_abs', float('nan')),
-                                  info.get('cheese_s', float('nan')), info.get('bumps', float('nan'))))
+                                  info.get('cheese_s', float('nan')), info.get('bumps', float('nan')),
+                                  info.get('flips', float('nan')), info.get('stalled', float('nan'))))
                     ep_ret[i] = 0; ep_len[i] = 0
                     o = e.reset()
                     dones[i] = 1
@@ -285,13 +292,17 @@ def main():
 
         total += H * N; it += 1
         if a.curriculum and a.task in GAME_TASKS:
-            cur = [x for x in recent if len(x) > 8 and abs(x[8] - difficulty) < 1e-6][-TILES_CURR_WINDOW:]
-            if len(cur) >= TILES_CURR_MIN:
+            maze = a.task == 'maze'
+            c_min, c_win = (MAZE_CURR_MIN, MAZE_CURR_MIN) if maze else (TILES_CURR_MIN, TILES_CURR_WINDOW)
+            c_up, c_down, c_step, c_easy = ((MAZE_CURR_UP, MAZE_CURR_DOWN, MAZE_CURR_STEP, MAZE_CURR_EASY) if maze
+                                            else (TILES_CURR_UP, TILES_CURR_DOWN, TILES_CURR_STEP, TILES_CURR_EASY))
+            cur = [x for x in recent if len(x) > 8 and abs(x[8] - difficulty) < 1e-6][-c_win:]
+            if len(cur) >= c_min:
                 rr = np.array([x[:8] for x in cur], dtype=float)
                 tried = rr[:, 5].sum() + rr[:, 7].sum() + 0.5 * rr[:, 6].sum()
                 succ = rr[:, 5].sum() / tried if tried else 0.0
-                step = (2 * TILES_CURR_STEP if succ > TILES_CURR_EASY else TILES_CURR_STEP if succ > TILES_CURR_UP
-                        else -TILES_CURR_STEP if succ < TILES_CURR_DOWN else 0.0)
+                up = succ >= c_up if maze else succ > c_up          # the tiles rule is unchanged
+                step = 2 * c_step if succ > c_easy else c_step if up else -c_step if succ < c_down else 0.0
                 new = float(np.clip(round(difficulty + step, 4), 0.0, 1.0))
                 if new != difficulty:
                     difficulty = new
@@ -341,6 +352,11 @@ def main():
                 row['cheese_s'] = round(float(np.mean(cs)), 2) if cs else None
                 bumps = [x[11] for x in recent[-100:] if len(x) > 11 and np.isfinite(x[11])]
                 row['bumps'] = round(float(np.mean(bumps)), 2) if bumps else None
+                # rule v2: reversals of the marker per episode and the fraction of its steps stalled (maze_env)
+                flips = [x[12] for x in recent[-100:] if len(x) > 12 and np.isfinite(x[12])]
+                row['flips'] = round(float(np.mean(flips)), 1) if flips else None
+                stalled = [x[13] for x in recent[-100:] if len(x) > 13 and np.isfinite(x[13])]
+                row['stalled'] = round(float(np.mean(stalled)), 3) if stalled else None
             print(json.dumps(row), flush=True); log.write(json.dumps(row) + '\n'); log.flush()
             ck = {'net': {k: v.detach().cpu() for k, v in net.state_dict().items()}, 'mean': norm.mean, 'var': norm.var,
                   'count': norm.count, 'steps': total, 'obs_dim': obs_dim, 'press_rate': rate, 'clean_rate': clean,
