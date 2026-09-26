@@ -15,6 +15,10 @@
     {
       "source": "/buyback",
       "destination": "/buyback/index.html"
+    },
+    {
+      "source": "/burn",
+      "destination": "/burn/index.html"
     }
   ]
 }

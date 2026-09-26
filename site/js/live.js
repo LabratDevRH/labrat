@@ -35,6 +35,10 @@
        onMaze: m => ...,        // Rat Maze (a run whose hello has task "maze"): {type:'maze', t, maze_id, w, h, walls, cell,
                                 //  pos, cheese, trail, bumps, steps, dist} snapshots and {type:'maze_end', maze_id, result,
                                 //  steps, bumps, time_s} outcomes; this view only shows the cheese (the frame's target fields)
+       onMazeChannel: m => ..., // the relay's maze channel (a second trainer, streaming Rat Maze for the /burn page): every
+                                //  text message marked "channel":"maze" (its own hello / state / metrics / checkpoint /
+                                //  episode / bye / idle, maze, maze_end); never touches this view
+       onMazeFrame: buf => ..., // the maze channel's frames: ArrayBuffer b"MZ" + a rat frame; never used by this view
        onRelay: (open, gone) => ..., // the relay socket opened (true) or closed (false); gone=true: this view was torn
                                 //  down and will not reconnect (anything riding on its socket needs its own)
      });
@@ -117,6 +121,10 @@ const safe = (fn, ...a) => { try { if (typeof fn === 'function') fn(...a); } cat
 // a frame of the relay's pons channel: b"PJPG" + a JPEG (never a rat frame, whatever its size)
 const isPonsFrame = b => b instanceof ArrayBuffer && b.byteLength >= 4 &&
   (v => v[0] === 0x50 && v[1] === 0x4A && v[2] === 0x50 && v[3] === 0x47)(new Uint8Array(b, 0, 4));
+// a frame of the relay's maze channel: b"MZ" + a rat frame of the maze trainer (a training frame of this channel starts
+// with the float 7.0, bytes 00 00 E0 40, so the two never look alike)
+const isMazeFrame = b => b instanceof ArrayBuffer && b.byteLength >= 2 &&
+  (v => v[0] === 0x4D && v[1] === 0x5A)(new Uint8Array(b, 0, 2));
 
 async function loadThree() {
   try { return await import('three'); }
@@ -987,6 +995,8 @@ async function mount(el, opts, st) {
       if (typeof ev.data !== 'string') {
         // the relay's pons channel (b"PJPG" + a JPEG): not a rat frame; handed to the page's pons panel as is
         if (isPonsFrame(ev.data)) { safe(opts.onPonsFrame, ev.data); return; }
+        // the relay's maze channel (b"MZ" + the maze trainer's rat frame): not this view's rat
+        if (isMazeFrame(ev.data)) { safe(opts.onMazeFrame, ev.data); return; }
         onBinary(ev.data); return;
       }
       if (ev.data.length > 65536) return;
@@ -995,6 +1005,10 @@ async function mount(el, opts, st) {
       // pons channel messages ("channel":"pons": pons_hello / step / result / bye / state / idle) never touch the
       // training view (a pons idle must not end a live training stream); the page's pons panel gets them
       if (m.channel === 'pons' || (typeof m.type === 'string' && m.type.startsWith('pons_'))) { safe(opts.onPons, m); return; }
+      // the maze channel's messages ("channel":"maze": the second trainer's hello / state / metrics / bye / idle, its
+      // maze snapshots and outcomes) never touch this view either (its bye must not end this channel's stream); the
+      // page's Rat Maze panel gets them
+      if (m.channel === 'maze') { safe(opts.onMazeChannel, m); return; }
       // Rat Tiles snapshots and tile outcomes: for the page's Rat Tiles panel (this view draws the active tile from the
       // frames' target fields)
       if (m.type === 'tiles' || m.type === 'tile') { safe(opts.onTiles, m); return; }

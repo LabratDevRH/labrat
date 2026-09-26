@@ -87,6 +87,7 @@
       <a href="#proof">Proof</a>
       <a href="#watching">Watching</a>
       <a href="/buyback">Buyback</a>
+      <a href="/burn">Burn</a>
     </nav>
     <a class="nav-status conn" id="nav-status" href="#live" title="Status of the live panel"><i></i><span id="nav-status-t">connecting</span></a>
     <a class="nav-gh" href="https://github.com/LabratDevRH/labrat" target="_blank" rel="noopener"><svg aria-hidden="true"><use href="#i-gh"/></svg><span>GitHub</span></a>
@@ -172,18 +173,24 @@
     </section>
   </div>
 
-  <!-- the games: the Rat Tiles teaser and the Rat Maze teaser (site.js sets each status chip while its run is streaming) -->
+  <!-- the games and the burn: the Rat Tiles teaser (buybacks), the Rat Maze teaser and the burn teaser (both on /burn);
+       site.js sets each game's status chip while its run is streaming -->
   <div class="wrap wide">
-    <div class="teasers">
+    <div class="teasers three">
     <a class="rt-teaser" id="rt-teaser" href="/buyback#piano" data-state="idle">
       <span class="rt-teaser-ic" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-      <span class="rt-teaser-t"><span class="rt-teaser-h"><b>Rat Tiles</b><span class="rt-teaser-s" id="rt-teaser-s"><i></i><span id="rt-teaser-st">New</span></span></span><span class="rt-teaser-d">R-01 plays piano: its head picks a lane and a lever press hits the red button as each tile arrives, note by note of a public-domain melody.</span></span>
+      <span class="rt-teaser-t"><span class="rt-teaser-h"><b>Rat Tiles</b><span class="rt-teaser-s" id="rt-teaser-s"><i></i><span id="rt-teaser-st">New</span></span></span><span class="rt-teaser-d">R-01 plays piano: its head picks a lane and a lever press hits the red button as each tile arrives, note by note of a public-domain melody. Its hit rate sizes the hourly $LABRAT buyback.</span></span>
       <span class="rt-teaser-go">Watch and listen <span aria-hidden="true">&rarr;</span></span>
     </a>
-    <a class="mz-teaser" id="mz-teaser" href="/buyback#maze" data-state="idle">
+    <a class="mz-teaser" id="mz-teaser" href="/burn#maze" data-state="idle">
       <span class="mz-teaser-ic" aria-hidden="true"><svg viewBox="0 0 40 40" aria-hidden="true"><path class="mz-ti-w" d="M2 2h36v36H2zM11 2v18M20 11v9h9M11 29h18M29 20v9M2 20h9M20 29v9M29 11h9"/><circle class="mz-ti-c" cx="33.5" cy="33.5" r="2.6"/><circle class="mz-ti-r" cx="6.5" cy="6.5" r="2.4"/></svg></span>
-      <span class="mz-teaser-t"><span class="mz-teaser-h"><b>Rat Maze</b><span class="mz-teaser-s" id="mz-teaser-s"><i></i><span id="mz-teaser-st">New</span></span></span><span class="mz-teaser-d">R-01 escapes a maze: its head steers a marker through the corridors to the cheese at the exit, sensing only the walls around it.</span></span>
+      <span class="mz-teaser-t"><span class="mz-teaser-h"><b>Rat Maze</b><span class="mz-teaser-s" id="mz-teaser-s"><i></i><span id="mz-teaser-st">New</span></span></span><span class="mz-teaser-d">R-01 escapes a maze: its head steers a marker through the corridors to the cheese at the exit, sensing only the walls around it. Its escape rate sizes the hourly $LABRAT burn.</span></span>
       <span class="mz-teaser-go">Watch it run <span aria-hidden="true">&rarr;</span></span>
+    </a>
+    <a class="mz-teaser bn-teaser" id="bn-teaser" href="/burn" data-state="idle">
+      <span class="mz-teaser-ic" aria-hidden="true"><svg viewBox="0 0 40 40" aria-hidden="true"><path class="bn-ti-f" d="M20 3.5c.6 6.5 8 9.5 8 17.5a8 8 0 0 1-16 0c0-3.4 1.6-5.8 3.4-8.2.4 3.2 1.9 4.6 3.6 4.9-.5-5.2-1.3-9.7 1-14.2Z"/><path class="bn-ti-c" d="M20 21.5c2.2 2.4 3.4 4.1 3.4 6.1a3.4 3.4 0 0 1-6.8 0c0-2 1.2-3.7 3.4-6.1Z"/></svg></span>
+      <span class="mz-teaser-t"><span class="mz-teaser-h"><b>Every escape, a burn</b><span class="mz-teaser-s"><i></i><span>New</span></span></span><span class="mz-teaser-d">One $LABRAT burn an hour, from the rat's own wallet: 5% of what it holds &times; that hour's escape rate in the maze, verified on chain. Simulated until the rule is switched on.</span></span>
+      <span class="mz-teaser-go">See the burn <span aria-hidden="true">&rarr;</span></span>
     </a>
     </div>
   </div>
@@ -773,7 +780,7 @@
         <p class="foot-k">Sections</p>
         <ul class="foot-nav">
           <li><a href="#live">Live</a></li><li><a href="#subject">Subject</a></li><li><a href="#brain">Brain</a></li>
-          <li><a href="#launch">Launch</a></li><li><a href="#proof">Proof</a></li><li><a href="#watching">Watching</a></li><li><a href="/buyback">Buyback</a></li>
+          <li><a href="#launch">Launch</a></li><li><a href="#proof">Proof</a></li><li><a href="#watching">Watching</a></li><li><a href="/buyback">Buyback</a></li><li><a href="/burn">Burn</a></li>
         </ul>
       </div>
     </div>

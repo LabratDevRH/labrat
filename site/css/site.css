@@ -484,6 +484,14 @@ p{margin:0 0 14px}
 /* the two game teasers side by side on the home page (stacked on narrow screens) */
 .teasers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:stretch}
 @media (max-width:900px){.teasers{grid-template-columns:minmax(0,1fr)}}
+/* three teasers (Rat Tiles, Rat Maze, the burn): three across, two and one below, then one column */
+.teasers.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media (max-width:1180px){.teasers.three{grid-template-columns:repeat(2,minmax(0,1fr))}.teasers.three>:last-child{grid-column:1/-1}}
+@media (max-width:900px){.teasers.three{grid-template-columns:minmax(0,1fr)}}
+/* the burn teaser: the maze teaser's card with a flame */
+.bn-teaser .mz-teaser-ic{background:radial-gradient(ellipse at 50% 70%,#4a0f2c,#0b0320 75%)}
+.bn-ti-f{fill:none;stroke:#ff9e5c;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 0 3px rgba(245,172,41,.9))}
+.bn-ti-c{fill:var(--goldy);filter:drop-shadow(0 0 3px rgba(252,240,16,.9))}
 
 /* Rat Maze: R-01 escapes a maze (trial page; site.js draws the maze) */
 .mz{position:relative;margin-top:18px;border:1px solid var(--line);border-radius:10px;padding:14px 18px 16px;min-width:0;

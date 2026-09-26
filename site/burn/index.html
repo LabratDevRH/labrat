@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<base href="/">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>labrat · burn</title>
+<meta name="description" content="Rat burns for $LABRAT: one burn an hour, sized by R-01's escape rate at Rat Maze that hour, never more than 5% of the LABRAT the rat's wallet holds. Burns start soon.">
+<meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="labrat">
+<meta property="og:title" content="labrat · every escape, a burn">
+<meta property="og:description" content="A simulated rat with a brain of two trained neural networks runs a maze live. Each hour its escape rate sizes one $LABRAT burn: up to 5% of what its wallet holds.">
+<meta property="og:image" content="https://lab-rat.net/assets/labrat-logo.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1254">
+<meta property="og:image:height" content="1254">
+<meta property="og:image:alt" content="The labrat logo: a pixel-art rat in yellow, pink and violet on black">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="labrat · every escape, a burn">
+<meta name="twitter:description" content="A simulated rat runs a maze live. Each hour its escape rate sizes one $LABRAT burn: up to 5% of what its wallet holds.">
+<meta name="twitter:image" content="https://lab-rat.net/assets/labrat-logo.jpg">
+<meta name="twitter:image:alt" content="The labrat logo: a pixel-art rat in yellow, pink and violet on black">
+<link rel="icon" href="assets/labrat-logo.jpg" type="image/jpeg">
+<link rel="apple-touch-icon" href="assets/labrat-logo.jpg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="css/site.css">
+<script>document.documentElement.classList.add('js');</script>
+<script src="config.js"></script>
+<script src="coin.js"></script>
+<script src="burn.js"></script>
+<script>/* which coin state to show before site.js fills it in: "live" only with a real contract address in coin.js */
+(function () { var c = window.LABRAT_COIN;
+  document.documentElement.setAttribute('data-coin', c && /^0x[0-9a-fA-F]{40}$/.test(String(c.address || '')) ? 'live' : 'soon'); })();</script>
+<script type="module" src="js/site.js"></script>
+<style>.trial-hd{padding-top:28px;padding-bottom:6px}.trial-h{font-size:clamp(26px,3.4vw,44px);line-height:1.08;letter-spacing:-.02em;margin:10px 0 8px}.trial-lead{max-width:760px;color:var(--dim,#cbb8f0);font-size:17px;line-height:1.55;margin:0 0 18px}</style>
+<style>
+.bbk-banner{display:flex;flex-wrap:wrap;align-items:center;gap:12px 16px;margin:4px 0 18px;padding:14px 18px;border-radius:var(--r);
+  background:var(--glass-hi);border:1px solid var(--line);box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
+.bbk-pill{font:600 12px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:#000;background:var(--warm);
+  padding:8px 12px;border-radius:999px;white-space:nowrap}
+.bbk-banner p{margin:0;color:var(--dim);font-size:15.5px;line-height:1.5;flex:1 1 380px}
+.bbk-banner.live .bbk-pill{color:#fff;background:var(--live-d);border:1px solid #ff3b3b}
+.bbk-banner.live .bbk-pill::before{content:"";display:inline-block;width:7px;height:7px;margin:0 8px 1px 0;border-radius:50%;
+  background:#fff;vertical-align:middle}
+.bb-list a.bb-tx{color:var(--goldy);text-decoration:none;border-bottom:1px solid rgba(252,240,16,.35);white-space:nowrap}
+.bb-list a.bb-tx:hover,.bbl-buy a.bb-tx:hover{border-bottom-color:var(--goldy)}
+.bbl-buy a.bb-tx{color:inherit;text-decoration:none;border-bottom:1px solid rgba(252,240,16,.35);white-space:nowrap}
+.bbk-wallet{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin:0 0 22px;padding:14px 18px;border-radius:var(--r);
+  background:var(--glass);border:1px solid var(--line-soft)}
+.bbk-k{font:600 11.5px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.bbk-addr{font:500 14.5px/1.3 var(--mono);color:var(--goldy);word-break:break-all;text-decoration:none}
+.bbk-addr:hover{text-decoration:underline}
+.bbk-copy{font:600 12px/1 var(--mono);color:var(--ink);background:transparent;border:1px solid var(--line);border-radius:4px;
+  padding:7px 10px;cursor:pointer}
+.bbk-copy:hover{border-color:var(--gold)}
+.bbk-note{flex:1 1 100%;margin:2px 0 0;color:var(--muted);font-size:13.5px}
+.bbk-sec{padding:56px 0 10px}
+.bbk-sec h2{font-size:clamp(24px,2.6vw,34px);letter-spacing:-.015em;margin:0 0 8px}
+.bbk-sec .bbk-lead{max-width:780px;color:var(--dim);font-size:16.5px;line-height:1.6;margin:0 0 22px}
+.bbk-steps{list-style:none;counter-reset:s;display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:0;padding:0}
+.bbk-steps li{counter-increment:s;position:relative;padding:18px 16px 16px;border-radius:var(--r);background:var(--glass);border:1px solid var(--line-soft)}
+.bbk-steps li::before{content:counter(s,decimal-leading-zero);display:block;font:600 12px/1 var(--mono);letter-spacing:.12em;color:var(--gold);margin-bottom:10px}
+.bbk-steps b{display:block;color:var(--ink);font-size:16px;margin-bottom:6px}
+.bbk-steps span{color:var(--dim);font-size:14.5px;line-height:1.55}
+.bbk-fine{margin:16px 0 0;color:var(--muted);font-size:14px}
+/* the burn rule, in one line of figures: four terms, so on a phone the operators go and the terms pair up */
+.brn-f .bbf-t{flex:1 1 150px}
+.brn-f .bbf-t.out{flex:1.3 1 190px}
+.brn-rule{display:inline-block;margin:0 0 4px;font:600 11.5px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--gold)}
+@media (max-width:760px){.brn-f .bbf-op{display:none}.brn-f .bbf-t,.brn-f .bbf-t.out{flex:1 1 40%}}
+</style>
+</head>
+<body>
+
+<!-- shared drawing defs: the logo-palette gradients and the icons (kept out of layout, not display:none, so gradients resolve) -->
+<svg class="defs" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="g-mark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8808B5"/><stop offset=".35" stop-color="#D60C94"/>
+      <stop offset=".65" stop-color="#EA3560"/><stop offset="1" stop-color="#F5AC29"/></linearGradient>
+    <linearGradient id="g-ramp" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4B04C4"/><stop offset=".22" stop-color="#8808B5"/><stop offset=".45" stop-color="#D60C94"/>
+      <stop offset=".62" stop-color="#EA3560"/><stop offset=".78" stop-color="#E86E3D"/><stop offset=".9" stop-color="#F5AC29"/>
+      <stop offset="1" stop-color="#FCF010"/></linearGradient>
+    <linearGradient id="g-gold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#E86E3D"/><stop offset=".55" stop-color="#F5AC29"/><stop offset="1" stop-color="#FCF010"/></linearGradient>
+    <radialGradient id="g-glow"><stop offset="0" stop-color="#FFF40F" stop-opacity=".9"/><stop offset=".35" stop-color="#F5AC29" stop-opacity=".45"/>
+      <stop offset="1" stop-color="#E86E3D" stop-opacity="0"/></radialGradient>
+    <radialGradient id="g-glow-m"><stop offset="0" stop-color="#D60C94" stop-opacity=".7"/><stop offset="1" stop-color="#8808B5" stop-opacity="0"/></radialGradient>
+    <symbol id="i-ext" viewBox="0 0 16 16"><path d="M6 3h7v7M13 3 4 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-gh" viewBox="0 0 16 16"><path fill="currentColor" d="M8 .2a8 8 0 0 0-2.5 15.6c.4 0 .5-.2.5-.4v-1.5c-2.2.5-2.7-1-2.7-1-.4-.9-.9-1.2-.9-1.2-.7-.5.1-.5.1-.5.8.1 1.2.8 1.2.8.7 1.3 1.9.9 2.3.7.1-.5.3-.9.5-1.1-1.8-.2-3.6-.9-3.6-4 0-.9.3-1.6.8-2.1-.1-.2-.4-1 .1-2.1 0 0 .7-.2 2.2.8a7.4 7.4 0 0 1 4 0c1.5-1 2.2-.8 2.2-.8.4 1.1.2 1.9.1 2.1.5.6.8 1.3.8 2.1 0 3.1-1.9 3.8-3.6 4 .3.3.5.8.5 1.5v2.2c0 .2.1.5.6.4A8 8 0 0 0 8 .2Z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.9c0-.8-.6-1.4-1.4-1.4H3.9c-.8 0-1.4.6-1.4 1.4v5.2c0 .8.6 1.4 1.4 1.4h1.6"/></g></symbol>
+    <symbol id="i-check" viewBox="0 0 16 16"><path d="m3.5 8.4 2.9 2.9 6.1-6.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+
+<a class="skip" href="/burn#main">Skip to content</a>
+
+<div class="sky" aria-hidden="true"><i class="neb n1"></i><i class="neb n2"></i><i class="neb n3"></i><i class="stars"></i></div>
+
+<header class="nav" id="nav">
+  <div class="nav-in">
+    <a class="brand" href="/" aria-label="labrat, home">
+      <img class="brand-mark" src="assets/labrat-logo.jpg" width="1254" height="1254" alt="" decoding="async">
+      <span class="brand-word">lab<b>rat</b></span>
+    </a>
+    <nav class="links" id="links" aria-label="Sections">
+      <a href="/">Home</a>
+      <a href="/buyback">Buyback</a>
+      <a href="/burn#maze">Rat Maze</a>
+      <a href="/burn#burns">Burns</a>
+      <a href="/burn#how">How it works</a>
+      <a href="/burn" aria-current="page">Burn</a>
+    </nav>
+    <a class="nav-status conn" id="nav-status" href="/burn#maze" title="Status of the Rat Maze panel"><i></i><span id="nav-status-t">connecting</span></a>
+    <a class="nav-gh" href="https://github.com/LabratDevRH/labrat" target="_blank" rel="noopener"><svg aria-hidden="true"><use href="#i-gh"/></svg><span>GitHub</span></a>
+    <button class="menu" id="menu" type="button" aria-expanded="false" aria-controls="links"><span class="menu-bars" aria-hidden="true"><i></i><i></i></span><span class="sr">Menu</span></button>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero trial" id="top">
+  <div class="wrap wide trial-hd">
+    <p class="eyebrow"><span class="dot"></span>Burn &middot; Subject R-01 &middot; $LABRAT</p>
+    <h1 class="trial-h">Every escape, a burn.</h1>
+    <p class="trial-lead">R-01 runs Rat Maze live below. Its escapes and timeouts are counted each hour; on the hour, its escape rate sets the size of one $LABRAT burn: up to 5% of the LABRAT the rat's wallet holds, sent out of circulation for good.</p>
+    <!-- site.js sets this from the burn engine's status: mode DRY keeps the text below, mode LIVE says "Burns live" -->
+    <div class="bbk-banner" id="brn-banner" role="status">
+      <span class="bbk-pill" id="brn-pill">Burns start soon</span>
+      <p id="brn-banner-t">The burn rule is being switched on. Until then, every hour is still counted, and each hourly burn below is simulated: checked on the live chain, not sent.</p>
+    </div>
+    <div class="bbk-wallet" id="wallet">
+      <span class="bbk-k">Burn wallet</span>
+      <a class="bbk-addr" href="https://robinhoodchain.blockscout.com/address/0x17852f35b597554732C706A8A9FAA534C10e1E23" target="_blank" rel="noopener">0x17852f35b597554732C706A8A9FAA534C10e1E23</a>
+      <button class="bbk-copy" type="button" data-copy="0x17852f35b597554732C706A8A9FAA534C10e1E23">Copy</button>
+      <p class="bbk-note">The rat's own wallet: the buybacks fill it with $LABRAT, and the burns empty it, a share at a time. Every burn is sent from here, so anyone can check each one on the explorer.</p>
+    </div>
+  </div>
+
+  <!-- Rat Maze: R-01 escapes a maze (site.js draws the maze from the relay's maze channel: the "maze" / "maze_end"
+       messages of the maze trainer's run, marked "channel":"maze") -->
+  <div class="wrap wide">
+    <section class="mz" id="maze" aria-labelledby="mz-title" data-state="connecting">
+      <div class="bb-bar">
+        <h2 class="bb-title" id="mz-title">Rat Maze</h2>
+        <span class="mz-kicker">R-01 escapes a maze</span>
+        <span class="badge conn" id="mz-badge"><i aria-hidden="true"></i><b id="mz-badge-t">CONNECTING</b></span>
+        <span class="bb-conn" id="mz-conn"></span>
+      </div>
+      <p class="bb-rule mz-rule">A maze on R-01's screen, seen from above, with cheese at the exit. The rat's head direction moves its marker, walls stop it, and reaching the cheese is an escape; then a harder maze appears. It senses only the openings around it and the way to the cheese, never the whole map.</p>
+      <div class="mz-body">
+        <figure class="mz-board">
+          <div class="mz-screen" id="mz-screen">
+            <canvas id="mz-canvas" role="img" aria-label="The Rat Maze board: a maze seen from above, with the rat's marker, a trail of the cells it visited and a cheese wedge at the exit"></canvas>
+            <div class="mz-empty" id="mz-empty"><b id="mz-empty-t">Connecting to the lab</b><span id="mz-empty-s"></span></div>
+          </div>
+          <figcaption class="mz-cap" id="mz-cap"></figcaption>
+        </figure>
+        <aside class="mz-side" aria-label="Maze readout">
+          <div>
+            <p class="rp-k">This maze</p>
+            <p class="mz-now" id="mz-now">&mdash;</p>
+            <p class="mz-now-s" id="mz-now-s"></p>
+          </div>
+          <div>
+            <p class="rp-k">Score since you tuned in</p>
+            <dl class="bb-kv mz-kv">
+              <div><dt>Maze size</dt><dd id="mz-size">&mdash;</dd></div>
+              <div><dt>Mazes escaped</dt><dd id="mz-esc">&mdash;</dd></div>
+              <div><dt>Escape rate</dt><dd id="mz-rate">&mdash;</dd></div>
+              <div><dt>Avg steps to cheese</dt><dd id="mz-avg">&mdash;</dd></div>
+              <div><dt>Current streak</dt><dd id="mz-streak">&mdash;</dd></div>
+              <div><dt>Timed out</dt><dd id="mz-to">&mdash;</dd></div>
+            </dl>
+          </div>
+          <p class="mz-sub" id="mz-sub"></p>
+          <p class="bb-note mz-how">No lever press is needed here: where R-01's head points is where the marker goes. Its network is told which of the four sides of its cell are open, the direction and rough distance to the cheese, its own speed and the last few cells it visited, as numbers. It never sees the whole map, and this view is our drawing of its simulation, not a picture it sees. Escaping earns a reward; every step, every bump into a wall and every dead end counts against it, and a maze that runs out of time ends without the cheese. Training starts with small open mazes and grows them as the rat improves.<span id="mz-bb" hidden> Each maze escaped raises this hour's escape rate and each one that runs out of time lowers it; on the hour, the rate sizes the $LABRAT burn below.</span></p>
+        </aside>
+      </div>
+    </section>
+  </div>
+
+  <!-- rat burns panel (burn.js, site.js) -->
+  <div class="wrap wide" id="brn-wrap" hidden>
+    <section class="bb brn" id="burns" aria-labelledby="brn-title">
+      <div class="bb-bar">
+        <h2 class="bb-title" id="brn-title">Rat burns</h2>
+        <span class="bb-mode" id="brn-mode">Simulated</span>
+        <span class="bb-mode dry" id="brn-test" hidden>Test stream</span>
+        <span class="bb-conn" id="brn-conn">loading</span>
+      </div>
+      <p class="bb-rule">One $LABRAT burn an hour, sized by how well R-01 ran the maze that hour: <b>5% of the wallet's LABRAT &times; escape rate</b>. Escapes and timeouts are counted through the hour (escape rate = escapes &divide; both); on the hour, the rate sets the burn, and one transaction sends it out of circulation. The burn is never more than 5% of what the wallet holds in an hour, and an hour without an escape burns nothing. One burn an hour, instead of one per maze, keeps gas low.</p>
+      <div class="bbh" aria-label="This hour">
+        <div class="bbh-hd">
+          <span class="bbh-k">This hour</span><span class="bbh-t" id="brn-win-t"></span>
+          <span class="bbh-next" id="brn-next" aria-live="off"></span>
+        </div>
+        <div class="bbh-bar" aria-hidden="true"><i id="brn-win-bar"></i></div>
+        <dl class="bb-kv bbh-kv">
+          <div><dt>Escapes</dt><dd id="brn-w-esc">&mdash;</dd></div>
+          <div><dt>Timed out</dt><dd id="brn-w-to">&mdash;</dd></div>
+          <div><dt>Mazes run</dt><dd id="brn-w-runs">&mdash;</dd></div>
+          <div class="hot"><dt>Escape rate</dt><dd id="brn-w-rate">&mdash;</dd></div>
+        </dl>
+      </div>
+      <div class="bbf brn-f" aria-label="This hour's burn size">
+        <div class="bbf-t"><span>Wallet holds</span><b id="brn-f-bal">&mdash;</b><small id="brn-f-bal-sub"></small></div>
+        <i class="bbf-op" aria-hidden="true">&times;</i>
+        <div class="bbf-t"><span>Burn share</span><b id="brn-f-pct">5%</b><small>of the balance, at most</small></div>
+        <i class="bbf-op" aria-hidden="true">&times;</i>
+        <div class="bbf-t"><span>Escape rate</span><b id="brn-f-rate">&mdash;</b></div>
+        <i class="bbf-op" aria-hidden="true">=</i>
+        <div class="bbf-t out"><span id="brn-f-k">Simulated burn on the hour</span><b id="brn-f-burn">&mdash;</b></div>
+      </div>
+      <p class="bbf-note" id="brn-f-note"></p>
+      <div class="bbl" id="brn-last" hidden>
+        <p class="bbh-k" id="brn-last-k">Last hour</p>
+        <p class="bbl-stats" id="brn-last-stats"></p>
+        <p class="bbl-buy" id="brn-last-burn" hidden></p>
+      </div>
+      <dl class="bb-kv bb-tot">
+        <div><dt id="brn-burns-k">Simulated burns</dt><dd id="brn-burns">&mdash;</dd></div>
+        <div><dt id="brn-burned-k">LABRAT (simulated)</dt><dd id="brn-burned">&mdash;</dd></div>
+        <div><dt>Wallet holds (LABRAT)</dt><dd id="brn-bal">&mdash;</dd></div>
+      </dl>
+      <ol class="bb-list" id="brn-list" aria-label="Recent burns"></ol>
+      <p class="bb-note" id="brn-note"></p>
+    </section>
+  </div>
+</section>
+
+<section class="bbk-sec" id="how" aria-labelledby="how-h">
+  <div class="wrap wide">
+    <h2 id="how-h">How the burn works</h2>
+    <p class="bbk-lead">R-01 doesn't know what a token is. It runs a maze, and a fixed rule in the code turns how well it runs each hour into one $LABRAT burn from the rat's own wallet.</p>
+    <ol class="bbk-steps">
+      <li><b>It runs the maze live</b><span>R-01 plays Rat Maze while it trains: its head steers a marker through the corridors to the cheese at the exit. You can watch it above.</span></li>
+      <li><b>Escapes and timeouts are counted each hour</b><span>Reaching the cheese is an escape. A maze that runs out of time is a timeout. The hour's escape rate is escapes &divide; (escapes + timeouts).</span></li>
+      <li><b>On the hour, the escape rate sets the burn</b><span>5% of the LABRAT in the rat's wallet at the hour's close &times; that hour's escape rate, rounded down. Never more than 5% in an hour; no escapes, no burn.</span></li>
+      <li><b>One transaction sends it out of circulation</b><span>The same signer that sends the buybacks sends the burn, one an hour, through the token's own burn (so the supply falls) or, where a token has none, to the dead address. It is checked before it is signed.</span></li>
+      <li><b>Verified on chain before it counts</b><span>A burn appears above only once its transaction is confirmed, with a link to it on the explorer. Until the rule is switched on, every burn is simulated: checked on the live chain, never sent.</span></li>
+    </ol>
+    <p class="bbk-fine">The rat's brain is two trained artificial neural networks driving a simulated body, not a real rat. The same brain launched $LABRAT, plays for the buybacks on <a href="/buyback">the buyback page</a>, and its fingerprint is on-chain.</p>
+  </div>
+</section>
+
+</main>
+
+<!-- ================================================================ FOOTER -->
+<footer class="foot">
+  <div class="wrap">
+    <div class="foot-top">
+      <a class="brand big" href="/" aria-label="labrat, home">
+        <img class="brand-mark" src="assets/labrat-logo.jpg" width="1254" height="1254" alt="" loading="lazy" decoding="async">
+        <span class="brand-word">lab<b>rat</b></span>
+      </a>
+      <p class="foot-honest">Subject R-01 is a simulated rat driven by two trained artificial neural networks. It is not a biological brain, and no animal was involved. labrat is an independent project, not affiliated with DeepMind, Robinhood or pons. Nothing on this site signs or sends a transaction. $LABRAT is an experiment, not financial advice.</p>
+    </div>
+    <div class="foot-cols">
+      <div>
+        <p class="foot-k">Credits</p>
+        <ul>
+          <li>Body: DeepMind's rodent model from <a href="https://github.com/google-deepmind/dm_control" target="_blank" rel="noopener">dm_control</a> (Apache-2.0), the rat from Aldarondo et al., <i>Nature</i> 2024</li>
+          <li>Physics: <a href="https://mujoco.org" target="_blank" rel="noopener">MuJoCo</a></li>
+          <li>3D view: <a href="https://threejs.org" target="_blank" rel="noopener">three.js</a> (MIT)</li>
+        </ul>
+      </div>
+      <div>
+        <p class="foot-k">Links</p>
+        <ul>
+          <li><a href="https://github.com/LabratDevRH/labrat" target="_blank" rel="noopener">github.com/LabratDevRH/labrat</a></li>
+          <li class="if-soon">$LABRAT: launching soon</li>
+          <li class="if-live"><a class="js-pons" target="_blank" rel="noopener">$LABRAT on pons</a></li>
+          <li class="if-live"><a class="js-explorer" target="_blank" rel="noopener">Contract on the explorer</a></li>
+        </ul>
+      </div>
+      <div>
+        <p class="foot-k">Sections</p>
+        <ul class="foot-nav">
+          <li><a href="/#live">Live</a></li><li><a href="/#subject">Subject</a></li><li><a href="/#brain">Brain</a></li>
+          <li><a href="/#launch">Launch</a></li><li><a href="/#proof">Proof</a></li><li><a href="/buyback">Buyback</a></li><li><a href="/burn#how">How it works</a></li><li><a href="/burn">Burn</a></li>
+        </ul>
+      </div>
+    </div>
+    <p class="foot-base"><span>labrat &middot; operant lab &middot; Subject R-01</span><span class="mono if-soon">$LABRAT &middot; launching soon</span><span class="mono if-live">$LABRAT &middot; CA <span class="js-addr-short"></span></span></p>
+  </div>
+</footer>
+
+<script>document.querySelectorAll('[data-copy]').forEach(function (b) { b.addEventListener('click', function () {
+  var v = b.getAttribute('data-copy'); (navigator.clipboard ? navigator.clipboard.writeText(v) : Promise.reject()).then(function () {
+    b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1500); }, function () {}); }); });</script>
+</body>
+</html>

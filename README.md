@@ -100,11 +100,22 @@ Live at **https://lab-rat.net** (site on Vercel, relay on Railway at `labrat-rel
   (`/publish?channel=pons`) for the buy rig: the rat clicking through each buyback on the real pons page, as masked
   JPEG frames and step messages. The site's **Rat on pons** panel (next to Rat buybacks) shows that stream while a
   session runs, and the last session's final frame and result between sessions, every buy labelled Simulated.
+  A third channel (`/publish?channel=maze`, the **maze channel**) is a second training channel for the Rat Maze
+  trainer, so Rat Tiles (buybacks) and Rat Maze (burns, the `/burn` page) can stream at the same time: the same
+  protocol, forwarded to viewers marked `"channel":"maze"` (frames prefixed `MZ`); the default channel is unchanged.
+- `site/burn/`: the **/burn** page ("Every escape, a burn."): the Rat Maze panel (moved here from /buyback; it reads the
+  relay's **maze channel**, the maze trainer's messages marked `"channel":"maze"` and its `b"MZ"`-prefixed frames, which
+  the 3D view ignores) and the Rat burns panel, fed by the burn engine's public status (`site/burn.js` names the URL;
+  `?burn=http://localhost:<port>/status` overrides it on localhost). Every burn is labelled Simulated until the engine
+  is LIVE and the burn is verified on chain; the banner says "Burns start soon" / "Burns live" from the engine's mode.
+  `/buyback` keeps Rat Tiles, the buybacks and Rat on pons; the home page has a Burn teaser and nav link.
 - `live/publish_training.py`: runs next to training on the training PC. It plays the run's latest saved checkpoint
   in its own simulation at 25 fps and streams it, with every new `log.jsonl` row, to the relay. It says bye when
   `log.jsonl` has been silent for 90 s, and the site goes back to the replay.
 - `trainer/`: training and the publisher together in one container on Railway, so the PC is not needed. A job is
   started and stopped by setting variables on the service; runs live on a Railway volume (see `trainer/README.md`).
+  A second service from the same image, `labrat-trainer-maze` (`TRAIN_TASK=maze`, `LABRAT_RELAY_CHANNEL=maze`),
+  trains Rat Maze and publishes it on the relay's maze channel (`live/publish_training.py --channel maze`).
 
 Local preview (PowerShell, two shells, the same token in both):
 
