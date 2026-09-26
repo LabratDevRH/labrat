@@ -374,6 +374,18 @@ web: python live/buyback.py --status-host 0.0.0.0 --status-port $PORT --journal-
 Alternatively, drop `--hourly-budget-eth` and set the Railway variable `BUYBACK_HOURLY_BUDGET_ETH`; the flag wins when
 both are given. The existing journal on `/data/buyback` replays as described above. For real buys see "Going live".
 
+**Rat Maze no longer counts here (2026-09-26).** Since the burns (`live/burn.py`, `live/BURN.md`) are driven by the
+rat's maze escapes, the deployed Procfile carries `--tasks cursor,steer,tiles` (the code's default still includes
+`maze`; `live/buyback.py` is unchanged). With it the public rule no longer mentions Rat Maze, a maze hello logs "not
+counted (task maze is not counted)", and a maze escape drives a burn only. The flag is appended to whatever else the
+command carries (the budget and caps above, and `--live-bookings` when real buys are switched on):
+
+```
+web: python live/buyback.py --status-host 0.0.0.0 --status-port $PORT --journal-dir /data/buyback --hourly-budget-eth 0.1 --max-buy-eth 0.1 --max-hour-eth 0.1 --max-day-eth 2.4 --max-total-eth 5 [--live-bookings] --tasks cursor,steer,tiles
+```
+
+Redeploy `labrat-buyback` for it to take effect; `GET /status` then lists `"tasks": ["cursor", "steer", "tiles"]`.
+
 ## Not settled
 
 - The Rat Tiles publisher does not yet send `missed`. Until it does, the missed tiles come from its tile events, which
