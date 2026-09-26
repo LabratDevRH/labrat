@@ -32,6 +32,9 @@
        onTiles: m => ...,       // Rat Tiles (a run whose hello has task "tiles"): {type:'tiles', t, song, speed, lanes,
                                 //  cursor, tiles, note_i} board snapshots and {type:'tile', id, lane, result, note_i, song}
                                 //  outcomes; this view only shows the active tile (the frame's target fields)
+       onMaze: m => ...,        // Rat Maze (a run whose hello has task "maze"): {type:'maze', t, maze_id, w, h, walls, cell,
+                                //  pos, cheese, trail, bumps, steps, dist} snapshots and {type:'maze_end', maze_id, result,
+                                //  steps, bumps, time_s} outcomes; this view only shows the cheese (the frame's target fields)
        onRelay: (open, gone) => ..., // the relay socket opened (true) or closed (false); gone=true: this view was torn
                                 //  down and will not reconnect (anything riding on its socket needs its own)
      });
@@ -995,6 +998,9 @@ async function mount(el, opts, st) {
       // Rat Tiles snapshots and tile outcomes: for the page's Rat Tiles panel (this view draws the active tile from the
       // frames' target fields)
       if (m.type === 'tiles' || m.type === 'tile') { safe(opts.onTiles, m); return; }
+      // Rat Maze snapshots and outcomes: for the page's Rat Maze panel (this view draws the cheese from the frames'
+      // target fields)
+      if (m.type === 'maze' || m.type === 'maze_end') { safe(opts.onMaze, m); return; }
       onText(m);
     };
     ws.onclose = () => {
@@ -1310,6 +1316,7 @@ async function mount(el, opts, st) {
       right = `EPISODE ${Number.isFinite(cur[2]) ? cur[2] | 0 : '–'}`;
       if (screenMode === 1) note = `lever task · presses this episode: ${presses}`;
       else if (task === 'tiles') { note = 'Rat Tiles · cursor = head direction · tap = lever press'; label = hasTgt ? 'tile' : ''; }
+      else if (task === 'maze') { note = 'Rat Maze · marker = head direction · no press needed'; label = hasTgt ? 'cheese' : ''; }
       else { note = 'cursor = head direction · click = lever press'; label = hasTgt ? 'target' : ''; }
     } else note = 'waiting for data';
     const key = [mode, task, screenMode, label, right, note, evTag, evText, hasTgt ? scrU.uTgt.value.toArray().map(v => v.toFixed(3)).join() : '', fontsReady].join('|');

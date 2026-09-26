@@ -158,6 +158,9 @@ const TASKS = {
   // Rat Tiles: log rows carry "hits" = tiles hit per attempt (as the cursor tasks' targets)
   tiles: { name: 'Rat Tiles', what: 'tap the falling tiles with a lever press, in time, to play a melody',
            key: 'hits', label: 'Tiles hit per attempt', fmt: v => num(v, 1) },
+  // Rat Maze: log rows carry "hits" = mazes escaped per attempt
+  maze: { name: 'Rat Maze', what: 'steer the marker through the maze to the cheese with its head',
+          key: 'hits', label: 'Mazes escaped per attempt', fmt: v => num(v, 1) },
 };
 
 /* ------------------------------------------------------------------ charts (canvas, one series each) */
@@ -455,6 +458,7 @@ function onStatus(st) {
   if (streaming || mode === 'replay') hidePlaceholder();
   setMode(mode);
   try { TILES.onStatus(st); } catch (e) { console.warn('labrat: tiles status', e); }
+  try { MAZE.onStatus(st); } catch (e) { console.warn('labrat: maze status', e); }
 }
 
 /* rows arrive as the live run's log history (live.js keeps the newest <= 300); keep a longer history in this tab by
@@ -1948,6 +1952,762 @@ const TILES = (function ratTiles() {
   return { onStatus, onTiles, onEpisode, onRelay, onRaw, onBuyback };
 })();
 
+/* ------------------------------------------------------------------ Rat Maze: R-01 escapes a maze
+   A training run whose hello says task "maze" also streams, on the relay socket the 3D view uses (live.js hands them
+   over through onMaze; the relay replays the current maze's layout and then the newest snapshot to a late joiner):
+     {"type":"maze","t","maze_id","w","h","walls","cell":[cx,cy],"pos":[x,y],"cheese":[gx,gy],"trail":[[cx,cy],...],
+      "bumps","steps","dist"}
+         up to 8 a second. walls: the maze's layout, one hex char per cell, row-major, the bits N=8, E=4, S=2, W=1 set
+         where that side of the cell is OPEN; it comes only in a maze's first snapshot (a new maze_id), else null. pos
+         is continuous, in cell units (cell (cx,cy) spans x in [cx,cx+1) and y in [cy,cy+1); row 0 is the top row).
+         trail: the cells visited lately, newest last. dist: the shortest-path distance to the cheese, in cells.
+     {"type":"maze_end","maze_id","result":"escaped"|"timeout","steps","bumps","time_s"}   once per maze
+   The rule: R-01's head direction is the marker's velocity (no lever press is needed); walls stop the marker; reaching
+   the cheese is an escape, and the next maze is harder; a maze that runs out of time ends without the cheese. Its
+   network is told which of its cell's four sides are open, the direction and rough distance to the cheese, its own
+   velocity and a short memory of visited cells, as numbers. It never sees the whole map.
+   This panel draws the maze from above (a drawing of the game's state: the layout, the marker, the trail, the cheese and
+   each outcome come from the stream; the marker is the labrat logo), a quarter of a second behind the stream,
+   interpolating the marker between snapshots, and keeps the score.
+   Honesty: LIVE only when live.js reports a live training run; a test stream is labelled as one; every value from the
+   stream is checked before it is drawn or written. The home page only has the teaser (#mz-teaser). */
+const MAZE = (function ratMaze() {
+  const teaser = $('#mz-teaser'), teaserSt = $('#mz-teaser-st');
+  const sec = $('#maze');
+  const E = sec ? { badge: $('#mz-badge'), badgeT: $('#mz-badge-t'), conn: $('#mz-conn'), screen: $('#mz-screen'),
+    cv: $('#mz-canvas'), emptyT: $('#mz-empty-t'), emptyS: $('#mz-empty-s'), cap: $('#mz-cap'), now: $('#mz-now'),
+    nowS: $('#mz-now-s'), size: $('#mz-size'), esc: $('#mz-esc'), rate: $('#mz-rate'), avg: $('#mz-avg'),
+    streak: $('#mz-streak'), to: $('#mz-to'), sub: $('#mz-sub'), bb: $('#mz-bb') } : null;
+  const cx = E && Object.values(E).every(Boolean) && E.cv.getContext ? E.cv.getContext('2d') : null;
+  const panel = !!cx;
+
+  const DELAY = 0.25;        // s: the maze plays this far behind the newest snapshot (the stream's jitter buffer)
+  const STALE_S = 4;         // no snapshot for this long: the maze stops (the run may be between mazes)
+  const MAX_SIDE = 64, MAX_TRAIL = 64, MAX_ID = 1e9;
+  const OPEN_N = 8, OPEN_E = 4, OPEN_S = 2, OPEN_W = 1;
+  const DIRS = [[0, -1, OPEN_N, OPEN_S], [1, 0, OPEN_E, OPEN_W], [0, 1, OPEN_S, OPEN_N], [-1, 0, OPEN_W, OPEN_E]];
+  const TAU = Math.PI * 2;
+  const fin = v => typeof v === 'number' && Number.isFinite(v);
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi ? v : null;
+  const isTestHello = h => !!h && (h.test === true || /^\s*TEST\b/.test(String(h.label || '')));
+  const put = (el, s) => { const t = String(s == null ? '' : s); if (el.textContent !== t) el.textContent = t; };
+  const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+  const ratePct = (h, n) => n > 0 ? (h / n * 100).toFixed(h === n || h === 0 ? 0 : 1) + '%' : '—';
+
+  /* ---- state */
+  const S = {
+    st: null,                  // {live, test, streaming, task, run} from the 3D view (or this panel's own socket)
+    open: false, wasOpen: false,
+    snaps: [], lastAt: 0, play: null, lastT: 0,
+    maze: null,                // the current maze's layout {id, w, h, open, dead, cheese, key, at}, from a snapshot with walls
+    mazes: new Map(),          // the last few layouts by maze_id: the picture follows the playhead, a quarter second behind
+    cur: null,                 // the newest snapshot
+    esc: 0, to: 0, streak: 0, best: 0, stepsSum: 0, stepsN: 0, last: null,
+    run: null, had: false,
+    pending: [], fx: [],
+    rat: { ang: Math.PI, vx: 0, vy: 0 },
+    bbMaze: false,
+  };
+  let lastMode = '', raf = 0, visible = true, W = 0, H = 0, dpr = 1, lastDraw = 0;
+
+  function mode(now) {
+    const st = S.st;
+    if (!st || !S.wasOpen) return 'connecting';
+    if (st.streaming && st.task === 'maze') {
+      if (S.snaps.length && now - S.lastAt < STALE_S) return st.live ? 'live' : 'test';
+      return 'wait';
+    }
+    return 'standby';
+  }
+
+  function newRun(run) {
+    S.run = run; S.had = false;
+    S.esc = S.to = S.streak = S.best = S.stepsSum = S.stepsN = 0; S.last = null;
+    S.maze = null; S.cur = null; S.mazes.clear();
+    S.snaps.length = 0; S.play = null; S.pending.length = 0; S.fx.length = 0;
+  }
+  function remember(mz) {
+    S.mazes.set(mz.id, mz);
+    while (S.mazes.size > 4) S.mazes.delete(S.mazes.keys().next().value);
+    return mz;
+  }
+
+  /* st.stream (from live.js, or from onRaw): the relay's training session, null or {live, test, task, run}. When the
+     status carries that key it is the truth about the relay (the 3D view's own live / test flags only change while it
+     is on screen); without it, the flags are all there is. */
+  function onStatus(st) {
+    if (!st || typeof st !== 'object') return;
+    const s = st.stream && typeof st.stream === 'object' ? st.stream : null;
+    const hasStream = Object.prototype.hasOwnProperty.call(st, 'stream');
+    const streaming = hasStream ? !!s : st.live === true || st.test === true || st.source === 'test';
+    const live = s ? s.live === true && s.test !== true : !hasStream && st.live === true;
+    const src = s || st;
+    const next = { live, test: streaming && !live, streaming,
+                   task: typeof src.task === 'string' ? src.task : null, run: typeof src.run === 'string' ? src.run : null };
+    if (streaming && next.task === 'maze' && next.run && next.run !== S.run) newRun(next.run);
+    S.st = next;
+    teaserUpdate();
+    if (!panel) return;
+    renderUi(); kick();
+  }
+  function onRelay(open) {
+    S.open = !!open;
+    if (S.open) S.wasOpen = true;
+    if (panel) { renderUi(); kick(); }
+  }
+
+  /* ---- the stream */
+  function readSnap(m) {
+    const id = int(m.maze_id, 0, MAX_ID), w = int(m.w, 1, MAX_SIDE), h = int(m.h, 1, MAX_SIDE);
+    if (id === null || w === null || h === null) return null;
+    let walls = null;
+    if (m.walls !== null && m.walls !== undefined) {
+      if (typeof m.walls !== 'string' || m.walls.length !== w * h || !/^[0-9a-fA-F]+$/.test(m.walls)) return null;
+      walls = m.walls.toLowerCase();
+    }
+    const cellOf = v => Array.isArray(v) && int(v[0], 0, w - 1) !== null && int(v[1], 0, h - 1) !== null ? [v[0], v[1]] : null;
+    const cell = cellOf(m.cell), cheese = cellOf(m.cheese), p = m.pos;
+    const pos = Array.isArray(p) && fin(p[0]) && fin(p[1]) ? [clamp(p[0], 0, w), clamp(p[1], 0, h)]
+      : cell ? [cell[0] + 0.5, cell[1] + 0.5] : null;
+    if (!pos) return null;
+    const trail = [];
+    if (Array.isArray(m.trail)) for (const c of m.trail.slice(-MAX_TRAIL)) { const q = cellOf(c); if (q) trail.push(q); }
+    return { id, w, h, walls, pos, cheese, trail,
+             cell: cell || [clamp(Math.floor(pos[0]), 0, w - 1), clamp(Math.floor(pos[1]), 0, h - 1)],
+             bumps: int(m.bumps, 0, 1e9), steps: int(m.steps, 0, 1e9), dist: int(m.dist, 0, 1e6), t: fin(m.t) ? m.t : null };
+  }
+  /* the layout: open-side bits per cell (an out-of-bounds opening is closed), dead ends (one open side, not the cheese) */
+  function buildMaze(s, at) {
+    const n = s.w * s.h, open = new Uint8Array(n), dead = new Uint8Array(n);
+    for (let i = 0; i < n; i++) open[i] = parseInt(s.walls[i], 16);
+    for (let y = 0; y < s.h; y++) for (let x = 0; x < s.w; x++) {
+      const i = y * s.w + x;
+      let k = 0;
+      for (const [dx, dy, bit] of DIRS) {
+        if (!(open[i] & bit)) continue;
+        if (x + dx < 0 || y + dy < 0 || x + dx >= s.w || y + dy >= s.h) open[i] &= ~bit; else k++;
+      }
+      dead[i] = k === 1 ? 1 : 0;
+    }
+    return { id: s.id, w: s.w, h: s.h, open, dead, cheese: s.cheese, key: s.walls, at };
+  }
+  function headingSide() {
+    const { vx, vy } = S.rat;
+    return Math.abs(vx) > Math.abs(vy) ? (vx > 0 ? 1 : 3) : (vy > 0 ? 2 : 0);
+  }
+  function onMaze(m) {
+    if (!panel || !m || typeof m !== 'object') return;
+    const now = performance.now() / 1000;
+    if (m.type === 'maze') {
+      const s = readSnap(m);
+      if (!s) return;
+      const prev = S.snaps[S.snaps.length - 1];
+      let dt = prev && s.t !== null && prev.t !== null ? s.t - prev.t : NaN;     // sim time between snapshots
+      if (!(dt > 0 && dt < 1.5)) dt = prev ? clamp(now - prev.at, 0.02, 0.5) : 0; // a new episode (its clock restarts)
+      s.st = prev ? prev.st + dt : 0; s.at = now;
+      if (s.walls) { if (!S.maze || S.maze.id !== s.id || S.maze.key !== s.walls) S.maze = remember(buildMaze(s, now)); }
+      else if (S.maze && S.maze.id !== s.id) S.maze = null;   // a maze whose layout has not arrived: drawn without walls
+      const known = S.mazes.get(s.id);
+      if (known && s.cheese) known.cheese = s.cheese;
+      // a new maze: the last maze's banner leaves within the moment (its burst belongs to the old layout: see drawFx)
+      if (prev && prev.id !== s.id) for (const f of S.fx) if (f.kind !== 'bump') f.dur = Math.min(f.dur, now + DELAY - f.at + 0.7);
+      // a wall bump: the counter went up within one maze; flash the wall it was heading for
+      if (prev && prev.id === s.id && s.bumps !== null && prev.bumps !== null && s.bumps > prev.bumps) {
+        const dx = s.pos[0] - prev.pos[0], dy = s.pos[1] - prev.pos[1];
+        const side = Math.abs(dx) < 1e-3 && Math.abs(dy) < 1e-3 ? headingSide()
+          : Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 1 : 3) : (dy > 0 ? 2 : 0);
+        S.pending.push({ due: now + DELAY, kind: 'bump', ev: { cell: s.cell, side } });
+      }
+      S.snaps.push(s);
+      if (S.snaps.length > 40) S.snaps.splice(0, S.snaps.length - 40);
+      S.lastAt = now; S.had = true; S.cur = s;
+      kick();
+      if ((lastMode !== 'live' && lastMode !== 'test') || !prev || prev.id !== s.id || prev.dist !== s.dist ||
+          prev.bumps !== s.bumps || prev.steps !== s.steps) renderUi();
+      return;
+    }
+    if (m.type !== 'maze_end' || !['escaped', 'timeout'].includes(m.result)) return;
+    S.pending.push({ due: now + DELAY, kind: 'end', ev: { id: int(m.maze_id, 0, MAX_ID), result: m.result,
+                     steps: int(m.steps, 0, 1e9), bumps: int(m.bumps, 0, 1e9), time: fin(m.time_s) && m.time_s >= 0 ? m.time_s : null } });
+    kick();
+  }
+
+  /* ---- playback: the playhead runs on the wall clock, DELAY behind the newest snapshot */
+  function advance(now) {
+    const dt = S.lastT ? clamp(now - S.lastT, 0, 0.25) : 0;
+    S.lastT = now;
+    const L = S.snaps[S.snaps.length - 1];
+    if (!L) return;
+    const target = L.st + (now - L.at) - DELAY;
+    if (S.play === null) { S.play = target; return; }
+    S.play += dt;
+    const err = target - S.play;
+    if (Math.abs(err) > 0.5) S.play = target; else S.play += err * Math.min(1, dt * 2);
+  }
+  function sample() {
+    const A = S.snaps;
+    if (!A.length || S.play === null) return null;
+    const p = S.play;
+    let i = A.length - 1;
+    while (i > 0 && A[i].st > p) i--;
+    const a = A[i], b = A[i + 1];
+    if (!b || p < a.st || b.id !== a.id) return { pos: a.pos, snap: a, v: [0, 0] };   // hold: never through a wall
+    const span = Math.max(1e-6, b.st - a.st), al = clamp((p - a.st) / span, 0, 1);
+    return { pos: [a.pos[0] + (b.pos[0] - a.pos[0]) * al, a.pos[1] + (b.pos[1] - a.pos[1]) * al],
+             snap: al < 0.5 ? a : b, v: [(b.pos[0] - a.pos[0]) / span, (b.pos[1] - a.pos[1]) / span] };
+  }
+  function makeFx(kind, at, o) {
+    const f = Object.assign({ kind, at, dur: kind === 'bump' ? 1.0 : kind === 'escaped' ? 2.3 : 2.1 }, o || {});
+    if (!RM.matches && kind === 'escaped') {
+      f.parts = Array.from({ length: 34 }, () => ({ a: Math.random() * TAU, sp: 0.9 + Math.random() * 2.4,
+        r: 0.035 + Math.random() * 0.07, c: Math.floor(Math.random() * 4), ph: Math.random() * TAU }));
+    }
+    if (!RM.matches && kind === 'bump') {
+      f.parts = Array.from({ length: 6 }, () => ({ a: (Math.random() - 0.5) * 1.6, sp: 0.3 + Math.random() * 0.6, r: 0.02 + Math.random() * 0.03 }));
+    }
+    return f;
+  }
+  function pump(now) {
+    advance(now);
+    let changed = false;
+    while (S.pending.length && S.pending[0].due <= now) {
+      const p = S.pending.shift(), ev = p.ev;
+      if (p.kind === 'bump') { S.fx.push(makeFx('bump', now, ev)); continue; }
+      changed = true;
+      S.last = ev;
+      if (ev.result === 'escaped') {
+        S.esc++; S.streak++; S.best = Math.max(S.best, S.streak);
+        if (ev.steps !== null) { S.stepsSum += ev.steps; S.stepsN++; }
+        S.fx.push(makeFx('escaped', now, { cell: S.maze && S.maze.cheese ? S.maze.cheese : S.cur ? S.cur.cell : null, n: S.streak,
+                                            mazeId: S.maze ? S.maze.id : null }));
+      } else {
+        S.to++; S.streak = 0;
+        S.fx.push(makeFx('timeout', now, { mazeId: S.maze ? S.maze.id : null }));
+      }
+    }
+    if (S.fx.length) S.fx = S.fx.filter(f => now - f.at < f.dur);
+    if (changed) renderUi();
+  }
+
+  /* ---- the scene: the maze from above, on a dark lit floor */
+  const V = { key: '', bg: null, mz: null, mzKey: '', g: null, rat: null, ratW: 0, ratH: 0, ratPad: 0, demo: null };
+
+  /* a fixed maze for the standby picture (a seeded recursive backtracker, as the trainer makes them) */
+  function demoMaze() {
+    if (V.demo) return V.demo;
+    const w = 6, h = 6, open = new Array(w * h).fill(0), seen = new Array(w * h).fill(false);
+    let seed = 20260926;
+    const R = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const stack = [[0, 0]]; seen[0] = true;
+    while (stack.length) {
+      const [x, y] = stack[stack.length - 1];
+      const nb = DIRS.filter(([dx, dy]) => x + dx >= 0 && y + dy >= 0 && x + dx < w && y + dy < h && !seen[(y + dy) * w + x + dx]);
+      if (!nb.length) { stack.pop(); continue; }
+      const [dx, dy, bit, back] = nb[Math.floor(R() * nb.length)];
+      open[y * w + x] |= bit; open[(y + dy) * w + x + dx] |= back; seen[(y + dy) * w + x + dx] = true;
+      stack.push([x + dx, y + dy]);
+    }
+    V.demo = buildMaze({ id: -1, w, h, walls: open.map(v => v.toString(16)).join(''), cheese: [w - 1, h - 1] }, 0);
+    return V.demo;
+  }
+  /* the layout to draw: the one of the snapshot being shown (a placeholder without walls until its layout comes), else
+     the last maze, else the standby picture */
+  function layoutFor(snap) {
+    if (snap) {
+      const known = S.mazes.get(snap.id);
+      if (known) return known;
+      return remember({ id: snap.id, w: snap.w, h: snap.h, open: null, dead: null, cheese: snap.cheese, key: '', at: 0 });
+    }
+    if (S.maze) return S.maze;
+    return demoMaze();
+  }
+  function geom(m) {
+    const padT = clamp(H * 0.12, 40, 60), padB = clamp(H * 0.1, 30, 52), padX = clamp(W * 0.05, 14, 44);
+    const c = Math.min((W - 2 * padX) / m.w, (H - padT - padB) / m.h);
+    const ox = (W - c * m.w) / 2, oy = padT + (H - padT - padB - c * m.h) / 2;
+    return { W, H, c, ox, oy, w: m.w, h: m.h, X: x => ox + x * c, Y: y => oy + y * c };
+  }
+  const mkLayer = () => {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(W * dpr)); c.height = Math.max(1, Math.round(H * dpr));
+    const x = c.getContext('2d'); x.setTransform(dpr, 0, 0, dpr, 0, 0); return [c, x];
+  };
+  /* the rat marker: the owner's pixel-art logo (a rat on black), cropped to the rat, its black keyed to transparent */
+  function sprite() {
+    if (V.rat !== null) return;
+    V.rat = false;
+    const img = new Image();
+    img.decoding = 'async';
+    img.onload = () => {
+      const nw = img.naturalWidth, nh = img.naturalHeight;
+      const sx = 60 / 1254 * nw, sy0 = 318 / 1254 * nh, sw = 1150 / 1254 * nw, sh = 650 / 1254 * nh;
+      const tw = 360, th = Math.round(tw * 650 / 1150), pad = 14;
+      const k = document.createElement('canvas'); k.width = tw; k.height = th;
+      const kx = k.getContext('2d');
+      kx.imageSmoothingQuality = 'high';
+      kx.drawImage(img, sx, sy0, sw, sh, 0, 0, tw, th);
+      let keyed = true;
+      try {
+        const d = kx.getImageData(0, 0, tw, th), px = d.data;
+        for (let i = 0; i < px.length; i += 4) {
+          const mx = Math.max(px[i], px[i + 1], px[i + 2]);
+          px[i + 3] = Math.round(clamp((mx - 28) / 44, 0, 1) * 255);
+        }
+        kx.putImageData(d, 0, 0);
+      } catch (e) { keyed = false; }
+      if (!keyed) return;                       // (a tainted canvas: the marker stays a plain disc)
+      const c = document.createElement('canvas'); c.width = tw + 2 * pad; c.height = th + 2 * pad;
+      const x = c.getContext('2d');
+      x.shadowColor = 'rgba(255,214,120,.55)'; x.shadowBlur = 10;
+      x.drawImage(k, pad, pad);
+      V.rat = c; V.ratW = tw; V.ratH = th; V.ratPad = pad;
+      if (!raf) draw(performance.now() / 1000, mode(performance.now() / 1000), 0);
+    };
+    img.src = 'assets/labrat-logo.jpg';
+  }
+  /* the floor, made once per size */
+  function background() {
+    const key = [W, H, dpr].join(',');
+    if (V.key === key && V.bg) return;
+    V.key = key;
+    const [bg, a] = mkLayer();
+    let gr = a.createLinearGradient(0, 0, 0, H);
+    gr.addColorStop(0, '#150632'); gr.addColorStop(0.55, '#0b0320'); gr.addColorStop(1, '#06020f');
+    a.fillStyle = gr; a.fillRect(0, 0, W, H);
+    gr = a.createRadialGradient(W / 2, H * 0.58, 0, W / 2, H * 0.58, Math.max(W, H) * 0.62);
+    gr.addColorStop(0, 'rgba(136,8,181,.28)'); gr.addColorStop(0.5, 'rgba(75,4,196,.1)'); gr.addColorStop(1, 'rgba(19,8,174,0)');
+    a.fillStyle = gr; a.fillRect(0, 0, W, H);
+    // a faint speckle, like the site's sky
+    let seed = 11;
+    const R = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    for (let i = 0; i < 90; i++) {
+      a.fillStyle = `rgba(${R() < 0.5 ? '244,240,251' : '252,240,16'},${(0.08 + R() * 0.28).toFixed(3)})`;
+      a.beginPath(); a.arc(R() * W, R() * H, 0.4 + R() * 0.9, 0, TAU); a.fill();
+    }
+    gr = a.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.8);
+    gr.addColorStop(0, 'rgba(4,1,10,0)'); gr.addColorStop(1, 'rgba(4,1,10,.55)');
+    a.fillStyle = gr; a.fillRect(0, 0, W, H);
+    V.bg = bg;
+  }
+  function segments(m) {
+    const segs = [], o = m.open, w = m.w, h = m.h;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!(o[i] & OPEN_N) || (y > 0 && !(o[i - w] & OPEN_S))) segs.push([x, y, x + 1, y]);
+      if (!(o[i] & OPEN_W) || (x > 0 && !(o[i - 1] & OPEN_E))) segs.push([x, y, x, y + 1]);
+      if (x === w - 1) segs.push([x + 1, y, x + 1, y + 1]);
+      if (y === h - 1) segs.push([x, y + 1, x + 1, y + 1]);
+    }
+    return segs;
+  }
+  /* the maze itself (floor tiles, dead ends, glowing walls), made once per maze and size */
+  function mazeLayer(g, m) {
+    const key = [W, H, dpr, m.id, m.w, m.h, m.key, m.cheese ? m.cheese.join('.') : ''].join(',');
+    if (V.mzKey === key && V.mz) return;
+    V.mzKey = key;
+    const [mz, b] = mkLayer();
+    const c = g.c, x0 = g.X(0), y0 = g.Y(0), x1 = g.X(m.w), y1 = g.Y(m.h);
+    // the floor: a lit slab with tiles
+    b.save(); b.shadowColor = 'rgba(214,12,148,.5)'; b.shadowBlur = c * 0.6;
+    b.fillStyle = 'rgba(30,8,66,.96)'; b.fillRect(x0, y0, x1 - x0, y1 - y0); b.restore();
+    let gr = b.createLinearGradient(x0, y0, x1, y1);
+    gr.addColorStop(0, 'rgba(96,30,180,.5)'); gr.addColorStop(0.5, 'rgba(70,16,150,.42)'); gr.addColorStop(1, 'rgba(120,20,140,.5)');
+    b.fillStyle = gr; b.fillRect(x0, y0, x1 - x0, y1 - y0);
+    const ins = Math.max(1, c * 0.035);
+    for (let y = 0; y < m.h; y++) for (let x = 0; x < m.w; x++) {
+      const i = y * m.w + x, tx = g.X(x) + ins, ty = g.Y(y) + ins, ts = c - 2 * ins;
+      b.fillStyle = (x + y) % 2 ? 'rgba(255,255,255,.035)' : 'rgba(0,0,0,.08)';
+      b.beginPath(); if (b.roundRect) b.roundRect(tx, ty, ts, ts, Math.max(1, c * 0.06)); else b.rect(tx, ty, ts, ts); b.fill();
+      if (m.dead && m.dead[i] && !(m.cheese && m.cheese[0] === x && m.cheese[1] === y)) {   // a dead end: a coral tint
+        b.fillStyle = 'rgba(234,53,96,.14)';
+        b.beginPath(); if (b.roundRect) b.roundRect(tx, ty, ts, ts, Math.max(1, c * 0.06)); else b.rect(tx, ty, ts, ts); b.fill();
+      }
+    }
+    if (m.cheese) {                                            // the exit: a warm pool of light on its floor
+      const ex = g.X(m.cheese[0] + 0.5), ey = g.Y(m.cheese[1] + 0.5);
+      gr = b.createRadialGradient(ex, ey, 0, ex, ey, c * 0.75);
+      gr.addColorStop(0, 'rgba(255,214,90,.34)'); gr.addColorStop(0.6, 'rgba(245,172,41,.12)'); gr.addColorStop(1, 'rgba(245,172,41,0)');
+      b.fillStyle = gr; b.fillRect(ex - c, ey - c, 2 * c, 2 * c);
+    }
+    if (m.open) {                                              // the walls: one path, stroked in three passes
+      const path = new Path2D();
+      for (const [ax, ay, bx, by] of segments(m)) { path.moveTo(g.X(ax), g.Y(ay)); path.lineTo(g.X(bx), g.Y(by)); }
+      b.lineCap = 'round'; b.lineJoin = 'round';
+      b.save(); b.shadowColor = 'rgba(214,12,148,.95)'; b.shadowBlur = Math.max(6, c * 0.42);
+      b.strokeStyle = 'rgba(214,12,148,.55)'; b.lineWidth = Math.max(2.5, c * 0.1); b.stroke(path); b.restore();
+      gr = b.createLinearGradient(x0, y0, x1, y1);
+      gr.addColorStop(0, '#ff7ad0'); gr.addColorStop(0.5, '#ff9ab8'); gr.addColorStop(1, '#ffd27a');
+      b.strokeStyle = gr; b.lineWidth = Math.max(1.6, c * 0.055); b.stroke(path);
+      b.strokeStyle = 'rgba(255,255,255,.55)'; b.lineWidth = Math.max(0.8, c * 0.016); b.stroke(path);
+    } else {                                                   // no layout yet: just the outline
+      b.setLineDash([c * 0.18, c * 0.14]);
+      b.strokeStyle = 'rgba(255,154,216,.45)'; b.lineWidth = 2; b.strokeRect(x0, y0, x1 - x0, y1 - y0);
+      b.setLineDash([]);
+    }
+    V.mz = mz;
+  }
+  function glow(x, y, r, rgb, al) {
+    if (al <= 0.01 || r <= 0) return;
+    const gr = cx.createRadialGradient(x, y, 0, x, y, r);
+    gr.addColorStop(0, `rgba(${rgb},${al.toFixed(3)})`); gr.addColorStop(0.45, `rgba(${rgb},${(al * 0.4).toFixed(3)})`); gr.addColorStop(1, `rgba(${rgb},0)`);
+    cx.fillStyle = gr;
+    cx.beginPath(); cx.arc(x, y, r, 0, TAU); cx.fill();
+  }
+  function roundCell(g, x, y, inset) {
+    const c = g.c, tx = g.X(x) + inset, ty = g.Y(y) + inset, ts = c - 2 * inset;
+    cx.beginPath();
+    if (cx.roundRect) cx.roundRect(tx, ty, ts, ts, Math.max(1, c * 0.12)); else cx.rect(tx, ty, ts, ts);
+  }
+  function drawTrail(g, snap) {
+    const n = snap.trail.length;
+    if (!n) return;
+    const seen = new Map();
+    snap.trail.forEach((q, i) => seen.set(q[0] + ',' + q[1], i));   // a cell visited twice keeps its newest rank
+    seen.forEach((i, k) => {
+      const [x, y] = k.split(',').map(Number), f = (i + 1) / n;
+      if (snap.cell && x === snap.cell[0] && y === snap.cell[1]) return;
+      cx.fillStyle = `rgba(${f < 0.5 ? '160,40,220' : '236,60,170'},${(0.06 + 0.2 * f).toFixed(3)})`;
+      roundCell(g, x, y, g.c * 0.2); cx.fill();
+    });
+  }
+  function drawSenses(g, m, snap, pos, now, still) {
+    const c = g.c, [cxx, cyy] = snap.cell, i = cyy * m.w + cxx;
+    if (!m.open) return;
+    const px = g.X(pos[0]), py = g.Y(pos[1]);
+    // the light it carries: the floor is lit around it, and dim further away
+    cx.globalCompositeOperation = 'lighter';
+    glow(px, py, c * 2.1, '255,206,120', 0.12 + (still ? 0 : 0.015 * Math.sin(now * 5.3)));
+    cx.globalCompositeOperation = 'source-over';
+    // the open sides of its cell: a chevron at each
+    cx.strokeStyle = 'rgba(255,240,180,.85)'; cx.lineWidth = Math.max(1.4, c * 0.045); cx.lineCap = 'round'; cx.lineJoin = 'round';
+    const ccx = g.X(cxx + 0.5), ccy = g.Y(cyy + 0.5), s = c * 0.08, d0 = c * 0.37;
+    for (const [dx, dy, bit] of DIRS) {
+      if (!(m.open[i] & bit)) continue;
+      const mx = ccx + dx * d0, my = ccy + dy * d0;
+      glow(mx, my, c * 0.16, '255,214,120', 0.35);
+      cx.beginPath();
+      cx.moveTo(mx - dy * s - dx * s * 0.6, my - dx * s - dy * s * 0.6);
+      cx.lineTo(mx + dx * s * 0.6, my + dy * s * 0.6);
+      cx.lineTo(mx + dy * s - dx * s * 0.6, my + dx * s - dy * s * 0.6);
+      cx.stroke();
+    }
+    // the way to the cheese, as a direction: a short needle from the marker
+    if (m.cheese && snap.dist !== 0 && !(m.cheese[0] === cxx && m.cheese[1] === cyy)) {
+      const ex = g.X(m.cheese[0] + 0.5) - px, ey = g.Y(m.cheese[1] + 0.5) - py, L = Math.hypot(ex, ey) || 1;
+      const ux = ex / L, uy = ey / L, a0 = c * 0.5, a1 = c * 0.82, hd = c * 0.09;
+      cx.strokeStyle = 'rgba(252,240,16,.7)'; cx.lineWidth = Math.max(1.2, c * 0.035);
+      cx.beginPath(); cx.moveTo(px + ux * a0, py + uy * a0); cx.lineTo(px + ux * a1, py + uy * a1); cx.stroke();
+      cx.fillStyle = 'rgba(252,240,16,.85)';
+      cx.beginPath(); cx.moveTo(px + ux * (a1 + hd * 1.2), py + uy * (a1 + hd * 1.2));
+      cx.lineTo(px + ux * a1 - uy * hd, py + uy * a1 + ux * hd); cx.lineTo(px + ux * a1 + uy * hd, py + uy * a1 - ux * hd); cx.closePath(); cx.fill();
+    }
+  }
+  function drawCheese(g, m, now, still, dim) {
+    if (!m.cheese) return;
+    const x = g.X(m.cheese[0] + 0.5), y = g.Y(m.cheese[1] + 0.5), r = g.c * 0.27;
+    const pulse = still ? 0.5 : 0.5 + 0.5 * Math.sin(now * 2.4);
+    glow(x, y, r * (2.2 + 0.6 * pulse), '255,214,80', (0.2 + 0.12 * pulse) * (dim ? 0.5 : 1));
+    cx.save(); cx.translate(x, y); cx.rotate(-0.4);
+    const wedge = () => { cx.beginPath(); cx.moveTo(-r * 1.1, 0); cx.lineTo(r * 0.7, -r * 0.72);
+      cx.quadraticCurveTo(r * 1.12, 0, r * 0.7, r * 0.72); cx.closePath(); };
+    const gr = cx.createLinearGradient(-r, -r, r, r);
+    gr.addColorStop(0, '#fff8b0'); gr.addColorStop(0.55, '#ffd648'); gr.addColorStop(1, '#f5a029');
+    cx.fillStyle = gr; wedge(); cx.fill();
+    cx.strokeStyle = 'rgba(120,58,4,.5)'; cx.lineWidth = Math.max(1, r * 0.09); wedge(); cx.stroke();
+    cx.fillStyle = 'rgba(150,84,10,.5)';
+    for (const [hx, hy, hr] of [[-0.15, -0.08, 0.17], [0.38, 0.22, 0.13], [0.32, -0.3, 0.1], [-0.55, 0.12, 0.09]]) {
+      cx.beginPath(); cx.arc(hx * r, hy * r, hr * r, 0, TAU); cx.fill();
+    }
+    cx.restore();
+  }
+  function drawRat(g, pos, v, dt, still) {
+    const c = g.c, px = g.X(pos[0]), py = g.Y(pos[1]), R = S.rat;
+    R.vx = v[0]; R.vy = v[1];
+    if (Math.hypot(v[0], v[1]) > 0.12) {
+      const want = Math.atan2(v[1], v[0]);
+      let d = want - R.ang;
+      while (d > Math.PI) d -= TAU;
+      while (d < -Math.PI) d += TAU;
+      R.ang += d * (still ? 1 : Math.min(1, dt * 12));
+    }
+    glow(px, py, c * 0.6, '60,10,110', 0.5);                   // a soft shadow, so the marker reads on the lit floor
+    if (!V.rat) {                                              // the logo is not here (yet): a plain marker
+      glow(px, py, c * 0.5, '255,214,120', 0.5);
+      cx.fillStyle = '#fff40f'; cx.beginPath(); cx.arc(px, py, c * 0.17, 0, TAU); cx.fill();
+      cx.strokeStyle = '#8808B5'; cx.lineWidth = 2; cx.stroke();
+      return;
+    }
+    const sw = c * 0.92, sh = sw * V.ratH / V.ratW, ps = sw / V.ratW * V.ratPad;
+    const a = R.ang, right = Math.cos(a) >= 0;
+    cx.save(); cx.translate(px, py);
+    cx.rotate(right ? a : a - Math.PI);                       // the logo faces left: mirrored for a heading to the right
+    if (right) cx.scale(-1, 1);
+    cx.drawImage(V.rat, -sw / 2 - ps, -sh / 2 - ps, sw + 2 * ps, sh + 2 * ps);
+    cx.restore();
+  }
+  function banner(text, sub, y, fs, pop, alpha, col0, col1, still) {
+    cx.save();
+    cx.globalAlpha = alpha; cx.textAlign = 'center'; cx.textBaseline = 'alphabetic';
+    cx.translate(W / 2, y); cx.scale(pop, pop); cx.translate(-W / 2, -y);
+    cx.font = `700 ${Math.round(fs)}px "Space Grotesk", system-ui, sans-serif`;
+    cx.lineJoin = 'round'; cx.lineWidth = Math.max(4, fs * 0.12); cx.strokeStyle = 'rgba(20,4,40,.85)';
+    cx.strokeText(text, W / 2, y);
+    const gr = cx.createLinearGradient(0, y - fs * 0.85, 0, y);
+    gr.addColorStop(0, col0); gr.addColorStop(1, col1);
+    cx.fillStyle = gr; cx.fillText(text, W / 2, y);
+    if (sub) {
+      cx.font = `700 ${Math.round(clamp(fs * 0.2, 10, 14))}px "JetBrains Mono", ui-monospace, monospace`;
+      cx.lineWidth = 3; cx.strokeStyle = 'rgba(20,4,40,.85)'; cx.strokeText(sub, W / 2, y + fs * 0.42);
+      cx.fillStyle = '#fff'; cx.fillText(sub, W / 2, y + fs * 0.42);
+    }
+    cx.restore();
+    void still;
+  }
+  function drawFx(g, m, now, still) {
+    const c = g.c;
+    for (const f of S.fx) {
+      const age = now - f.at, k = clamp(age / f.dur, 0, 1);
+      if (f.kind === 'bump') {
+        if (!f.cell || !m || m.w !== undefined && (f.cell[0] >= m.w || f.cell[1] >= m.h)) continue;
+        const [dx, dy] = DIRS[f.side], fa = Math.pow(1 - k, 0.7);
+        const x0 = g.X(f.cell[0] + (dx > 0 ? 1 : 0)), y0 = g.Y(f.cell[1] + (dy > 0 ? 1 : 0));
+        const x1 = g.X(f.cell[0] + (dx < 0 ? 0 : 1)), y1 = g.Y(f.cell[1] + (dy < 0 ? 0 : 1));
+        const ax = dx ? x0 : g.X(f.cell[0]), ay = dy ? y0 : g.Y(f.cell[1]), bx = dx ? x1 : g.X(f.cell[0] + 1), by = dy ? y1 : g.Y(f.cell[1] + 1);
+        // the cell flushes coral, the wall it hit flares
+        cx.fillStyle = `rgba(234,53,96,${(0.3 * fa).toFixed(3)})`; roundCell(g, f.cell[0], f.cell[1], c * 0.06); cx.fill();
+        cx.save(); cx.shadowColor = 'rgba(255,70,110,1)'; cx.shadowBlur = c * 0.7 * fa;
+        cx.strokeStyle = `rgba(255,120,150,${(0.98 * fa).toFixed(3)})`; cx.lineWidth = Math.max(4, c * 0.22) * (0.5 + 0.5 * fa); cx.lineCap = 'round';
+        cx.beginPath(); cx.moveTo(ax, ay); cx.lineTo(bx, by); cx.stroke();
+        cx.strokeStyle = `rgba(255,236,240,${(0.9 * fa).toFixed(3)})`; cx.lineWidth = Math.max(1.5, c * 0.06);
+        cx.beginPath(); cx.moveTo(ax, ay); cx.lineTo(bx, by); cx.stroke(); cx.restore();
+        const mx = (ax + bx) / 2, my = (ay + by) / 2;
+        glow(mx, my, c * 0.9 * (0.5 + k), '255,80,120', 0.5 * fa);
+        if (f.parts) for (const p of f.parts) {                     // a few sparks off the wall, back into the cell
+          const ang = Math.atan2(-dy, -dx) + p.a, d = p.sp * c * Math.min(age, 0.6) * 1.8;
+          cx.fillStyle = `rgba(255,190,205,${(0.9 * fa).toFixed(3)})`;
+          cx.beginPath(); cx.arc(mx + Math.cos(ang) * d, my + Math.sin(ang) * d, p.r * c * fa + 0.5, 0, TAU); cx.fill();
+        }
+        if (age < 0.75) {                                            // the word, drifting into the cell, away from the wall
+          const fs = clamp(c * 0.36, 11, 18), la = age < 0.55 ? 1 : 1 - (age - 0.55) / 0.2;
+          cx.font = `800 ${Math.round(fs)}px "JetBrains Mono", ui-monospace, monospace`;
+          cx.textAlign = 'center'; cx.textBaseline = 'middle'; cx.globalAlpha = la;
+          cx.lineWidth = 4; cx.strokeStyle = 'rgba(40,4,30,.9)';
+          const off = c * (0.62 + (still ? 0 : age * 0.35));
+          cx.strokeText('BUMP', mx - dx * off, my - dy * off); cx.fillStyle = '#ffdce6'; cx.fillText('BUMP', mx - dx * off, my - dy * off);
+          cx.globalAlpha = 1;
+        }
+      } else if (f.kind === 'escaped') {
+        const ex = f.cell ? g.X(f.cell[0] + 0.5) : W / 2, ey = f.cell ? g.Y(f.cell[1] + 0.5) : H / 2;
+        const sameMaze = !m || f.mazeId === null || f.mazeId === undefined || m.id === f.mazeId;
+        if (age < 1.6 && sameMaze) {                            // the burst is at the cheese of the maze it escaped
+          const fa = 1 - age / 1.6;
+          glow(ex, ey, c * (0.8 + age * 2.4), '255,214,80', 0.5 * fa);
+          cx.strokeStyle = `rgba(255,240,160,${(0.8 * fa).toFixed(3)})`; cx.lineWidth = Math.max(1.5, c * 0.06 * fa);
+          cx.beginPath(); cx.arc(ex, ey, c * (0.3 + (still ? 0.6 : age * 2.6)), 0, TAU); cx.stroke();
+          if (f.parts) {
+            const cols = ['255,244,15', '245,172,41', '255,255,255', '234,53,96'];
+            const ease = 1 - Math.pow(1 - clamp(age / 1.6, 0, 1), 2.2);
+            for (const p of f.parts) {
+              const d = p.sp * c * ease * 1.5, x = ex + Math.cos(p.a) * d, y = ey + Math.sin(p.a) * d + age * age * c * 0.35;
+              cx.fillStyle = `rgba(${cols[p.c]},${(0.95 * fa).toFixed(3)})`;
+              cx.save(); cx.translate(x, y); cx.rotate(p.ph + age * 4);
+              const r = p.r * c * (0.6 + 0.4 * fa);
+              cx.fillRect(-r, -r * 0.6, 2 * r, 1.2 * r); cx.restore();
+            }
+          }
+        }
+        const pop = still ? 1 : 1 + 0.35 * Math.pow(1 - clamp(age / 0.28, 0, 1), 2);
+        const al = age < 0.12 && !still ? age / 0.12 : age > f.dur - 0.5 ? clamp((f.dur - age) / 0.5, 0, 1) : 1;
+        const fs = clamp(H * 0.15, 30, 76);
+        banner('ESCAPED', f.n > 1 ? `${f.n} IN A ROW` : 'CHEESE REACHED', H * 0.5, fs, pop, al, '#fffbe6', '#F5AC29', still);
+      } else if (f.kind === 'timeout') {
+        cx.fillStyle = `rgba(6,2,14,${(0.32 * (age > f.dur - 0.5 ? clamp((f.dur - age) / 0.5, 0, 1) : 1)).toFixed(3)})`;
+        cx.fillRect(0, 0, W, H);
+        const al = age > f.dur - 0.5 ? clamp((f.dur - age) / 0.5, 0, 1) : 1;
+        banner('TIME', 'OUT OF TIME · NO CHEESE', H * 0.5, clamp(H * 0.15, 30, 76), 1, al, '#e8e2f2', '#8f86a6', still);
+      }
+    }
+  }
+  function chip(x, y, text, align) {
+    cx.font = `600 ${Math.round(clamp(H * 0.024, 10.5, 13))}px "Space Grotesk", system-ui, sans-serif`;
+    const tw = cx.measureText(text).width, ph = Math.round(clamp(H * 0.045, 20, 26)), pw = tw + 20;
+    const x0 = align === 'right' ? x - pw : x;
+    cx.fillStyle = 'rgba(22,6,48,.62)';
+    cx.beginPath();
+    if (cx.roundRect) cx.roundRect(x0, y, pw, ph, ph / 2); else cx.rect(x0, y, pw, ph);
+    cx.fill();
+    cx.strokeStyle = 'rgba(255,220,250,.22)'; cx.lineWidth = 1; cx.stroke();
+    cx.fillStyle = '#fff4fb'; cx.textAlign = 'left'; cx.textBaseline = 'middle';
+    cx.fillText(text, x0 + 10, y + ph / 2 + 0.5);
+  }
+  function hud(g, snap) {
+    const pad = clamp(W * 0.02, 8, 14), narrow = W < 460, top = pad + 4, bot = H - pad - 4 - Math.round(clamp(H * 0.045, 20, 26));
+    chip(pad, top, (narrow ? 'M' : 'Maze ') + snap.id + ' · ' + snap.w + '×' + snap.h, 'left');
+    const n = S.esc + S.to;
+    if (n) chip(W - pad, top, S.esc + (narrow ? ' esc · ' : ' escaped · ') + ratePct(S.esc, n), 'right');
+    const parts = [];
+    if (snap.steps !== null) parts.push(snap.steps + (narrow ? ' st' : snap.steps === 1 ? ' step' : ' steps'));
+    if (snap.bumps !== null) parts.push(snap.bumps + (narrow ? ' bmp' : snap.bumps === 1 ? ' bump' : ' bumps'));
+    if (parts.length) chip(pad, bot, parts.join(' · '), 'left');
+    if (snap.dist !== null) chip(W - pad, bot, snap.dist === 0 ? 'at the cheese'
+      : snap.dist + (narrow ? (snap.dist === 1 ? ' cell' : ' cells') : (snap.dist === 1 ? ' cell' : ' cells') + ' to the cheese'), 'right');
+  }
+
+  function draw(now, m, dt) {
+    cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cx.lineJoin = 'round'; cx.miterLimit = 2;
+    const playing = m === 'live' || m === 'test', still = RM.matches;
+    sprite();
+    background();
+    const smp = playing && S.snaps.length ? sample() : null;
+    const lay = layoutFor(smp ? smp.snap : null);
+    const g = V.g && V.g.W === W && V.g.H === H && V.g.w === lay.w && V.g.h === lay.h ? V.g : (V.g = geom(lay));
+    mazeLayer(g, lay);
+    cx.drawImage(V.bg, 0, 0, W, H);
+    if (lay.at && !lay.shownAt) lay.shownAt = now;                 // a new maze fades in from its first frame
+    const fade = lay.shownAt && !still ? clamp((now - lay.shownAt) / 0.45, 0, 1) : 1;
+    cx.globalAlpha = (playing ? 1 : 0.42) * fade;
+    cx.drawImage(V.mz, 0, 0, W, H);
+    cx.globalAlpha = 1;
+    if (smp) {
+      drawTrail(g, smp.snap);
+      drawSenses(g, lay, smp.snap, smp.pos, now, still);
+      drawCheese(g, lay, now, still, false);
+      drawRat(g, smp.pos, smp.v, dt, still);
+      drawFx(g, lay, now, still);
+      hud(g, smp.snap);
+    } else {
+      drawCheese(g, lay, now, still, true);
+      if (S.fx.length) drawFx(g, lay, now, still);
+    }
+  }
+  function size() {
+    const r = E.screen.getBoundingClientRect();
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    W = Math.max(1, r.width); H = Math.max(1, r.height);
+    E.cv.width = Math.round(W * dpr); E.cv.height = Math.round(H * dpr);
+    V.g = null; V.mz = null; V.mzKey = '';
+    const now = performance.now() / 1000;
+    draw(now, mode(now), 0);
+  }
+  function frame(ms) {
+    raf = 0;
+    const now = ms / 1000, m = mode(now), playing = m === 'live' || m === 'test';
+    pump(now);
+    const busy = playing || S.fx.length > 0, animate = busy || !RM.matches;
+    // between sessions the cheese still glows softly, at half the frame rate
+    if (busy || now - lastDraw > 1 / 31 || m !== lastMode) {
+      draw(now, m, lastDraw ? clamp(now - lastDraw, 0, 0.1) : 0.016);
+      lastDraw = now;
+    }
+    if (m !== lastMode) renderUi();
+    if ((animate || S.pending.length) && visible && !document.hidden) raf = requestAnimationFrame(frame);
+  }
+  function kick() {
+    if (panel && !raf && visible && !document.hidden) raf = requestAnimationFrame(frame);
+  }
+
+  /* ---- the text around the maze */
+  function renderUi() {
+    if (!panel) return;
+    const now = performance.now() / 1000, m = mode(now);
+    const changed = m !== lastMode;
+    lastMode = m;
+    sec.dataset.state = m;
+    const live = S.st && S.st.live;
+    const B = { connecting: ['conn', 'CONNECTING'], live: ['live', 'LIVE TRAINING'], test: ['test', 'TEST STREAM'],
+                wait: live ? ['live', 'LIVE TRAINING'] : ['test', 'TEST STREAM'], standby: ['off static', 'STANDBY'] }[m];
+    E.badge.className = 'badge ' + B[0]; put(E.badgeT, B[1]);
+    const other = S.st && S.st.streaming && S.st.task !== 'maze' ? (TASKS[S.st.task] ? TASKS[S.st.task].name : 'another task') : null;
+    put(E.conn, m === 'live' || m === 'test' ? 'in the maze now' : m === 'wait' ? 'starting'
+      : other ? 'training on another task' : !S.open && S.wasOpen ? 'reconnecting' : '');
+    let t = '', s = '';
+    if (m === 'connecting') t = 'Connecting to the lab';
+    else if (m === 'wait') { t = 'R-01 is about to enter the maze'; s = 'The first maze appears in a moment.'; }
+    else if (m === 'standby') {
+      t = 'R-01 isn’t in the maze right now';
+      s = other ? 'It is training on another task (' + other + '). Rat Maze sessions appear here while they stream.'
+        : 'The next session will appear here.';
+      if (S.had && S.esc + S.to > 0) s = 'Last session: ' + plural(S.esc, 'maze', 'mazes') + ' escaped, ' + S.to + ' timed out. ' + s;
+    }
+    put(E.emptyT, t); put(E.emptyS, s);
+    const how = 'R-01’s head direction moves the marker. It senses only the openings around its cell and the direction to the cheese; this is a drawing of its simulation, not a picture it sees.';
+    put(E.cap, m === 'live' ? 'Live training: the newest saved checkpoint of run ' + (S.st.run || '') + ', playing Rat Maze in its own simulation. ' + how
+      : m === 'test' ? 'Test stream, not a live training run. ' + how : '');
+
+    // this maze
+    const cur = S.cur, playing = m === 'live' || m === 'test';
+    if (cur) {
+      put(E.now, 'Maze ' + cur.id + ' · ' + cur.w + ' × ' + cur.h);
+      const parts = [];
+      if (cur.steps !== null) parts.push(plural(cur.steps, 'step', 'steps'));
+      if (cur.bumps !== null) parts.push(plural(cur.bumps, 'wall bump', 'wall bumps'));
+      if (cur.dist !== null) parts.push(cur.dist === 0 ? 'at the cheese' : plural(cur.dist, 'cell', 'cells') + ' to the cheese');
+      put(E.nowS, (playing ? '' : 'Last seen: ') + parts.join(' · '));
+    } else { put(E.now, '—'); put(E.nowS, ''); }
+
+    // the score
+    const any = S.had || S.esc + S.to > 0, n = S.esc + S.to;
+    put(E.size, cur ? cur.w + ' × ' + cur.h : '—');
+    put(E.esc, any ? S.esc : '—'); put(E.rate, any ? ratePct(S.esc, n) : '—');
+    put(E.avg, S.stepsN ? Math.round(S.stepsSum / S.stepsN) : '—');
+    put(E.streak, any ? S.streak : '—'); put(E.to, any ? S.to : '—');
+    const sub = [];
+    if (S.last) {
+      const L = S.last;
+      sub.push('Last maze: ' + (L.result === 'escaped' ? 'escaped' + (L.steps !== null ? ' in ' + plural(L.steps, 'step', 'steps') : '')
+        : 'out of time' + (L.steps !== null ? ' after ' + plural(L.steps, 'step', 'steps') : ''))
+        + (L.bumps !== null || L.time !== null ? ' (' + [L.bumps !== null ? plural(L.bumps, 'bump', 'bumps') : '', L.time !== null ? L.time.toFixed(1) + ' s' : ''].filter(Boolean).join(', ') + ')' : ''));
+    }
+    if (S.best > 1) sub.push('best streak ' + S.best);
+    put(E.sub, sub.join(' · '));
+    E.bb.hidden = !S.bbMaze;
+    if (changed && !raf) { const t2 = performance.now() / 1000; draw(t2, m, 0); kick(); }
+  }
+
+  function teaserUpdate() {
+    if (!teaser) return;
+    const st = S.st, on = !!(st && st.streaming && st.task === 'maze');
+    const state = on ? (st.live ? 'live' : 'test') : 'idle';
+    if (teaser.dataset.state !== state) teaser.dataset.state = state;
+    put(teaserSt, state === 'live' ? 'Running now' : state === 'test' ? 'Test stream' : 'New');
+  }
+
+  /* the panel's own socket (when the 3D view cannot start): the training channel's messages, read as live.js would */
+  let rawHello = null;
+  function onRaw(m) {
+    if (!m || typeof m !== 'object') return;
+    switch (m.type) {
+      case 'state': rawHello = m.live === true && m.hello && typeof m.hello === 'object' ? m.hello : null; break;
+      case 'hello': rawHello = m; break;
+      case 'bye': case 'idle': rawHello = null; break;
+      case 'maze': case 'maze_end': onMaze(m); return;
+      default: return;
+    }
+    const h = rawHello;
+    onStatus({ stream: h ? { live: !isTestHello(h), test: isTestHello(h), task: h.task, run: h.run } : null });
+  }
+  function onBuyback(j) {
+    const on = !!(j && Array.isArray(j.tasks) && j.tasks.includes('maze'));
+    if (on !== S.bbMaze) { S.bbMaze = on; if (panel) renderUi(); }
+  }
+
+  if (panel) {
+    if (window.ResizeObserver) new ResizeObserver(size).observe(E.screen); else addEventListener('resize', size);
+    if ('IntersectionObserver' in window) new IntersectionObserver(es => { visible = es[0].isIntersecting; kick(); }).observe(E.screen);
+    document.addEventListener('visibilitychange', kick);
+    if (RM.addEventListener) RM.addEventListener('change', () => { kick(); size(); });
+    // outcomes keep counting while the maze is scrolled away (the frame loop only runs while it is visible)
+    setInterval(() => { const now = performance.now() / 1000; pump(now); if (mode(now) !== lastMode) renderUi(); }, 200);
+    size();
+    renderUi();
+    kick();
+  }
+  teaserUpdate();
+  return { onStatus, onMaze, onRelay, onRaw, onBuyback };
+})();
+
 /* ------------------------------------------------------------------ rat buybacks (buyback.js)
    Reads the buyback engine's public status JSON. One buy an hour, on the hour (UTC), sized by that hour's hit rate:
    the hourly budget x hit rate, where hit rate = hits / (hits + misses + wrong presses) and the caps clamp the result.
@@ -2186,6 +2946,7 @@ const TILES = (function ratTiles() {
       render(j);
       PONS.onBuyback(j);                 // the rat-on-pons panel's "next session" line
       TILES.onBuyback(j);                // Rat Tiles says its play counts only if the engine counts the tiles task
+      MAZE.onBuyback(j);                 // Rat Maze, the same for the maze task
     } catch (e) {
       E.conn.textContent = 'status unavailable'; E.conn.className = 'bb-conn off';
     }
@@ -2200,8 +2961,10 @@ const TILES = (function ratTiles() {
 setMode('connecting');
 recordedReady.then(() => renderHUD());
 
-// the page's own relay socket, for when the 3D view (and so its socket) is not there: the pons panel and Rat Tiles
-const fallbackSocket = () => PONS.ownSocket({ onText: m => TILES.onRaw(m), onRelay: o => TILES.onRelay(o) });
+// the page's own relay socket, for when the 3D view (and so its socket) is not there: the pons panel, Rat Tiles and
+// Rat Maze
+const fallbackSocket = () => PONS.ownSocket({ onText: m => { TILES.onRaw(m); MAZE.onRaw(m); },
+                                              onRelay: o => { TILES.onRelay(o); MAZE.onRelay(o); } });
 
 (async function mountViewer() {
   const el = $('#live-view');
@@ -2224,7 +2987,9 @@ const fallbackSocket = () => PONS.ownSocket({ onText: m => TILES.onRaw(m), onRel
       // Rat Tiles (a training run with task "tiles"): board snapshots and tile outcomes, and each attempt's result
       onTiles: m => { try { TILES.onTiles(m); } catch (e) { console.warn('labrat: onTiles', e); } },
       onEpisode: m => { try { TILES.onEpisode(m); } catch (e) { console.warn('labrat: onEpisode', e); } },
-      onRelay: (open, gone) => { PONS.onRelay(open); TILES.onRelay(open); if (gone) fallbackSocket(); },
+      // Rat Maze (a training run with task "maze"): maze snapshots and each maze's outcome
+      onMaze: m => { try { MAZE.onMaze(m); } catch (e) { console.warn('labrat: onMaze', e); } },
+      onRelay: (open, gone) => { PONS.onRelay(open); TILES.onRelay(open); MAZE.onRelay(open); if (gone) fallbackSocket(); },
     });
     // null: the 3D view could not start here; the dot-rat placeholder stays up with the offline message
     if (!handle) { LIVE.failed = true; setMode('offline'); fallbackSocket(); return; }

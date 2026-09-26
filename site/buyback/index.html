@@ -128,6 +128,7 @@
       <a href="/buyback#live">Live</a>
       <a href="/buyback#buybacks">Buybacks</a>
       <a href="/buyback#piano">Rat Tiles</a>
+      <a href="/buyback#maze">Rat Maze</a>
       <a href="/buyback#rat-on-pons">Rat on pons</a>
       <a href="/buyback#how">How it works</a>
       <a href="/buyback" aria-current="page">Buyback</a>
@@ -245,6 +246,49 @@
           <p class="rt-sub" id="rt-sub"></p>
           <p class="bb-note rt-how">In time, a press is a hit; a press with no tile on the button, or a tile that slides past, counts against it. R-01's network is told where the tiles are as numbers; it never sees a picture, and this view is our drawing of its game. Each press is a whole-body lever press that takes the rat half a second to two seconds, so the tiles start slow and training speeds them up as it improves.<span id="rt-bb" hidden> Its hits, misses and off-tile presses make each hour's hit rate, which sizes that hour's $LABRAT buyback.</span></p>
           <p class="bb-note" id="rt-note">The sound is made in your browser: each note plays when the stream reports that R-01 hit a tile.</p>
+        </aside>
+      </div>
+    </section>
+  </div>
+
+  <!-- Rat Maze: R-01 escapes a maze (site.js draws the maze from the relay's "maze" / "maze_end" messages of a training
+       run whose task is "maze") -->
+  <div class="wrap wide">
+    <section class="mz" id="maze" aria-labelledby="mz-title" data-state="connecting">
+      <div class="bb-bar">
+        <h2 class="bb-title" id="mz-title">Rat Maze</h2>
+        <span class="mz-kicker">R-01 escapes a maze</span>
+        <span class="badge conn" id="mz-badge"><i aria-hidden="true"></i><b id="mz-badge-t">CONNECTING</b></span>
+        <span class="bb-conn" id="mz-conn"></span>
+      </div>
+      <p class="bb-rule mz-rule">A maze on R-01's screen, seen from above, with cheese at the exit. The rat's head direction moves its marker, walls stop it, and reaching the cheese is an escape; then a harder maze appears. It senses only the openings around it and the way to the cheese, never the whole map.</p>
+      <div class="mz-body">
+        <figure class="mz-board">
+          <div class="mz-screen" id="mz-screen">
+            <canvas id="mz-canvas" role="img" aria-label="The Rat Maze board: a maze seen from above, with the rat's marker, a trail of the cells it visited and a cheese wedge at the exit"></canvas>
+            <div class="mz-empty" id="mz-empty"><b id="mz-empty-t">Connecting to the lab</b><span id="mz-empty-s"></span></div>
+          </div>
+          <figcaption class="mz-cap" id="mz-cap"></figcaption>
+        </figure>
+        <aside class="mz-side" aria-label="Maze readout">
+          <div>
+            <p class="rp-k">This maze</p>
+            <p class="mz-now" id="mz-now">&mdash;</p>
+            <p class="mz-now-s" id="mz-now-s"></p>
+          </div>
+          <div>
+            <p class="rp-k">Score since you tuned in</p>
+            <dl class="bb-kv mz-kv">
+              <div><dt>Maze size</dt><dd id="mz-size">&mdash;</dd></div>
+              <div><dt>Mazes escaped</dt><dd id="mz-esc">&mdash;</dd></div>
+              <div><dt>Escape rate</dt><dd id="mz-rate">&mdash;</dd></div>
+              <div><dt>Avg steps to cheese</dt><dd id="mz-avg">&mdash;</dd></div>
+              <div><dt>Current streak</dt><dd id="mz-streak">&mdash;</dd></div>
+              <div><dt>Timed out</dt><dd id="mz-to">&mdash;</dd></div>
+            </dl>
+          </div>
+          <p class="mz-sub" id="mz-sub"></p>
+          <p class="bb-note mz-how">No lever press is needed here: where R-01's head points is where the marker goes. Its network is told which of the four sides of its cell are open, the direction and rough distance to the cheese, its own speed and the last few cells it visited, as numbers. It never sees the whole map, and this view is our drawing of its simulation, not a picture it sees. Escaping earns a reward; every step, every bump into a wall and every dead end counts against it, and a maze that runs out of time ends without the cheese. Training starts with small open mazes and grows them as the rat improves.<span id="mz-bb" hidden> Each maze escaped counts as a hit and each one that runs out of time as a miss for the hour's $LABRAT buyback.</span></p>
         </aside>
       </div>
     </section>

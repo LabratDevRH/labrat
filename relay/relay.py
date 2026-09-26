@@ -14,10 +14,11 @@ What a viewer receives, in order:
     1. {"type":"state","live":bool,"hello":{...}|null,"checkpoint":{...}|null,"episode":{...}|null,
         "history":[the last <=300 log.jsonl rows since that hello]}
        and, when live, the most recent binary frame straight after it (and, in a Rat Tiles run, the newest "tiles"
-       snapshot after that). The whole state stays under STATE_MAX bytes
+       snapshot after that; in a Rat Maze run, the current maze's layout snapshot and then the newest "maze" snapshot).
+       The whole state stays under STATE_MAX bytes
        (site/js/live.js ignores text over 65,536): if 300 rows would not fit, only the newest rows that fit are sent.
     2. then everything the publisher sends, unchanged: hello, metrics, checkpoint, episode, bye, binary frames, and in
-       a Rat Tiles run tiles / tile (see "Rat Tiles" below).
+       a Rat Tiles run tiles / tile (see "Rat Tiles" below), in a Rat Maze run maze / maze_end (see "Rat Maze").
     3. {"type":"idle","reason":...} when the publisher disconnects, says bye, or sends nothing for 15 s.
     4. a fresh "state" with live=true when a publisher that went quiet starts sending again.
     5. {"type":"pong","t":<unix s>} in answer to a viewer's "ping".
@@ -55,6 +56,23 @@ Rat Tiles (a training run whose hello has "task":"tiles"). The training publishe
       dropped for rate, never replayed.
 Both are dropped unless the current hello's task is "tiles". Both are forwarded unchanged (like every training text).
 
+Rat Maze (a training run whose hello has "task":"maze"). The training publisher also sends, on the training channel:
+    - {"type":"maze","t","maze_id","w","h","walls","cell":[cx,cy],"pos":[x,y],"cheese":[gx,gy],"trail":[[cx,cy],...],
+       "bumps","steps","dist"}: a snapshot of the maze, at most 8 a second, at most MAZE_MAX_TEXT bytes. "walls" is the
+      maze's layout (one hex char per cell, row-major: the 4 bits N,E,S,W = 8,4,2,1 set where that side is OPEN) and is
+      sent only in the first snapshot of a maze (a new maze_id); the other snapshots carry "walls": null. A snapshot must
+      carry an int maze_id, ints w and h (1..MAZE_MAX_SIDE) and walls that is null or a w*h-character hex string.
+      A LAYOUT snapshot (walls not null) is never dropped for rate and never replaced: without it a viewer cannot draw
+      the maze. A position snapshot (walls null) is treated like a tiles snapshot: each viewer gets at most
+      MAZE_VIEWER_PER_S of them a second (a burst of MAZE_VIEWER_BURST), the rest are dropped for that viewer, and a
+      viewer holds at most one unsent position snapshot (a newer one replaces it, at the end of its outbox, so the order
+      with the layout snapshots and the maze_end events is kept). For late joiners the relay keeps the current maze's
+      layout snapshot and the newest snapshot: while the run is live they get the layout first, then the newest one
+      (when it is a different message), after the state and its frame. The history and the state never carry them.
+    - {"type":"maze_end","maze_id","result":"escaped"|"timeout","steps","bumps","time_s"}: once per maze, at most
+      MAZE_END_MAX_TEXT bytes. Never dropped for rate, never replayed.
+Both are dropped unless the current hello's task is "maze". Both are forwarded unchanged.
+
 Run it (single process only: all state is in memory, so never use --workers > 1 or several replicas):
     uvicorn relay:app --host 0.0.0.0 --port $PORT --ws-max-size 266240 --ws-per-message-deflate false
     SERVE_SITE=1 also serves ../site at / (local preview; see README.md).
@@ -88,8 +106,8 @@ STATE_MAX = 60_000            # a state message stays under this many bytes (sit
 VIEWER_CAP = 500
 FRAME_MAGIC = 7.0
 MIN_FRAME = 12 * 4            # the 12-float header
-TASKS = ('lever', 'cursor', 'steer', 'tiles')
-PUBLISHER_TYPES = ('hello', 'metrics', 'checkpoint', 'episode', 'bye', 'tiles', 'tile')
+TASKS = ('lever', 'cursor', 'steer', 'tiles', 'maze')
+PUBLISHER_TYPES = ('hello', 'metrics', 'checkpoint', 'episode', 'bye', 'tiles', 'tile', 'maze', 'maze_end')
 
 # ---- Rat Tiles (hello.task "tiles"): board snapshots and tile outcomes on the training channel -----------------------
 TILES_MAX_TEXT = 4096         # a "tiles" snapshot (UTF-8 bytes)
@@ -97,6 +115,15 @@ TILE_MAX_TEXT = 512           # a "tile" event
 TILE_RESULTS = ('hit', 'miss', 'wrong')
 TILES_VIEWER_PER_S = 12.0     # "tiles" snapshots per viewer per second, at most (the publisher sends <= 10) ...
 TILES_VIEWER_BURST = 3.0      # ... with a burst of this many; "tile" events are never dropped for rate
+
+# ---- Rat Maze (hello.task "maze"): maze snapshots and maze_end events on the training channel -------------------------
+MAZE_MAX_TEXT = 8192          # a "maze" snapshot (UTF-8 bytes)
+MAZE_END_MAX_TEXT = 512       # a "maze_end" event
+MAZE_RESULTS = ('escaped', 'timeout')
+MAZE_MAX_SIDE = 64            # w and h of a maze, at most (the trainer's curriculum stops at 8)
+MAZE_VIEWER_PER_S = 10.0      # position snapshots (walls null) per viewer per second, at most (the publisher sends <= 8)
+MAZE_VIEWER_BURST = 3.0       # ... with a burst of this many; layout snapshots and maze_end are never dropped for rate
+HEX_WALLS = re.compile(r'^[0-9a-fA-F]+$')
 
 # ---- per-viewer fanout limits ---------------------------------------------------------------------------------------
 VIEWER_MAX_FRAMES = 16        # queued binary frames per viewer (~0.6 s at 25 fps); beyond this the OLDEST is dropped
@@ -225,7 +252,8 @@ class Viewer:
     it at most PONS_VIEWER_FPS times a second. It goes out after any queued text (so a pons_hello / pons_state
     arrives before the frames that follow it) and ahead of queued training frames (so those cannot starve it)."""
     __slots__ = ('ws', 'q', 'n_bin', 'n_text', 'dropped', 'wake', 'done', 'closed', 'kill_code', 'kill_reason',
-                 'sending_since', 'bucket', 'bucket_t', 'pons_frame', 'pons_next', 'tiles_q', 'tiles_bucket', 'tiles_t')
+                 'sending_since', 'bucket', 'bucket_t', 'pons_frame', 'pons_next', 'tiles_q', 'tiles_bucket', 'tiles_t',
+                 'maze_q', 'maze_bucket', 'maze_t')
 
     def __init__(self, ws):
         self.ws = ws
@@ -246,6 +274,9 @@ class Viewer:
         self.tiles_q = None               # the Rat Tiles snapshot (str) in this viewer's outbox, not yet sent
         self.tiles_bucket = TILES_VIEWER_BURST
         self.tiles_t = time.monotonic()
+        self.maze_q = None                # the Rat Maze position snapshot (str) in this viewer's outbox, not yet sent
+        self.maze_bucket = MAZE_VIEWER_BURST
+        self.maze_t = time.monotonic()
 
     def push_bytes(self, b):
         if self.closed:
@@ -298,6 +329,31 @@ class Viewer:
         self.tiles_q = s
         self.push_text(s)
 
+    def push_maze(self, s):
+        """A Rat Maze position snapshot (walls null): at most MAZE_VIEWER_PER_S a second for this viewer (the rest are
+        dropped), and at most one in its outbox: a newer one removes the unsent older one and goes at the end, so the
+        snapshots, the layout snapshots and the maze_end events stay in the order the publisher sent them. (A layout
+        snapshot, walls not null, goes through push_text: never dropped, never replaced.)"""
+        if self.closed:
+            return
+        now = time.monotonic()
+        self.maze_bucket = min(MAZE_VIEWER_BURST, self.maze_bucket + (now - self.maze_t) * MAZE_VIEWER_PER_S)
+        self.maze_t = now
+        if self.maze_bucket < 1.0:
+            HUB.count('maze_dropped_for_rate')
+            return
+        self.maze_bucket -= 1.0
+        old = self.maze_q
+        if old is not None:
+            try:
+                self.q.remove(old)        # compared by identity first: this viewer's one queued position snapshot
+                self.n_text -= 1
+                HUB.count('maze_replaced_for_slow_viewers')
+            except ValueError:
+                pass
+        self.maze_q = s
+        self.push_text(s)
+
     def push_pons(self, b):
         """A pons frame: replaces the one this viewer has not been sent yet (frames are whole pictures)."""
         if self.closed:
@@ -316,6 +372,7 @@ class Viewer:
         self.n_bin = self.n_text = 0
         self.pons_frame = None
         self.tiles_q = None
+        self.maze_q = None
         self.wake.set()
         self.done.set()
 
@@ -357,6 +414,8 @@ class Viewer:
                         self.n_text -= 1
                         if item is self.tiles_q:
                             self.tiles_q = None
+                        if item is self.maze_q:
+                            self.maze_q = None
                 self.sending_since = time.monotonic()
                 if item.__class__ is bytes:
                     await ws.send_bytes(item)
@@ -439,6 +498,10 @@ class Hub:
         self.last_frame = None
         self.tiles = None                 # the newest Rat Tiles snapshot (its text, as forwarded) of this run
         self.tiles_info = None            # a few of its fields, for /status
+        self.maze = None                  # the newest Rat Maze snapshot (its text, as forwarded) of this run
+        self.maze_layout = None           # the current maze's layout snapshot (the newest one that carried walls)
+        self.maze_layout_id = None        # its maze_id
+        self.maze_info = None             # a few of its fields, for /status
         self.viewers = set()
         self.pending = 0                  # viewer handshakes in progress (count toward the cap)
         self.per_ip = {}                  # per-address key -> /live sockets held (accepted or in handshake)
@@ -616,6 +679,9 @@ def on_pub_text(pub, text):
     if kind in ('tiles', 'tile') and len(text.encode('utf-8')) > (TILES_MAX_TEXT if kind == 'tiles' else TILE_MAX_TEXT):
         H.count(f'dropped_{kind}_too_big')
         return None
+    if kind in ('maze', 'maze_end') and len(text.encode('utf-8')) > (MAZE_MAX_TEXT if kind == 'maze' else MAZE_END_MAX_TEXT):
+        H.count(f'dropped_{kind}_too_big')
+        return None
 
     if kind == 'hello':
         if msg.get('source') != 'training':
@@ -635,6 +701,7 @@ def on_pub_text(pub, text):
         H.history.clear()                 # every hello starts a fresh curve; the publisher re-sends its rows after it
         if not same:                      # a new run or a new publisher session: nothing of the old one carries over
             H.checkpoint = H.episode = H.last_frame = H.tiles = H.tiles_info = None
+            H.maze = H.maze_layout = H.maze_layout_id = H.maze_info = None
         H.hello = msg
         pub.in_session = True
         pub.last_rx = time.monotonic()
@@ -657,6 +724,8 @@ def on_pub_text(pub, text):
 
     if kind in ('tiles', 'tile'):
         return on_tiles_text(pub, msg, text, kind)
+    if kind in ('maze', 'maze_end'):
+        return on_maze_text(pub, msg, text, kind)
 
     if kind == 'metrics':
         row = msg.get('row')
@@ -707,6 +776,61 @@ def on_tiles_text(pub, msg, text, kind):
         return None
     H.touch(pub)
     H.count('tile_events_in')
+    H.broadcast_text(text)
+    return None
+
+
+def _is_int(v, lo, hi):
+    return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+
+
+def _maze_ok(msg):
+    """A "maze" snapshot's shape: an int maze_id, ints w and h, walls null or a w*h-character hex string."""
+    w, h = msg.get('w'), msg.get('h')
+    if not (_is_int(msg.get('maze_id'), 0, 10 ** 9) and _is_int(w, 1, MAZE_MAX_SIDE) and _is_int(h, 1, MAZE_MAX_SIDE)):
+        return False
+    walls = msg.get('walls')
+    return walls is None or (isinstance(walls, str) and len(walls) == w * h and bool(HEX_WALLS.match(walls)))
+
+
+def _maze_info(msg):
+    """The few fields of a maze snapshot that /status shows (numbers only)."""
+    num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None   # noqa: E731
+    return {'maze_id': msg['maze_id'], 'w': msg['w'], 'h': msg['h'], 't': num(msg.get('t')), 'dist': num(msg.get('dist')),
+            'steps': num(msg.get('steps')), 'bumps': num(msg.get('bumps')), 'layout': msg.get('walls') is not None}
+
+
+def on_maze_text(pub, msg, text, kind):
+    """A Rat Maze snapshot ("maze") or maze outcome ("maze_end") from the training publisher, inside a session whose
+    hello has task "maze". A layout snapshot (walls not null) goes to every viewer like any text and is kept as the
+    current maze's layout; a position snapshot (walls null) goes to each viewer through its rate cap
+    (Viewer.push_maze); the newest snapshot is kept for late joiners; maze_end events go to everyone."""
+    H = HUB
+    if not (H.hello and H.hello.get('task') == 'maze'):
+        H.count('dropped_maze_wrong_task')
+        return None
+    if kind == 'maze':
+        if not _maze_ok(msg):
+            H.count('dropped_bad_maze')
+            return None
+        H.touch(pub)
+        H.maze, H.maze_info = text, _maze_info(msg)
+        H.count('maze_in')
+        if msg.get('walls') is not None:
+            H.maze_layout, H.maze_layout_id = text, msg['maze_id']
+            H.count('maze_layouts_in')
+            H.broadcast_text(text)
+        else:
+            if H.maze_layout is not None and H.maze_layout_id != msg['maze_id']:
+                H.maze_layout = H.maze_layout_id = None   # a maze whose layout never came: no layout to replay
+            for v in list(H.viewers):
+                v.push_maze(text)
+        return None
+    if msg.get('result') not in MAZE_RESULTS or not _is_int(msg.get('maze_id'), 0, 10 ** 9):
+        H.count('dropped_bad_maze_end')
+        return None
+    H.touch(pub)
+    H.count('maze_end_events_in')
     H.broadcast_text(text)
     return None
 
@@ -1041,6 +1165,11 @@ async def ws_live(ws: WebSocket):
             v.push_bytes(H.last_frame)
         if H.live and H.tiles is not None:  # a Rat Tiles run: the newest board snapshot (never the tile events)
             v.push_tiles(H.tiles)
+        if H.live and H.maze is not None:   # a Rat Maze run: the current maze's layout, then the newest snapshot
+            if H.maze_layout is not None:
+                v.push_text(H.maze_layout)
+            if H.maze is not H.maze_layout:
+                v.push_maze(H.maze)
         P = PONS
         if P.has_state():                 # the pons channel, once it has had a session: its state, then its last frame
             v.push_text(P.state_text())
@@ -1107,6 +1236,7 @@ async def status():   # async: runs on the event loop, never alongside a HUB upd
         'uptime_s': round(time.time() - H.started),
         'counts': dict(H.counts),
         'tiles': H.tiles_info,
+        'maze': H.maze_info,
         'pons': pons,
     }, headers=_NO_CACHE)
 

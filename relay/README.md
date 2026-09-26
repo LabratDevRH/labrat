@@ -33,11 +33,13 @@ local relay started with `RELAY_ALLOW_TEST=1` lets one through. The relay holds 
 
 1. `{"type":"state","live":bool,"hello":{...}|null,"checkpoint":{...}|null,"episode":{...}|null,"history":[up to 300 rows]}`.
    If the stream is live, the newest binary frame follows straight after (and, in a Rat Tiles run, the newest `tiles`
-   snapshot after that; see [Rat Tiles](#rat-tiles)). The state message stays under 60,000
+   snapshot after that, see [Rat Tiles](#rat-tiles); in a Rat Maze run, the current maze's layout snapshot and then the
+   newest `maze` snapshot, see [Rat Maze](#rat-maze)). The state message stays under 60,000
    bytes, because `site/js/live.js` ignores text over 65,536. Real `log.jsonl` rows are about 120 to 215 bytes, so
    300 rows fit. If they don't, the state carries the newest rows that do.
 2. Everything the publisher sends, unchanged and in order: `hello`, `metrics`, `checkpoint`, `episode`, `bye`, binary
-   frames (1868 bytes each for the rat: `(12 + 65*7) * 4`), and in a Rat Tiles run `tiles` and `tile`.
+   frames (1868 bytes each for the rat: `(12 + 65*7) * 4`), in a Rat Tiles run `tiles` and `tile`, and in a Rat Maze
+   run `maze` and `maze_end`.
 3. `{"type":"idle","reason":"quiet"|"bye"|"disconnected"}` when the publisher goes quiet for 15 s, says bye or
    disconnects. The last `hello` and its history are kept, and late joiners get them with `live:false`.
 4. A fresh `state` with `live:true` if a quiet publisher starts sending again (same session, no new hello).
@@ -115,6 +117,36 @@ notes (`site/assets/songs.json`, the same file as `assets/songs.json`).
 - Both are dropped unless the current `hello` says `"task":"tiles"` (`dropped_tiles_wrong_task`); a snapshot without a
   `tiles` list or an event without a `hit`/`miss`/`wrong` result is dropped too (`dropped_bad_tiles`, `dropped_bad_tile`).
   Episode messages are unchanged (`hits` = tiles hit), so `live/buyback.py` counts them as before.
+
+### Rat Maze
+
+A training run whose `hello` has `"task":"maze"` (the rat steering a marker through a maze on its screen to the cheese at
+the exit, with its head; no lever press) also sends two text messages on the training channel. The site's Rat Maze
+panel (`site/buyback/index.html#maze`, at `/buyback#maze`) draws the maze from them.
+
+- `{"type":"maze","t":<sim s>,"maze_id":<int>,"w":<int>,"h":<int>,"walls":<hex string>|null,"cell":[cx,cy],"pos":[x,y],"cheese":[gx,gy],"trail":[[cx,cy],...],"bumps":<int>,"steps":<int>,"dist":<int>}`:
+  a snapshot of the maze, at most 8 a second, at most **8,192 bytes**. `walls` is the layout: one hex char per cell,
+  row-major, the bits N=8, E=4, S=2, W=1 set where that side of the cell is **open**; it comes only in a maze's first
+  snapshot (a new `maze_id`), the others carry `"walls":null`. `pos` is continuous, in cell units (cell `(cx,cy)` spans
+  `x` in `[cx,cx+1)` and `y` in `[cy,cy+1)`; row 0 is the top row); `trail` is the last cells visited (newest last);
+  `dist` the shortest-path distance to the cheese in cells. A snapshot must carry an int `maze_id`, ints `w` and `h`
+  (1..64) and `walls` that is null or a `w*h`-character hex string (`dropped_bad_maze`).
+  - A **layout snapshot** (walls not null) is never dropped for rate and never replaced: without it a viewer cannot
+    draw the maze.
+  - A **position snapshot** (walls null) is treated like a tiles snapshot: each viewer gets at most **10 a second** (a
+    burst of 3), the rest are dropped for that viewer (`maze_dropped_for_rate`), and a viewer holds at most one unsent
+    one: a newer one replaces it at the end of its outbox (`maze_replaced_for_slow_viewers`), so the order with the
+    layout snapshots and the `maze_end` events is kept.
+- `{"type":"maze_end","maze_id":<int>,"result":"escaped"|"timeout","steps":<int>,"bumps":<int>,"time_s":<s>}`: one maze's
+  outcome. At most **512 bytes**. Never dropped for rate, never replayed (`dropped_bad_maze_end` without an
+  `escaped`/`timeout` result or an int `maze_id`).
+- A late joiner gets, while the run is live and after the state (and its frame), the current maze's layout snapshot
+  and then the newest snapshot (when that is a different message), never the events. The state message and the
+  history never carry them. A new run clears the kept snapshots. `/status` shows the newest snapshot's `maze_id`, `w`,
+  `h`, `t`, `dist`, `steps`, `bumps` and whether it carried the `layout`, under `maze`.
+- Both are dropped unless the current `hello` says `"task":"maze"` (`dropped_maze_wrong_task`). Episode messages are
+  as for the other tasks (`hits` = mazes escaped, `misses` = mazes that ran out of time), so `live/buyback.py` counts
+  them unchanged.
 
 ### Caps
 
@@ -201,6 +233,10 @@ then open `http://localhost:4720/buyback/#piano`. It is a scripted TEST stream (
 scripted cursor, hits, misses and off-tile presses, not the rat's brain), refused by any relay without
 `RELAY_ALLOW_TEST=1`, and it only connects to a relay on localhost.
 
+The Rat Maze panel: `python relay/maze_demo.py --relay ws://localhost:4720/publish --duration 120`, then open
+`http://localhost:4720/buyback/#maze`. The same kind of scripted TEST stream (seeded mazes from a recursive backtracker,
+a scripted marker that takes wrong turns and bumps into dead ends, some mazes running out of time; not the rat's brain).
+
 ## Test
 
 ```
@@ -226,9 +262,14 @@ next to a training publisher. It checks:
   10 Hz, the 4 KB / 512 B caps and junk, at most 12 snapshots a second per viewer while every tile event gets through,
   the newest snapshot (and never an event) for a late joiner, one queued snapshot at most for a slow viewer, and no
   old snapshot after a bye or in the next run
+- Rat Maze: `maze` / `maze_end` only in a run whose hello says `"task":"maze"` (and tiles messages dropped there),
+  forwarded verbatim and in order at 8 Hz, the 8 KB / 512 B caps and junk (bad walls, maze_id, size, result), at most
+  10 position snapshots a second per viewer while every layout snapshot and every `maze_end` gets through, the current
+  layout and then the newest snapshot (never an event) for a late joiner, one queued position snapshot at most for a
+  slow viewer, and no old snapshot after a bye or in the next run
 - the pons channel: its own slot and token check, forwarding with `"channel":"pons"` and the `PJPG` prefix, the
   training stream unchanged next to it, the 256 KB cap and junk frames, dropping any text with a `0x` string (even
   JSON-escaped), at most 5 pons frames a second per viewer with the newest winning, late joiners, bye, a new
   session, disconnects, the 15 s idle timer, resuming, replacement, and refusing other sources and test sessions
 
-It takes about two minutes (162 checks) and only stops the relay processes it started.
+It takes about two minutes (190 checks) and only stops the relay processes it started.

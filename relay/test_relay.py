@@ -1426,10 +1426,313 @@ async def tiles_checks(closers, raws):
     check(True, 'its first snapshot goes straight through')
 
 
+MAZE_HELLO = {'type': 'hello', 'source': 'training', 'task': 'maze', 'run': 'maze_run_1', 'label': 'relay test maze',
+              'fps': 25, 'started': '2026-09-26T09:00:00Z'}
+MAZE_HELLO2 = dict(MAZE_HELLO, run='maze_run_2', started='2026-09-26T09:30:00Z')
+
+
+def maze_snap(k, maze_id=1, w=3, h=3, layout=False, size=None, **over):
+    """A Rat Maze snapshot numbered k (its steps). layout=True: the maze's first snapshot, carrying its walls (one hex
+    char per cell); otherwise "walls": null, as the publisher sends them. size: pad it to exactly that many bytes."""
+    cw, ch = max(1, w), max(1, h)                       # (w or h may be junk on purpose)
+    walls = ''.join('%x' % ((i * 7 + maze_id) % 16) for i in range(cw * ch)) if layout else None
+    m = {'type': 'maze', 't': round(k * 0.125, 3), 'maze_id': maze_id, 'w': w, 'h': h, 'walls': walls,
+         'cell': [k % cw, (k // cw) % ch], 'pos': [k % cw + 0.5, (k // cw) % ch + 0.5], 'cheese': [cw - 1, ch - 1],
+         'trail': [[i % cw, (i // cw) % ch] for i in range(max(0, k - 5), k)], 'bumps': k // 7, 'steps': k,
+         'dist': max(0, 8 - k % 9)}
+    m.update(over)
+    s = json.dumps(m, separators=(',', ':'))
+    if size is not None:
+        m['pad'] = ''
+        base = len(json.dumps(m, separators=(',', ':')))
+        m['pad'] = 'x' * (size - base)
+        s = json.dumps(m, separators=(',', ':'))
+        assert len(s) == size, (len(s), size)
+    return s
+
+
+def maze_end(k, result='escaped', size=None, **over):
+    m = {'type': 'maze_end', 'maze_id': k, 'result': result, 'steps': 40 + k, 'bumps': 2, 'time_s': round(3.5 + k * 0.1, 2)}
+    m.update(over)
+    if size is not None:
+        m['pad'] = ''
+        m['pad'] = 'y' * (size - len(json.dumps(m, separators=(',', ':'))))
+    return json.dumps(m, separators=(',', ':'))
+
+
+def mkind(text):
+    """('maze', steps) / ('maze_end', maze_id) for a Rat Maze text, else None."""
+    d = strict(text)
+    if d.get('type') == 'maze':
+        return 'maze', d.get('steps')
+    if d.get('type') == 'maze_end':
+        return 'maze_end', d.get('maze_id')
+    return None
+
+
+def is_layout(text):
+    d = strict(text)
+    return d.get('type') == 'maze' and d.get('walls') is not None
+
+
+async def maze_relay():
+    relay = Relay({'LABRAT_PUBLISH_TOKEN': TOKEN}, 'maze')
+    closers, raws = [], []
+    try:
+        await maze_checks(closers, raws)
+    finally:
+        for r in raws:
+            r.shutdown()
+        for c in closers:
+            try:
+                await c()
+            except Exception:
+                pass
+        relay.stop()
+        log = relay.text()
+    check('Traceback' not in log and 'Exception in ASGI' not in log, 'the relay logged no exceptions (Rat Maze)',
+          f'log: {relay.logpath}')
+    if 'Traceback' in log or 'Exception in ASGI' in log:
+        print(log[-4000:])
+
+
+async def maze_checks(closers, raws):
+    section('Rat Maze: maze / maze_end messages only in a run whose hello says task "maze"')
+    V = await Rec('V').start()
+    closers.append(V.close)
+    await until(lambda: len(V.msgs) >= 1, 3)
+    P = await connect(PUB, additional_headers=AUTH, open_timeout=5)
+    closers.append(P.close)
+    await P.send(maze_snap(0, layout=True))                          # before any hello: dropped
+    await P.send(json.dumps(HELLO))                                  # a lever run
+    await P.send(maze_snap(1, layout=True))
+    await P.send(maze_end(1))
+    await P.send(json.dumps(TILES_HELLO))                            # a Rat Tiles run
+    await P.send(maze_snap(2, layout=True))
+    await until(lambda: V.find_text(lambda d: d == TILES_HELLO) is not None, 3)
+    await asyncio.sleep(0.3)
+    st = await status()
+    c = st['counts']
+    check(not [m for m in V.texts() if m.get('type') in ('maze', 'maze_end')] and c.get('dropped_outside_session') == 1
+          and c.get('dropped_maze_wrong_task') == 3 and st['maze'] is None,
+          'a snapshot before any hello, and maze / maze_end in a lever or tiles run, are dropped and counted',
+          json.dumps({k: v for k, v in c.items() if 'dropped' in k}))
+    mark = len(V.msgs)
+    await P.send(json.dumps(MAZE_HELLO))
+    rows = [{'steps': 1000 * (i + 1), 'ret': 1.0 + i, 'hits': 2 + i} for i in range(3)]
+    for r in rows:
+        await P.send(json.dumps({'type': 'metrics', 'row': r}))
+    await until(lambda: V.find_text(lambda d: d == MAZE_HELLO, mark) is not None, 3)
+    st = await status()
+    check(st['live'] is True and st['hello'] == MAZE_HELLO, 'a hello with task "maze" is accepted and live')
+    mark = len(V.msgs)
+    await P.send(tiles_snap(3))                                      # Rat Tiles messages in a maze run: dropped
+    await P.send(tile_ev(3))
+    await asyncio.sleep(0.3)
+    c = (await status())['counts']
+    check(V.texts(mark) == [] and c.get('dropped_tiles_wrong_task') == 2,
+          'tiles / tile messages in a maze run are dropped and counted')
+
+    section('Rat Maze: a layout snapshot, position snapshots at 8 Hz and maze_end events reach viewers verbatim, in order')
+    mark = len(V.msgs)
+    sent = []
+    t0 = time.perf_counter()
+    for k in range(24):
+        d = t0 + k * 0.125 - time.perf_counter()
+        if d > 0:
+            await asyncio.sleep(d)
+        s = maze_snap(100 + k, maze_id=1 + k // 12, layout=(k % 12 == 0))
+        await P.send(s)
+        await P.send(make_frame(100 + k))
+        sent.append(s)
+        if k % 12 == 11:
+            e = maze_end(1 + k // 12, 'escaped' if k < 12 else 'timeout')
+            await P.send(e)
+            sent.append(e)
+    await until(lambda: [m for _, m in V.msgs[mark:] if isinstance(m, str)] == sent, 3)
+    got = [m for _, m in V.msgs[mark:] if isinstance(m, str)]
+    check(got == sent, 'all 24 snapshots (2 with walls) and 2 maze_end events arrive, byte for byte, in order',
+          f'{len(got)}/{len(sent)}')
+    check([frame_k(m) for _, m in V.msgs[mark:] if isinstance(m, bytes)] == list(range(100, 124)),
+          'the rat frames in between are unaffected')
+    st = await status()
+    check(st['maze'] == {'maze_id': 2, 'w': 3, 'h': 3, 't': 123 * 0.125, 'dist': max(0, 8 - 123 % 9), 'steps': 123,
+                         'bumps': 123 // 7, 'layout': False},
+          '/status shows the newest snapshot\'s maze_id, size, time, distance, steps, bumps and whether it carried walls',
+          json.dumps(st['maze']))
+
+    section('Rat Maze: caps and junk')
+    mark = len(V.msgs)
+    await P.send(maze_snap(200, layout=True, size=8193))             # over 8 KB
+    await P.send(maze_end(201, size=513))                            # over 512 B
+    await P.send(maze_snap(202, layout=True, walls='0f0f0f0f'))      # walls of the wrong length (3x3 needs 9)
+    await P.send(maze_snap(203, layout=True, walls='0f0f0f0fg'))     # not hex
+    await P.send(maze_snap(204, maze_id='7'))                        # maze_id not an int
+    await P.send(maze_snap(205, w=0))                                # a zero-width maze
+    await P.send(maze_snap(206, h=65))                               # too tall (64 at most)
+    await P.send(maze_end(207, 'maybe'))                             # not escaped / timeout
+    await P.send(json.dumps({'type': 'maze_end', 'result': 'escaped'}))    # no maze_id
+    ok_snap, ok_ev = maze_snap(208, layout=True, size=8192), maze_end(209, 'timeout', size=512)
+    await P.send(ok_snap)
+    await P.send(ok_ev)
+    await until(lambda: any(m == ok_ev for _, m in V.msgs[mark:]), 3)
+    got = [m for _, m in V.msgs[mark:] if isinstance(m, str)]
+    check(got == [ok_snap, ok_ev], 'an 8,192-byte snapshot and a 512-byte event pass; bigger ones, bad walls, a bad '
+          'maze_id or size, and an event without an escaped / timeout result or a maze_id are dropped',
+          str([mkind(m) for m in got]))
+    c = (await status())['counts']
+    check(c.get('dropped_maze_too_big') == 1 and c.get('dropped_maze_end_too_big') == 1 and c.get('dropped_bad_maze') == 5
+          and c.get('dropped_bad_maze_end') == 2 and not c.get('dropped_error'), 'each is counted in /status',
+          json.dumps({k: v for k, v in c.items() if 'maze' in k}))
+
+    section('Rat Maze: at most 10 position snapshots a second per viewer; layout snapshots and maze_end are never dropped')
+    await asyncio.sleep(0.5)                                         # the per-viewer burst refills
+    mark = len(V.msgs)
+    c0 = (await status())['counts'].get('maze_dropped_for_rate', 0)
+    N = 90
+    t0 = time.perf_counter()
+    for k in range(N):                                               # 30 snapshots a second for 3 s, a new maze every 30
+        d = t0 + k / 30 - time.perf_counter()
+        if d > 0:
+            await asyncio.sleep(d)
+        await P.send(maze_snap(1000 + k, maze_id=10 + k // 30, layout=(k % 30 == 0)))
+        await P.send(maze_end(1000 + k))
+    span = time.perf_counter() - t0
+    await until(lambda: any(mkind(m) == ('maze_end', 1000 + N - 1) for _, m in V.msgs[mark:] if isinstance(m, str)), 3)
+    seq = [(t, mkind(m), is_layout(m)) for t, m in V.msgs[mark:] if isinstance(m, str)]
+    evs = [k for _, (kind, k), _ in seq if kind == 'maze_end']
+    lays = [k for _, (kind, k), lay in seq if kind == 'maze' and lay]
+    snaps = [(t, k) for t, (kind, k), lay in seq if kind == 'maze' and not lay]
+    check(evs == list(range(1000, 1000 + N)), f'all {N} maze_end events arrive, in order', f'{len(evs)}/{N}')
+    check(lays == [1000, 1030, 1060], 'all 3 layout snapshots (the ones with walls) arrive', str(lays))
+    lo, hi = int(10 * span) - 2, int(10 * span + 3) + 1
+    check(lo <= len(snaps) <= hi, f'{len(snaps)} of {N - 3} position snapshots reach the viewer in {span:.2f} s '
+          f'(10 a second, plus a burst of 3)', f'allowed {lo}..{hi}')
+    win = max((sum(1 for u, _ in snaps if t <= u < t + 1.0) for t, _ in snaps), default=0)
+    check(win <= 13, 'no one-second window carries more than 10 + the burst of 3', f'max {win} in a second')
+    ks = [k for _, k in snaps]
+    order = [kind_k for _, kind_k, _ in seq]
+    check(ks == sorted(ks) and all(order.index(('maze', k)) + 1 == order.index(('maze_end', k)) for k in ks + lays),
+          'the snapshots that pass stay in order, each straight ahead of its own maze_end')
+    c = (await status())['counts']
+    check(c.get('maze_dropped_for_rate', 0) - c0 == N - 3 - len(snaps), '/status counts the snapshots dropped for rate',
+          f"{c.get('maze_dropped_for_rate', 0) - c0}")
+
+    section('Rat Maze: a late joiner gets the current maze\'s layout, then the newest snapshot (never the events)')
+    await asyncio.sleep(0.5)
+    lay7 = maze_snap(500, maze_id=7, w=5, h=4, layout=True)
+    await P.send(make_frame(500))
+    await P.send(lay7)
+    for k in (501, 502, 503):
+        await P.send(maze_snap(k, maze_id=7, w=5, h=4))
+    last_ev = maze_end(7)
+    await P.send(last_ev)
+    await until(lambda: any(m == last_ev for _, m in V.msgs), 3)
+    L = await Rec('L').start()
+    closers.append(L.close)
+    await until(lambda: len(L.msgs) >= 4, 3)
+    await asyncio.sleep(0.3)
+    m = [x for _, x in L.msgs]
+    s0 = strict(m[0]) if m and isinstance(m[0], str) else {}
+    check(len(m) == 4 and s0.get('type') == 'state' and s0.get('live') is True and m[1] == make_frame(500)
+          and m[2] == lay7 and m[3] == maze_snap(503, maze_id=7, w=5, h=4),
+          'it gets: the state, the last frame, the layout snapshot, then the newest snapshot, verbatim',
+          str([('text', strict(x).get('type'), is_layout(x)) if isinstance(x, str) else 'frame' for x in m]))
+    check(set(s0) == {'type', 'live', 'hello', 'checkpoint', 'episode', 'history'} and s0.get('history') == rows,
+          'the state itself is unchanged: its history holds only the log rows')
+    st = await status()
+    check(st['maze'] == {'maze_id': 7, 'w': 5, 'h': 4, 't': 503 * 0.125, 'dist': max(0, 8 - 503 % 9), 'steps': 503,
+                         'bumps': 503 // 7, 'layout': False}, '/status shows the newest snapshot', json.dumps(st['maze']))
+    lay8 = maze_snap(600, maze_id=8, w=4, h=4, layout=True)
+    await P.send(lay8)                                               # a new maze: its layout is the newest snapshot
+    await until_status(lambda s: s['maze'] and s['maze']['maze_id'] == 8, 3)
+    L2 = await Rec('L2').start()
+    closers.append(L2.close)
+    await until(lambda: len(L2.msgs) >= 3, 3)
+    await asyncio.sleep(0.3)
+    m = [x for _, x in L2.msgs]
+    check(len(m) == 3 and m[1] == make_frame(500) and m[2] == lay8,
+          'when the newest snapshot is the layout itself, it is sent once', f'{len(m)} messages')
+    await P.send(maze_snap(700, maze_id=9, w=4, h=4))                # a maze whose layout never came (position only)
+    await until_status(lambda s: s['maze'] and s['maze']['maze_id'] == 9, 3)
+    L3 = await Rec('L3').start()
+    closers.append(L3.close)
+    await until(lambda: len(L3.msgs) >= 3, 3)
+    await asyncio.sleep(0.3)
+    m = [x for _, x in L3.msgs]
+    check(len(m) == 3 and m[2] == maze_snap(700, maze_id=9, w=4, h=4),
+          'a position snapshot of a maze whose layout never came is replayed alone (no stale layout of another maze)',
+          f'{len(m)} messages')
+
+    section('Rat Maze: a slow viewer holds one unsent position snapshot at most; layouts and events all get through')
+    D = RawViewer('D', 'stuck', rcvbuf=4096)
+    raws.append(D)
+    D.start()
+    await until_status(lambda s: s['viewers'] == 5, 3)
+    for i in range(150):                                             # fill D's socket and the relay's send buffer
+        await P.send(make_frame(3000 + i))
+        await asyncio.sleep(0.02)
+    c0 = (await status())['counts'].get('maze_replaced_for_slow_viewers', 0)
+    vmark = len(V.msgs)
+    sent = []
+    t0 = time.perf_counter()
+    for k in range(20):                                              # 8 Hz, as the publisher sends them
+        d = t0 + k * 0.125 - time.perf_counter()
+        if d > 0:
+            await asyncio.sleep(d)
+        s, e = maze_snap(2000 + k, maze_id=20 + k // 10, layout=(k % 10 == 0)), maze_end(2000 + k)
+        await P.send(s)
+        await P.send(e)
+        sent += [s, e]
+    D.mode = 'fast'
+    want_last = maze_end(2019)
+    await until(lambda: any(kind == 'text' and p == want_last for _, kind, p in D.msgs), 8)
+    dt = [p for _, kind, p in D.msgs if kind == 'text' and mkind(p) and mkind(p)[1] >= 2000]
+    it = iter(sent)
+    subseq = all(any(x == y for y in it) for x in dt)
+    d_snaps = [mkind(p)[1] for p in dt if mkind(p)[0] == 'maze' and not is_layout(p)]
+    d_lays = [mkind(p)[1] for p in dt if is_layout(p)]
+    d_evs = [mkind(p)[1] for p in dt if mkind(p)[0] == 'maze_end']
+    check(d_evs == list(range(2000, 2020)), 'the slow viewer gets every maze_end event, in order', f'{len(d_evs)}/20')
+    check(d_lays == [2000, 2010], 'and both layout snapshots', str(d_lays))
+    check(subseq and d_snaps and d_snaps[-1] == 2019 and len(d_snaps) < 18,
+          'it gets fewer position snapshots, ending on the newest, and everything in the order it was sent',
+          f'{len(d_snaps)} of 18 position snapshots, last {d_snaps[-1] if d_snaps else "-"}')
+    c = (await status())['counts']
+    check(c.get('maze_replaced_for_slow_viewers', 0) > c0 and not D.eof,
+          '/status counts the replaced snapshots; the slow viewer stays connected',
+          f"{c.get('maze_replaced_for_slow_viewers', 0) - c0} replaced")
+    got_v = [m for _, m in V.msgs[vmark:] if isinstance(m, str)]
+    check(got_v == sent, 'the fast viewer still got all 20 snapshots and 20 events', f'{len(got_v)}/40')
+
+    section('Rat Maze: after bye, and in the next run, no old snapshot is replayed')
+    await P.send(json.dumps({'type': 'bye'}))
+    await until(lambda: V.find_text(lambda d: d.get('type') == 'idle') is not None, 3)
+    G = await Rec('G').start()
+    closers.append(G.close)
+    await until(lambda: len(G.msgs) >= 1, 3)
+    await asyncio.sleep(0.3)
+    check(len(G.msgs) == 1 and strict(G.msgs[0][1]).get('live') is False,
+          'a viewer joining after the bye gets the state (live=false) and no snapshot')
+    await P.send(json.dumps(MAZE_HELLO2))
+    await until_status(lambda s: s['hello'] == MAZE_HELLO2, 3)
+    H2 = await Rec('H2').start()
+    closers.append(H2.close)
+    await until(lambda: len(H2.msgs) >= 1, 3)
+    await asyncio.sleep(0.3)
+    st = await status()
+    check(len(H2.msgs) == 1 and strict(H2.msgs[0][1]).get('live') is True and st['maze'] is None,
+          'a new maze run starts without the old run\'s snapshots (or frame)')
+    await P.send(maze_snap(9000, maze_id=90, layout=True))
+    await until(lambda: any(mkind(m) == ('maze', 9000) for _, m in H2.msgs if isinstance(m, str)), 3)
+    check(True, 'its first (layout) snapshot goes straight through')
+
+
 async def amain():
     await main_relay()
     await pons_relay()
     await tiles_relay()
+    await maze_relay()
     await other_relays()
 
 
