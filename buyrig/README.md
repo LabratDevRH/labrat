@@ -86,3 +86,36 @@ for there to be anything to buy. The steps, the order and how to stop are in `li
 | `BUYBACK_RH_KEY` | the buyback wallet's private key. Use a sealed variable. Only the runner and a LIVE session's own process get it; it leaves the session's environment before Chromium starts, and a simulated session or the replay never gets it |
 | `BUYRIG_CLEAR_STOP` | after LIVE stopped itself: the stop's id, once an operator checked why (`python live/buyrig_live.py --status` shows it) |
 | `BUYRIG_ANCHOR_NONCE` | after a transaction was sent from the wallet outside the rig: the wallet's current nonce |
+
+## BURNS (the maze's hourly burn): switched off
+
+The burn engine (`live/burn.py`, service `labrat-burn`) counts the maze's escapes and, every UTC hour, books ONE burn
+of at most 5 % of the buyback wallet's $LABRAT (x the hour's escape rate). It holds no key. This service executes
+those bookings, because it holds the only key, through the same LIVE journal, nonce account, failure count and stop as
+the buys: `live/buyrig_runner.py --burn-status-url <the burn engine's /status>` polls its bookings and, for each booked
+burn once, runs the child `python live/buyrig_live.py --burn --window <hour> --amount-wei <wei>` (no browser). The
+child re-checks every gate, reads the token bytecode (LABRAT dispatches `burn(uint256)`, checked 2026-09-26, so a real
+burn that reduces totalSupply; a token without it would get `transfer` to `0x…dEaD`), re-reads the wallet's LABRAT
+balance and refuses anything over 5 % of it, simulates the exact transaction from the wallet, and signs at most one
+transaction for the burn window (`windows/burn_<hour>.lock`, `"kind": "burn"` in the journal). Burns are handled after
+the buys of the same poll, in the same thread, and the journal signs nothing while any signed transaction is
+unresolved: a burn never runs concurrently with a buy. Each mined burn is reported to the burn engine
+(`POST /burn_report`, Bearer `BURN_RIG_TOKEN`, body `{window, tx, amount, amount_wei, method, signed_at}`), which
+verifies it on chain before counting it.
+
+With any variable below missing the burn side is a no-op: the runner never reads the burn engine, and a child started
+by hand prints an "off" result and touches nothing (`--burn` is a no-op without the gates).
+
+| variable (BURNS only) | |
+|---|---|
+| `BURN_STATUS_URL` | the burn engine's public status, e.g. `https://labrat-burn-production.up.railway.app/status` (the image passes it as `--burn-status-url`). Unset: no burns, whatever else is set |
+| `BURN_LIVE` | `1` switches burns on (with the two below and `BUYBACK_RH_KEY`) |
+| `BURN_CONFIRM` | `LABRAT` |
+| `BURN_RIG_TOKEN` | a shared secret of 24+ characters, set on **both** this service and `labrat-burn` (its `POST /burn_report`). Unset: falls back to `BUYBACK_RIG_TOKEN`; with neither, burns run but cannot be reported |
+| `BURN_METHOD` | optional: `auto` (default; the token bytecode decides), `burn` or `transfer` |
+| `BUYBACK_RH_KEY` | the same key as for LIVE buys; a burn child is the only other process that gets it |
+
+`BUYRIG_LIVE` / `BUYRIG_CONFIRM` are not needed for burns (and `BURN_LIVE` / `BURN_CONFIRM` not for buys): each side
+has its own two switches and both share the key, the journal and the stop. `python live/buyrig_live.py --status` lists
+burn windows with `"kind": "burn"`, the amount and `burned_total_labrat`; `--abandon <window> --kind burn` is the
+operator's step for a signed burn whose nonce another transaction used.

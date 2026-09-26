@@ -14,8 +14,20 @@ out on the next start, nothing is signed again), a signed buy that never landed 
 elsewhere (LIVE stops), tampered from / to / value / token / amount (refused, nothing signed, LIVE stops), a short balance
 and the two-failures stop, the runner's LIVE batches (run once with --live --window, reported, verified by the engine,
 retried on 503, recovered after a crash), and the key never in any output. The signer is buyback_test.MockSigner (an
-address, no key), except in two tests that sign with a key made in the test itself (Account.create(), never funded)
-against the in-memory fake chain: the real transaction format, and the key-leak scan.
+address, no key), except in the tests that sign with a key made in the test itself (Account.create(), never funded)
+against the in-memory fake chain: the real transaction format, and the key-leak scans.
+
+BURNS (the maze's hourly burn, executed by this rig for live/burn.py; switched off in the product; mocks only, on a
+BurnChain that adds the burnable token): the token method from the bytecode (burn(uint256) preferred, transfer to
+dead otherwise), every tampered burn transaction refused, one burn journalled 'reserved' -> 'signed' before the
+broadcast and verified by its receipt (a real burn shrinks the supply), one burn per window across restarts beside
+the same hour's buy (two slots, one nonce account), a crash between signing and broadcasting (the identical bytes
+again, nothing new signed, not even the buy), amounts over 5 % of the wallet's balance and tampered builds refused
+with a stop, an expired burn and the two-failures stop, the receipt rules, every gate falling back to a NO-OP (no
+chain read, nothing journalled, the key gone from the environment; also through the CLI), the child's whole path with
+a key made here and the key in no output, and the runner (each booked burn once, reported, 503 retried, a crashed
+child resolved, no-op children counted, a stopped LIVE skipping, only a live burn engine and valid rows, buys then
+burns in turn on one nonce account, the child command and its environment).
 
 NOTHING here reads .env, holds a funded key, signs or sends a transaction (buyback_test's traps):
   * opening any file named .env raises and is recorded; launcher.read_env_file / launcher.config are tripwires
@@ -1849,6 +1861,958 @@ class TestLiveRunner(LiveBase):
         for over in ({'signed': False}, {'sent': False}, {'tx': None}, {'ok': False}, {'dev_oracle': True}):
             self.assertIsNotNone(rn.reportable({**good, **over}), over)
         self.assertIsNotNone(rn.reportable({**good, 'mode': 'DRY'}), 'a DRY session never signs')
+
+
+# ---------------------------------------------------------------------------------------------------- BURNS (mocked)
+WALLET_LABRAT = 10_000_000 * 10 ** 18         # what the fake buyback wallet holds
+BURN_WEI = 500_000 * 10 ** 18                 # the booked burn in these tests: exactly 5 % of it
+SUPPLY = 10 ** 27                             # 1,000,000,000 LABRAT
+
+
+class BurnChain(bt.FakeChain):
+    """FakeChain plus the LABRAT token as a burnable ERC-20: its bytecode (PUSH4 selectors), balanceOf, totalSupply,
+    burn(uint256) (when has_burn) and transfer(address,uint256), with the Transfer log a burn (to the zero address)
+    or a transfer to dead leaves in its receipt. eth_call reverts as the real token does (checked 2026-09-26)."""
+
+    def __init__(self, has_burn=True):
+        super().__init__()
+        self.has_burn = has_burn
+        self.token_balances = {bl.WALLET: WALLET_LABRAT}
+        self.total_supply = SUPPLY
+        self.burn_reverts = None              # a revert every burn() / transfer() gets (a paused token)
+
+    def code(self):
+        sels = ['70a08231', 'a9059cbb', '18160ddd'] + (['42966c68'] if self.has_burn else [])
+        return '0x6080604052' + ''.join('63' + s + '14' for s in sels) + '00'
+
+    def __call__(self, method, params, all_rpcs_on_error=False):
+        if method == 'eth_getCode':
+            self.log.append((method, to_checksum_address(params[0]), ''))
+            return (self.code() if to_checksum_address(params[0]) == bb.TOKEN else '0x'), None
+        if method == 'eth_estimateGas' and to_checksum_address(params[0].get('to')) == bb.TOKEN:
+            self.log.append((method, bb.TOKEN, params[0].get('data', '')[:10]))
+            _res, err = self._token_call(params[0])
+            if err:
+                return None, err
+            return ('0x84b5' if params[0]['data'][:10] == bl.SEL_BURN else '0xc9b1'), None   # as on chain
+        return super().__call__(method, params, all_rpcs_on_error)
+
+    def _token_call(self, c):
+        data, sel = c['data'], c['data'][:10]
+        frm = to_checksum_address(c['from']) if c.get('from') else None
+        if sel == bl.SEL_BALANCE_OF:
+            return bt.W(self.token_balances.get(to_checksum_address('0x' + data[-40:]), 0)), None
+        if sel == '0x18160ddd':
+            return bt.W(self.total_supply), None
+        if (sel == bl.SEL_BURN and self.has_burn) or sel == bl.SEL_TRANSFER:
+            if int(c.get('value', '0x0'), 16):
+                return None, bt.rev('0x')
+            if self.burn_reverts:
+                return None, self.burn_reverts
+            method, to, amount = bl.decode_burn(data)
+            if method == 'transfer' and to == bb.ZERO:
+                return None, bt.rev('0xec442f05' + bt.W(0)[2:])                   # ERC20InvalidReceiver(0)
+            have = self.token_balances.get(frm, 0)
+            if amount > have:
+                return None, bt.rev('0xe450d38c' + bt.W(bt.A(frm), have, amount)[2:])   # ERC20InsufficientBalance
+            return (bt.W(1) if method == 'transfer' else '0x'), None
+        return None, bt.rev('0x')                                                 # no such function
+
+    def _call(self, c, override, log=True):
+        if to_checksum_address(c['to']) == bb.TOKEN and c['data'][:10] != bb.SEL['curve']:
+            return self._token_call(c)
+        return super()._call(c, override, log)
+
+    def mine(self, txh, tx=None):
+        tx = tx or self.pending_txs.pop(txh)
+        self.pending_txs.pop(txh, None)
+        if to_checksum_address(tx['to']) != bb.TOKEN:
+            return super().mine(txh, tx)
+        frm = to_checksum_address(tx.get('from') or bb.WALLET)
+        method, to, amount = bl.decode_burn(tx['data'])
+        logs, status = [], 1
+        gas_used = 33_900 if method == 'burn' else 51_500
+        if (int(tx['value']) or amount > self.token_balances.get(frm, 0) or (method == 'burn' and not self.has_burn)
+                or self.burn_reverts):
+            status = 0
+        else:
+            self.token_balances[frm] -= amount
+            if method == 'burn':
+                self.total_supply -= amount
+                dest = bb.ZERO
+            else:
+                dest = to
+                self.token_balances[dest] = self.token_balances.get(dest, 0) + amount
+            logs.append({'address': bb.TOKEN, 'topics': [bb.TRANSFER_TOPIC, '0x' + bb.pad_addr(frm),
+                                                         '0x' + bb.pad_addr(dest)], 'data': bt.W(amount)})
+        self._debit(frm, gas_used * self.gas_price)
+        self.nonce += 1
+        self.block += 1
+        self.receipts[txh] = {'transactionHash': txh, 'status': hex(status), 'gasUsed': hex(gas_used),
+                              'effectiveGasPrice': hex(self.gas_price), 'blockNumber': hex(self.block), 'logs': logs,
+                              'from': frm.lower(), 'to': bb.TOKEN.lower()}
+        self.mined[txh] = {'hash': txh, 'from': frm.lower(), 'to': bb.TOKEN.lower(), 'value': hex(int(tx['value'])),
+                           'input': tx['data'], 'nonce': hex(int(tx['nonce'])), 'blockNumber': hex(self.block)}
+
+
+class BurnBase(LiveBase):
+    """LiveBase on a BurnChain (the token is burnable, the wallet holds 10M LABRAT and 1 ETH, nonce 0)."""
+
+    def setUp(self):
+        super().setUp()
+        self.chain = self.fresh_chain()
+
+    def fresh_chain(self, has_burn=True):
+        c = BurnChain(has_burn)
+        c.buyback_balance = 10 ** 18
+        c.nonce = bl.FIRST_NONCE
+        return c
+
+    def burner(self, window=None, amount=BURN_WEI, method='auto', signer=None, journal=None, chain=None, **kw):
+        kw.setdefault('sleep', lambda s: None)
+        kw.setdefault('receipt_wait_s', 0.3)
+        return bl.LiveBurner(signer or self.signer, self.rpc(chain), journal or self.journal, window or self.window,
+                             amount, method, log=self.logs.append, **kw)
+
+    def burn_env(self, key_hex):
+        return {bl.ENV_BURN_LIVE: '1', bl.ENV_BURN_CONFIRM: 'LABRAT', bl.ENV_KEY: '0x' + key_hex}
+
+    def run_burn(self, env, window='default', amount=BURN_WEI, method='auto', chain=None, journal=None, log=None):
+        ch = chain or self.chain
+        return bl.run_burn(self.window if window == 'default' else window, amount, method, environ=env,
+                           gate_rpc=bb.ReadRpc(ch), log=log or self.logs.append, transport=ch, nodes=[ch],
+                           journal=journal or self.journal, sleep=lambda s: None, receipt_wait_s=0.3)
+
+
+class TestBurnTx(BurnBase):
+    def test_the_token_method_and_the_calldata(self):
+        rpc = self.rpc()
+        self.assertEqual(bl.token_burn_method(rpc, 'auto'), 'burn', 'the token dispatches burn(uint256): preferred')
+        self.assertEqual(bl.token_burn_method(rpc, 'burn'), 'burn')
+        self.assertEqual(bl.token_burn_method(rpc, 'transfer'), 'transfer')
+        plain = self.fresh_chain(has_burn=False)
+        self.assertEqual(bl.token_burn_method(self.rpc(plain), 'auto'), 'transfer')
+        with self.assertRaises(bl.LiveRefused) as cm:
+            bl.token_burn_method(self.rpc(plain), 'burn')
+        self.assertEqual(cm.exception.kind, 'check')
+        with self.assertRaises(bl.LiveRefused):
+            bl.token_burn_method(rpc, 'incinerate')
+        self.assertTrue(bl.token_has_burn('0x6342966c6814'))
+        self.assertFalse(bl.token_has_burn('0x42966c68'), 'not a PUSH4: the bytes in some data')
+        self.assertFalse(bl.token_has_burn(None))
+        # the calldata, both ways
+        self.assertEqual(bl.decode_burn(bl.cd_burn(BURN_WEI)), ('burn', None, BURN_WEI))
+        self.assertEqual(bl.decode_burn(bl.cd_transfer(bl.DEAD, BURN_WEI)), ('transfer', bl.DEAD, BURN_WEI))
+        self.assertEqual(bl.burn_calldata('burn', 7), '0x42966c68' + '0' * 63 + '7')
+        self.assertEqual(bl.burn_calldata('transfer', 7), bl.cd_transfer(bl.DEAD, 7))
+        for bad in (bl.cd_burn(1) + 'ff', bl.cd_burn(1)[:-2], bb.SEL['execute'] + '0' * 64, '0x79cc6790' + '0' * 128,
+                    'zz', '0x', None, 42):
+            with self.assertRaises(ValueError, msg=str(bad)[:24]):
+                bl.decode_burn(bad)
+        with self.assertRaises(ValueError):
+            bl.burn_calldata('auto', 1)
+        tx = bl.build_burn_tx(3, bl.cd_burn(BURN_WEI), 42_467, 88_000_000)
+        self.assertEqual(tx, {'chainId': 4663, 'nonce': 3, 'to': bb.TOKEN, 'value': 0, 'data': bl.cd_burn(BURN_WEI),
+                              'gas': 42_467, 'maxFeePerGas': 88_000_000, 'maxPriorityFeePerGas': 0, 'type': 2})
+        checks = bl.check_burn_tx(tx, BURN_WEI, 'burn', bl.WALLET)
+        self.assertEqual(set(checks), set(bl.BURN_CHECKS))
+        self.assertTrue(all(v['ok'] for v in checks.values()), checks)
+
+    def test_every_tampered_burn_transaction_is_refused(self):
+        good = bl.build_burn_tx(0, bl.cd_burn(BURN_WEI), 42_467, 88_000_000)
+        cases = [
+            # (name, tx, booked amount, decided method, checks that must fail)
+            ('to: the router', dict(good, to=bb.ROUTER), BURN_WEI, 'burn', {'token'}),
+            ('to: missing', {k: v for k, v in good.items() if k != 'to'}, BURN_WEI, 'burn', {'token'}),
+            ('value: 1 wei', dict(good, value=1), BURN_WEI, 'burn', {'no_value'}),
+            ('amount: twice the booked', dict(good, data=bl.cd_burn(2 * BURN_WEI)), BURN_WEI, 'burn', {'amount'}),
+            ('amount: the booking doubled', good, 2 * BURN_WEI, 'burn', {'amount'}),
+            ('amount: over the absolute ceiling', dict(good, data=bl.cd_burn(bl.MAX_BURN_WEI + 1)),
+             bl.MAX_BURN_WEI + 1, 'burn', {'amount'}),
+            ('amount: dust', dict(good, data=bl.cd_burn(1)), 1, 'burn', {'amount'}),
+            ('method: a transfer when burn was decided', dict(good, data=bl.cd_transfer(bl.DEAD, BURN_WEI)),
+             BURN_WEI, 'burn', {'method'}),
+            ('method: a burn when transfer was decided', good, BURN_WEI, 'transfer', {'method'}),
+            ('transfer: to another address', dict(good, data=bl.cd_transfer(OTHER, BURN_WEI)), BURN_WEI, 'transfer',
+             {'recipient'}),
+            ('transfer: to the zero address', dict(good, data=bl.cd_transfer(bb.ZERO, BURN_WEI)), BURN_WEI,
+             'transfer', {'recipient'}),
+            ('selector: burnFrom', dict(good, data='0x79cc6790' + '0' * 128), BURN_WEI, 'burn',
+             {'method', 'amount', 'recipient'}),
+            ('trailing bytes', dict(good, data=bl.cd_burn(BURN_WEI) + 'ab'), BURN_WEI, 'burn', {'method'}),
+            ('calldata: not hex', dict(good, data='0xzz'), BURN_WEI, 'burn', {'method', 'amount'}),
+            ('chain 1', dict(good, chainId=1), BURN_WEI, 'burn', {'chain'}),
+            ('a priority fee', dict(good, maxPriorityFeePerGas=1), BURN_WEI, 'burn', {'chain'}),
+            ('a legacy transaction', dict(good, type=0), BURN_WEI, 'burn', {'chain'}),
+        ]
+        for name, tx, amount, method, want in cases:
+            with self.subTest(name):
+                res = bl.check_burn_tx(tx, amount, method, bl.WALLET)
+                failed = {k for k, v in res.items() if not v['ok']}
+                self.assertTrue(want <= failed, f'{name}: failed {failed}, expected {want}')
+        self.assertFalse(bl.check_burn_tx(good, BURN_WEI, 'burn', OTHER)['wallet']['ok'], 'another signer')
+        self.assertTrue(all(v['ok'] for v in bl.check_burn_tx(good, BURN_WEI, 'burn').values()))
+
+
+class TestLiveBurner(BurnBase):
+    def test_one_burn_journalled_before_it_is_broadcast_and_verified(self):
+        seen = {}
+
+        def on_send(raw, txh):                        # at the broadcast: 'reserved' and 'signed' are already on disk
+            with open(self.journal.path, encoding='utf-8') as f:
+                lines = [json.loads(ln) for ln in f]
+            seen['evs'] = [(r['ev'], r.get('kind')) for r in lines]
+            seen['raw'], seen['txh'] = raw, txh
+        self.chain.on_send = on_send
+        b = self.burner()
+        self.assertEqual(b.preflight(), {'nonce': 0})
+        sent = b.sign_and_send()
+        self.assertEqual(seen['evs'], [('reserved', 'burn'), ('signed', 'burn')], 'reserved, signed, then broadcast')
+        self.assertEqual((sent['tx'], sent['broadcast'], sent['error']), (seen['txh'], True, None))
+        self.assertTrue(self.journal.lock_path(self.window, 'burn').exists())
+        self.assertFalse(self.journal.lock_path(self.window).exists(), "the hour's BUY slot is untouched")
+        tx, = self.signer.signed                      # ONE transaction: to the token, no ETH, burn(amount)
+        gp = self.chain.gas_price
+        self.assertEqual(tx, {'chainId': 4663, 'nonce': 0, 'to': bb.TOKEN, 'value': 0, 'data': bl.cd_burn(BURN_WEI),
+                              'gas': -(-33_973 * 5 // 4), 'maxFeePerGas': min(2 * gp, bl.MAX_FEE_CAP_WEI),
+                              'maxPriorityFeePerGas': 0, 'type': 2})
+        self.assertTrue(all(v['ok'] for v in b.checks.values()))
+        info = b.wait_receipt()
+        self.assertTrue(info['ok'])
+        self.assertEqual((info['burned_wei'], info['burn_to']), (BURN_WEI, 'zero'))
+        self.assertEqual(self.chain.token_balances[bl.WALLET], WALLET_LABRAT - BURN_WEI)
+        self.assertEqual(self.chain.total_supply, SUPPLY - BURN_WEI, 'a real burn: the supply shrank')
+        st = self.journal.state()
+        self.assertTrue(st.burned(self.window))
+        self.assertFalse(st.bought(self.window))
+        self.assertEqual((st.expected_nonce(), st.failures), (1, 0))
+        self.assertEqual(st.executed(), [], 'not a buy')
+        self.assertEqual(st.executed_burns(), [{'window': self.window, 'tx': sent['tx'], 'amount_wei': BURN_WEI,
+                                                'burned_wei': BURN_WEI, 'method': 'burn', 'block': self.chain.block,
+                                                'signed_at': self.recs('signed')[0]['at']}])
+        self.assertEqual(st.burned_total_wei(), BURN_WEI)
+        self.assertEqual([(r['ev'], r['kind']) for r in self.recs()],
+                         [(ev, 'burn') for ev in ('reserved', 'signed', 'sent', 'receipt')])
+        self.assertNotIn('raw', json.dumps(bl.status(self.journal)))
+        row, = bl.status(self.journal)['windows']
+        self.assertEqual((row['kind'], row['state'], row['labrat'], row['method'], row['labrat_burned']),
+                         ('burn', 'burned', '500000', 'burn', '500000'))
+        self.assertEqual((bl.status(self.journal)['burns'], bl.status(self.journal)['burned_total_labrat']),
+                         (1, '500000'))
+        with self.assertRaises(bl.LiveRefused):          # this session had its one burn
+            b.sign_and_send()
+        self.assertEqual(len(self.signer.signed), 1)
+        # a token without burn(): transfer to the dead address, the supply unchanged
+        plain = self.fresh_chain(has_burn=False)
+        j2 = bl.Journal(Path(self.tmp) / 'plain' / 'live_journal.jsonl')
+        b2 = self.burner(journal=j2, chain=plain)
+        b2.sign_and_send()
+        self.assertEqual(self.signer.signed[-1]['data'], bl.cd_transfer(bl.DEAD, BURN_WEI))
+        info2 = b2.wait_receipt()
+        self.assertEqual((info2['ok'], info2['burn_to']), (True, 'dead'))
+        self.assertEqual((plain.token_balances[bl.DEAD], plain.total_supply), (BURN_WEI, SUPPLY))
+        self.assertEqual(j2.state().executed_burns()[0]['method'], 'transfer')
+
+    def test_one_burn_per_window_across_restarts_and_beside_the_hours_buy(self):
+        b = self.burner()
+        b.sign_and_send()
+        b.wait_receipt()
+        for name in ('the next process', 'another one'):
+            with self.subTest(name):
+                with self.assertRaises(bl.LiveRefused) as cm:          # a restart: a new journal object, same file
+                    self.burner(journal=bl.Journal(self.journal.path)).preflight()
+                self.assertIn('already has its transaction', str(cm.exception))
+                self.assertEqual(cm.exception.kind, 'blocked')
+        # the same hour's BUY is another slot: signed at the next nonce; then neither can be signed again
+        buyer = self.buyer(journal=bl.Journal(self.journal.path))
+        self.assertEqual(buyer.preflight(), {'nonce': 1})
+        buyer.sign_and_send(self.data(), int(time.time()) + 1200)
+        self.assertTrue(buyer.wait_receipt()['ok'])
+        st = self.journal.state()
+        self.assertTrue(st.bought(self.window) and st.burned(self.window))
+        self.assertEqual(st.expected_nonce(), 2)
+        self.assertEqual(sorted(st.windows), sorted([self.window, f'burn:{self.window}']))
+        self.assertEqual(len(st.executed()), 1)
+        self.assertEqual(len(st.executed_burns()), 1)
+        for make in (self.buyer, self.burner):
+            with self.assertRaises(bl.LiveRefused):
+                make(journal=bl.Journal(self.journal.path)).preflight()
+        # the lock file alone refuses (a journal line lost), the journal line alone refuses (a lock file lost), and a
+        # reserved burn does not touch the hour's buy slot
+        w2 = live_window(hours_ahead=1)
+        clock2 = lambda: time.time() + 3600           # noqa: E731
+        fresh = self.fresh_chain()
+        j2 = bl.Journal(Path(self.tmp) / 'j2' / 'live_journal.jsonl')
+        j2.lock_dir.mkdir(parents=True)
+        j2.lock_path(w2, 'burn').write_text('{}', encoding='utf-8')
+        with self.assertRaises(bl.LiveRefused) as cm:
+            self.burner(window=w2, journal=j2, chain=fresh, clock=clock2).preflight()
+        self.assertIn('already has its transaction', str(cm.exception))
+        j3 = bl.Journal(Path(self.tmp) / 'j3' / 'live_journal.jsonl')
+        j3.append({'ev': 'reserved', 'kind': 'burn', 'window': w2, 'amount_wei': BURN_WEI})
+        with self.assertRaises(bl.LiveRefused):
+            self.burner(window=w2, journal=j3, chain=fresh, clock=clock2).preflight()
+        self.assertEqual(bl.LiveBuyer(self.signer, self.rpc(fresh), j3, w2, LIVE_WEI, clock=clock2).preflight(),
+                         {'nonce': 0}, "a reserved burn leaves the hour's buy slot free")
+        # two processes past the preflight at once: the exclusive lock lets only one reserve the burn
+        j4 = bl.Journal(Path(self.tmp) / 'j4' / 'live_journal.jsonl')
+        j4.reserve(w2, {'amount_wei': BURN_WEI}, 'burn')
+        with self.assertRaises(bl.LiveRefused):
+            j4.reserve(w2, {'amount_wei': BURN_WEI}, 'burn')
+        j4.reserve(w2, {'amount_wei': LIVE_WEI})                    # the buy slot of the same hour is its own
+        self.assertEqual(len(self.signer.signed), 2)
+        self.assertEqual(len(self.chain.sent), 2)
+
+    def test_a_crash_between_signing_and_broadcasting_a_burn(self):
+        """The process dies after 'signed' is on disk and before eth_sendRawTransaction: the next start sends the
+        IDENTICAL bytes, never signs again, and meanwhile nothing else (not even the hour's buy) is signed."""
+        b = self.burner()
+
+        def die(raw):
+            raise Crash('killed at the broadcast')
+        b.rpc.send_raw = die
+        with self.assertRaises(Crash):
+            b.sign_and_send()
+        self.assertEqual([(r['ev'], r['kind']) for r in self.recs()], [('reserved', 'burn'), ('signed', 'burn')])
+        self.assertEqual(self.chain.sent, [], 'nothing left the machine')
+        signed_raw = self.recs('signed')[0]['raw']
+        j = bl.Journal(self.journal.path)
+        with self.assertRaises(bl.LiveRefused) as cm:            # a BUY's preflight resolves the burn first
+            self.buyer(journal=j).preflight()
+        self.assertIn('not resolved yet', str(cm.exception))
+        self.assertEqual(self.chain.sent, [signed_raw], 'the identical signed bytes, nothing else')
+        out = bl.resolve(j, self.rpc(), self.logs.append)
+        self.assertEqual(out['resolved'], [f'burn:{self.window}'])
+        st = j.state()
+        self.assertTrue(st.burned(self.window))
+        self.assertEqual(st.unresolved(), {})
+        self.assertEqual(len(self.signer.signed), 1, 'never signed again')
+        self.assertEqual([r['ev'] for r in self.recs(journal=j)], ['reserved', 'signed', 'rebroadcast', 'receipt'])
+        with self.assertRaises(bl.LiveRefused):
+            self.burner(journal=j).preflight()                     # the burn window is used for good
+        self.assertEqual(self.buyer(journal=j).preflight(), {'nonce': 1}, "and the hour's buy may go now")
+        # a crash after the broadcast: finished by its receipt, no re-broadcast
+        c2 = self.fresh_chain()
+        c2.auto_mine = False
+        j2 = bl.Journal(Path(self.tmp) / 'j2' / 'live_journal.jsonl')
+        b2 = self.burner(journal=j2, chain=c2)
+        sent = b2.sign_and_send()
+        out = bl.resolve(j2, self.rpc(c2), self.logs.append)
+        self.assertEqual(out['pending'], [f'burn:{self.window}'], 'in the mempool: wait')
+        c2.mine(sent['tx'])
+        out = bl.resolve(j2, self.rpc(c2), self.logs.append)
+        self.assertEqual(out['resolved'], [f'burn:{self.window}'])
+        self.assertEqual(len(c2.sent), 1)
+        self.assertTrue(j2.state().burned(self.window))
+
+    def test_tampered_amounts_are_refused_and_live_stops(self):
+        # over 5 % of the wallet's LABRAT balance (read at signing): a check, nothing reserved, LIVE stops
+        over = WALLET_LABRAT * 5 // 100 + 10 ** 18
+        b = self.burner(amount=over)
+        with self.assertRaises(bl.LiveRefused) as cm:
+            b.sign_and_send()
+        self.assertEqual(cm.exception.kind, 'check')
+        self.assertIn('over 5% of the wallet', str(cm.exception))
+        self.assertEqual((self.signer.signed, self.chain.sent, self.recs()), ([], [], []))
+        bl.note_refusal(self.journal, self.window, cm.exception, self.logs.append, 'burn')
+        self.assertEqual(self.journal.state().stop['kind'], 'check')
+        with self.assertRaises(bl.LiveRefused):
+            self.buyer().preflight()                    # one stop for buys and burns
+        # exactly 5 % passes the ceiling (a fresh journal)
+        self.journal = bl.Journal(Path(self.tmp) / 'five' / 'live_journal.jsonl')
+        b = self.burner(amount=WALLET_LABRAT * 5 // 100)
+        b.sign_and_send()
+        self.assertTrue(b.wait_receipt()['ok'])
+        # the rig's own bounds and gates at construction
+        for bad in (0, -1, bl.MIN_BURN_WEI - 1, bl.MAX_BURN_WEI + 1):
+            with self.assertRaises(bl.LiveRefused, msg=bad):
+                bl.LiveBurner(self.signer, self.rpc(), self.journal, self.window, bad)
+        with self.assertRaises(bl.LiveRefused):
+            bl.LiveBurner(self.signer, self.rpc(), self.journal, self.window, BURN_WEI, 'incinerate')
+        with self.assertRaises(bl.LiveRefused):
+            bl.LiveBurner(bt.MockSigner(bb.WALLET), self.rpc(), self.journal, self.window, BURN_WEI)
+        with self.assertRaises(bl.LiveRefused):
+            bl.LiveBurner(self.signer, bb.ReadRpc(self.chain), self.journal, self.window, BURN_WEI)
+        # a build that comes out tampered (the amount, the target, the value, the recipient): refused before the
+        # reservation, nothing signed, LIVE stops
+        real_build = bl.build_burn_tx
+        tampers = [
+            ('amount', lambda tx: dict(tx, data=bl.cd_burn(2 * BURN_WEI))),
+            ('token', lambda tx: dict(tx, to=bb.ROUTER)),
+            ('value', lambda tx: dict(tx, value=10 ** 15)),
+            ('recipient', lambda tx: dict(tx, data=bl.cd_transfer(OTHER, BURN_WEI))),
+        ]
+        try:
+            for i, (name, tamper) in enumerate(tampers):
+                with self.subTest(name):
+                    bl.build_burn_tx = lambda *a, t=tamper: t(real_build(*a))
+                    c = self.fresh_chain()
+                    j = bl.Journal(Path(self.tmp) / f'tamper{i}' / 'live_journal.jsonl')
+                    b = self.burner(journal=j, chain=c)
+                    with self.assertRaises(bl.LiveRefused) as cm:
+                        b.sign_and_send()
+                    self.assertEqual(cm.exception.kind, 'check')
+                    self.assertIn('failed its checks', str(cm.exception))
+                    self.assertIn(name, str(cm.exception))
+                    self.assertEqual(c.sent, [])
+                    self.assertEqual(self.recs(journal=j), [], 'nothing reserved')
+                    bl.note_refusal(j, self.window, cm.exception, self.logs.append, 'burn')
+                    self.assertEqual(j.state().stop['kind'], 'check')
+        finally:
+            bl.build_burn_tx = real_build
+        self.assertEqual(len(self.signer.signed), 1)
+        # a token that reverts the burn (paused): a check failure too (nothing reserved)
+        c = self.fresh_chain()
+        c.burn_reverts = bt.rev('0xd93c0665', 'paused')
+        with self.assertRaises(bl.LiveRefused) as cm:
+            self.burner(journal=bl.Journal(Path(self.tmp) / 'paused' / 'j.jsonl'), chain=c).sign_and_send()
+        self.assertEqual(cm.exception.kind, 'check')
+        self.assertEqual(c.sent, [])
+
+    def test_a_burn_that_never_landed_expires_and_two_failures_stop_live(self):
+        self.chain.reject_sends = {'code': -32000, 'message': 'insufficient funds for gas * price + value'}
+        b = self.burner()
+        sent = b.sign_and_send()
+        self.assertIs(sent['broadcast'], False)
+        self.assertIsNone(b.wait_receipt(0))
+        out = bl.resolve(self.journal, self.rpc(), self.logs.append)     # within its time to live: the same bytes
+        self.assertEqual(out['pending'], [f'burn:{self.window}'])
+        self.assertEqual(self.chain.sent[0], self.chain.sent[1])
+        self.chain.ts = int(time.time()) + bl.BURN_TTL_S + bl.EXPIRE_MARGIN_S + 5
+        out = bl.resolve(self.journal, self.rpc(), self.logs.append)
+        self.assertEqual(out['resolved'], [f'burn:{self.window}'])
+        st = self.journal.state()
+        self.assertEqual((st.unresolved(), st.failures, st.expected_nonce()), ({}, 1, 0))
+        self.assertTrue(st.windows[f'burn:{self.window}']['expired'])
+        self.assertEqual(st.executed_burns(), [])
+        # the next hour: no ETH for gas -> a failed burn, the second in a row: LIVE stops (for buys too)
+        self.chain.reject_sends = None
+        self.chain.ts = int(time.time())
+        self.chain.buyback_balance = 0
+        w2 = live_window(hours_ahead=1)
+        b2 = self.burner(window=w2, clock=lambda: time.time() + 3600)
+        with self.assertRaises(bl.LiveRefused) as cm:
+            b2.sign_and_send()
+        self.assertEqual(cm.exception.kind, 'failure')
+        self.assertIn('under', str(cm.exception))
+        bl.note_refusal(self.journal, w2, cm.exception, self.logs.append, 'burn')
+        st = self.journal.state()
+        self.assertEqual((st.failures, st.stop['kind']), (2, 'failures'))
+        self.assertIn('a burn', st.stop['why'])
+        with self.assertRaises(bl.LiveRefused) as cm:
+            self.buyer(window=live_window(hours_ahead=2), clock=lambda: time.time() + 7200).preflight()
+        self.assertIn('LIVE is stopped', str(cm.exception))
+        self.assertEqual(len(self.signer.signed), 1)
+        # the operator clears the stop and funds the wallet: a mined burn resets the count
+        self.assertTrue(bl.clear_stop(self.journal, st.stop['id'], log=self.logs.append))
+        self.chain.buyback_balance = 10 ** 18
+        b3 = self.burner(window=live_window(hours_ahead=2), clock=lambda: time.time() + 7200)
+        b3.sign_and_send()
+        self.assertTrue(b3.wait_receipt()['ok'])
+        self.assertEqual(self.journal.state().failures, 0)
+
+    def test_the_receipt_rules(self):
+        base = {'status': '0x1', 'blockNumber': '0x10', 'gasUsed': '0x8400', 'effectiveGasPrice': '0x1', 'logs': [],
+                'from': bl.WALLET.lower(), 'to': bb.TOKEN.lower()}
+
+        def transfer(frm, to, amount):
+            return {'address': bb.TOKEN, 'topics': [bb.TRANSFER_TOPIC, '0x' + bb.pad_addr(frm), '0x' + bb.pad_addr(to)],
+                    'data': bt.W(amount)}
+        ok_zero = dict(base, logs=[transfer(bl.WALLET, bb.ZERO, BURN_WEI)])
+        ok_dead = dict(base, logs=[transfer(bl.WALLET, bl.DEAD, BURN_WEI)])
+        self.assertEqual((bl.read_burn_receipt(ok_zero, BURN_WEI)['ok'], bl.read_burn_receipt(ok_zero, BURN_WEI)['burn_to']),
+                         (True, 'zero'))
+        self.assertEqual((bl.read_burn_receipt(ok_dead, BURN_WEI)['ok'], bl.read_burn_receipt(ok_dead, BURN_WEI)['burn_to']),
+                         (True, 'dead'))
+        self.assertTrue(bl.read_burn_receipt(ok_zero)['ok'], 'no signed amount known: any burn from the wallet')
+        bad = [
+            ('reverted', dict(ok_zero, status='0x0')),
+            ('mined without a Transfer', base),
+            ('not the signed amount', dict(base, logs=[transfer(bl.WALLET, bb.ZERO, BURN_WEI - 1)])),
+            ('moved to a wallet, not burned', dict(base, logs=[transfer(bl.WALLET, OTHER, BURN_WEI)])),
+            ('burned from another wallet', dict(base, logs=[transfer(OTHER, bb.ZERO, BURN_WEI)])),
+            ('another token', dict(base, logs=[dict(transfer(bl.WALLET, bb.ZERO, BURN_WEI), address=bb.CURVE)])),
+            ('to another contract', dict(ok_zero, to=bb.ROUTER.lower())),
+            ('from another address', dict(ok_zero, **{'from': OTHER.lower()})),
+        ]
+        for name, rc in bad:
+            with self.subTest(name):
+                self.assertFalse(bl.read_burn_receipt(rc, BURN_WEI)['ok'])
+        # booked: mined without the burn is a broken rule (stop); a revert is a failed burn
+        j = bl.Journal(Path(self.tmp) / 'rc' / 'live_journal.jsonl')
+        signed = {'tx': '0x' + 'cd' * 32, 'amount_wei': BURN_WEI}
+        bl.record_receipt(j, self.window, signed, base, self.logs.append, 'burn')
+        self.assertEqual(j.state().stop['kind'], 'check')
+        j2 = bl.Journal(Path(self.tmp) / 'rc2' / 'live_journal.jsonl')
+        j2.append({'ev': 'signed', 'kind': 'burn', 'window': self.window, **signed, 'raw': '0x', 'nonce': 0})
+        bl.record_receipt(j2, self.window, signed, dict(ok_zero, status='0x0'), self.logs.append, 'burn')
+        st = j2.state()
+        self.assertEqual((st.failures, st.expected_nonce(), st.burned(self.window)), (1, 1, False))
+
+
+class TestBurnGatesAndTheChild(BurnBase):
+    def test_every_gate_else_the_burn_is_a_no_op(self):
+        acct = Account.create()                      # a key made here: never funded, never the buyback wallet's
+        key = bytes(acct.key).hex()
+        other = bytes(Account.create().key).hex()
+        good = self.burn_env(key)
+        bl.WALLET = acct.address                     # this test's stand-in for the pinned wallet
+        wrong_chain = self.fresh_chain()
+        wrong_chain.chain_id = 1
+        cases = [
+            ('no window', dict(good), dict(window=None), '--window was not given'),
+            ('a window that is not an hour', dict(good), dict(window='2026-09-25T20:30:00Z'), 'UTC hour'),
+            ('BURN_LIVE missing', {k: v for k, v in good.items() if k != bl.ENV_BURN_LIVE}, {}, 'BURN_LIVE is not 1'),
+            ('BURN_LIVE=0', dict(good, **{bl.ENV_BURN_LIVE: '0'}), {}, 'BURN_LIVE is not 1'),
+            ('BURN_CONFIRM missing', {k: v for k, v in good.items() if k != bl.ENV_BURN_CONFIRM}, {}, 'BURN_CONFIRM'),
+            ('BURN_CONFIRM=labrat', dict(good, **{bl.ENV_BURN_CONFIRM: 'labrat'}), {}, 'BURN_CONFIRM'),
+            ('the BUY switches alone', {**key_env(key)}, {}, 'BURN_LIVE is not 1'),
+            ('no key', {k: v for k, v in good.items() if k != bl.ENV_KEY}, {}, 'is not set'),
+            ('a key that does not parse', dict(good, **{bl.ENV_KEY: 'not-a-key'}), {}, 'does not parse'),
+            ('the key of another wallet', dict(good, **{bl.ENV_KEY: other}), {}, 'not the key of the pinned'),
+            ('chain id 1', dict(good), dict(chain=wrong_chain), 'chain id 1'),
+        ]
+        for name, env, kw, why in cases:
+            with self.subTest(name):
+                res = self.run_burn(env, **kw)
+                self.assertEqual((res['mode'], res['verdict'], res['ok'], res['signed'], res['sent'], res['tx']),
+                                 ('OFF', 'burn_off', False, False, False, None))
+                self.assertIn(why, res['error'])
+                self.assertNotIn(bl.ENV_KEY, env, 'the key leaves the environment whatever the outcome')
+                self.assertNotIn(key, json.dumps(res).lower())
+                self.assertNotIn(other, json.dumps(res).lower())
+                self.assertEqual(self.recs(), [], 'nothing journalled')
+        methods = {m for m, _t, _s in self.chain.log} | {m for m, _t, _s in wrong_chain.log}
+        self.assertTrue(methods <= {'eth_chainId'}, f'a no-op reads nothing but the chain id: {methods}')
+        self.assertEqual((self.chain.sent, EXTRA_TRAPS['signs'], bt.TRAPS['signs']), ([], [], []))
+        # every gate holds but LIVE is stopped: refused (blocked), nothing signed, the stop is booked in the result
+        bl.stop(self.journal, 'an operator must look', self.window, 'check', log=self.logs.append)
+        res = self.run_burn(dict(good))
+        self.assertEqual((res['mode'], res['verdict'], res['refusal_kind'], res['signed']),
+                         ('LIVE', 'live_refused', 'blocked', False))
+        self.assertIn('LIVE is stopped', res['error'])
+        self.assertEqual(self.chain.sent, [])
+        # the runner's hooks: the burn gates alone open the burn side only, the buy gates the buy side only, both both
+        hooks, why = rn.live_hooks(dict(good), self.logs.append)
+        self.assertEqual((hooks.buys, hooks.burns, why), (False, True, ''))
+        self.assertIn('BUYRIG_LIVE', hooks.why_buys)
+        hooks, _ = rn.live_hooks({**key_env(key)}, self.logs.append)
+        self.assertEqual((hooks.buys, hooks.burns), (True, False))
+        hooks, _ = rn.live_hooks({**key_env(key), **good}, self.logs.append)
+        self.assertEqual((hooks.buys, hooks.burns), (True, True))
+        hooks, why = rn.live_hooks({bl.ENV_KEY: '0x' + key}, self.logs.append)
+        self.assertIsNone(hooks)
+        self.assertIn('burns: BURN_LIVE is not 1', why)
+        # the CLI with no gates in the process environment: the same no-op, exit 1, a result line without the key
+        for k in (bl.ENV_BURN_LIVE, bl.ENV_BURN_CONFIRM, bl.ENV_KEY):
+            self.assertNotIn(k, os.environ)
+        buf, old = io.StringIO(), sys.stdout
+        sys.stdout = buf
+        try:
+            rc = bl.main(['--burn', '--window', self.window, '--amount-wei', str(BURN_WEI), '--journal',
+                          str(self.journal.path)])
+        finally:
+            sys.stdout = old
+        line = next(ln for ln in buf.getvalue().splitlines() if ln.startswith('BURN_RESULT '))
+        res = json.loads(line[len('BURN_RESULT '):])
+        self.assertEqual((rc, res['mode'], res['verdict']), (1, 'OFF', 'burn_off'))
+        self.assertIn('BURN_LIVE is not 1', res['error'])
+        for argv in (['--burn', '--window', self.window], ['--burn', '--amount-wei', '5'],
+                     ['--burn', '--window', self.window, '--amount-wei', '0'],
+                     ['--burn', '--window', self.window, '--amount-wei', 'lots']):
+            with self.assertRaises(SystemExit):
+                bl.main(argv)
+        self.assertEqual(bt.TRAPS['launcher_rpc'], 0, 'a no-op never touched the real chain')
+
+    def test_the_child_burns_once_and_the_key_is_in_no_output(self):
+        """The whole burn path with a key made here (never funded) in the environment: the gates, the signer, a real
+        signature, the fake chain, the receipt, the result, the journal, the status, the runner's report. The key's
+        hex appears nowhere, and a second child for the same window is refused without signing."""
+        acct = Account.create()
+        key = bytes(acct.key).hex()
+        bl.WALLET = acct.address
+        self.chain.accept_signed = True
+        self.chain.token_balances[acct.address] = WALLET_LABRAT
+        env = self.burn_env(key)
+        trap = LocalAccount.sign_transaction
+        out_buf, err_buf = io.StringIO(), io.StringIO()
+        old_out, old_err = sys.stdout, sys.stderr
+        LocalAccount.sign_transaction = _REAL_SIGN_TX
+        logs = []
+        try:
+            sys.stdout, sys.stderr = out_buf, err_buf
+            res = self.run_burn(env, log=lambda m: logs.append(m) or print(m))
+            print(res)
+            b = bl.LiveBurner(acct, self.rpc(), bl.Journal(Path(self.tmp) / 'r' / 'j.jsonl'), self.window, BURN_WEI)
+            print(b, repr(b), b.redact(f'a line that somehow holds the key {key} and 0x{key.upper()}'))
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
+            LocalAccount.sign_transaction = trap
+        self.assertEqual((res['ok'], res['mode'], res['verdict'], res['signed'], res['sent'], res['method']),
+                         (True, 'LIVE', 'burned', True, True, 'burn'), res)
+        self.assertTrue(bl.HASH_RE.match(res['tx']))
+        self.assertEqual((res['burned'], res['amount'], res['amount_wei'], res['block']),
+                         (bb.eth_str(BURN_WEI, 18), bb.eth_str(BURN_WEI, 18), str(BURN_WEI), self.chain.block))
+        self.assertNotIn(bl.ENV_KEY, env)
+        # the raw transaction: the real EIP-1559 format, signed by the key made here, burn(amount) on the token
+        raw = self.recs('signed')[0]['raw']
+        d = self.chain.decode_raw(raw)
+        self.assertEqual((d['from'], d['to'], d['value'], d['data'], d['chainId'], d['nonce']),
+                         (acct.address, bb.TOKEN, 0, bl.cd_burn(BURN_WEI), 4663, 0))
+        self.assertEqual(self.chain.total_supply, SUPPLY - BURN_WEI)
+        report = rn.burn_report_body(self.journal.state().executed_burns()[0])
+        self.assertEqual({k: report[k] for k in ('window', 'tx', 'amount', 'amount_wei', 'method')},
+                         {'window': self.window, 'tx': res['tx'], 'amount': bb.eth_str(BURN_WEI, 18),
+                          'amount_wei': str(BURN_WEI), 'method': 'burn'})
+        texts = {'stdout': out_buf.getvalue(), 'stderr': err_buf.getvalue(),
+                 'journal': self.journal.path.read_text(encoding='utf-8'),
+                 'locks': ' '.join(p.read_text(encoding='utf-8') for p in self.journal.lock_dir.iterdir()),
+                 'result': json.dumps(res), 'logs': json.dumps(logs, default=str), 'report': json.dumps(report),
+                 'status': json.dumps(bl.status(self.journal))}
+        for where, text in texts.items():
+            self.assertNotIn(key, text.lower(), f'the key is in the {where}')
+        self.assertIn('<redacted>', texts['stdout'])
+        self.assertIn(res['tx'], texts['journal'])
+        # the second child for the same window (a restart, the booking still listed): refused, nothing signed again
+        res2 = self.run_burn(self.burn_env(key), journal=bl.Journal(self.journal.path))
+        self.assertEqual((res2['mode'], res2['verdict'], res2['refusal_kind'], res2['signed'], res2['tx']),
+                         ('LIVE', 'live_refused', 'blocked', False, None))
+        self.assertIn('already has its transaction', res2['error'])
+        self.assertEqual(len(self.chain.sent), 1)
+        self.assertEqual(self.journal.state().failures, 0, 'a blocked refusal is not a failed burn')
+
+
+class TestBurnRunner(BurnBase):
+    """The runner's burn side against a fake burn engine (fetch injected), with a fake child that does what
+    `buyrig_live.py --burn` does (a LiveBurner on the fake chain) and the buyback engine simulated (DRY) beside it."""
+
+    BURN_URL = 'https://burn.example/status'
+
+    def setUp(self):
+        super().setUp()
+        self.launched, self.burn_launched, self.answers = [], [], []
+        self.buy_status = status([])
+        self.burn_rows = []
+        # live/burn.py's public status: mode / simulated / bookings (the outstanding ones) / recent at the top level
+        self.burn_status = {'mode': 'LIVE', 'simulated': False, 'bookings': self.burn_rows, 'recent': self.burn_rows}
+        self.reads = []
+        self.now = time.time                          # the runner's and the fake child's clock (advanced together)
+
+    def advance(self, run, hours):
+        self.now = lambda: time.time() + 3600 * hours
+        run.clock = self.now
+
+    def fetch(self, url):
+        self.reads.append(url)
+        return self.burn_status if url == self.BURN_URL else self.buy_status
+
+    def fake_child(self, crash_at_broadcast=False, no_op=False):
+        def launch(row):
+            self.burn_launched.append((row['window'], row['amount_wei']))
+            if no_op:
+                return bl.burn_result(row['window'], row['amount_wei'], verdict='burn_off', error='BURN_LIVE is not 1')
+            try:
+                b = self.burner(window=row['window'], amount=row['amount_wei'], clock=lambda: self.now())
+                b.preflight()
+                if crash_at_broadcast:
+                    def die(raw):
+                        raise Crash('the child died at the broadcast')
+                    b.rpc.send_raw = die
+                    try:
+                        b.sign_and_send()
+                    except Crash:
+                        return None                                     # the child is gone: no result
+                sent = b.sign_and_send()
+            except bl.LiveRefused as e:                # as run_burn does: a check stops LIVE, a failure counts
+                bl.note_refusal(self.journal, row['window'], e, self.logs.append, 'burn')
+                return bl.burn_result(row['window'], row['amount_wei'], mode='LIVE', verdict='live_refused',
+                                      refusal_kind=e.kind, error=str(e)[:400])
+            info = b.wait_receipt()
+            return bl.burn_result(row['window'], row['amount_wei'], mode='LIVE', ok=bool(info and info['ok']),
+                                  signed=True, sent=True, tx=sent['tx'], block=info and info['block'], method='burn',
+                                  burned=bb.eth_str(info['burned_wei'], 18) if info else None,
+                                  verdict='burned' if info and info['ok'] else 'reverted')
+        return launch
+
+    def report(self, body):
+        self.answers.append(body)
+        return 200, {'ok': True}
+
+    def hooks(self, buys=True, burns=True):
+        return rn.LiveHooks(self.rpc(), self.journal, self.logs.append, buys=buys, burns=burns)
+
+    def runner(self, launch=None, report=None, state='runner.json', burn_url=BURN_URL, hooks='default'):
+        return rn.Runner('https://engine.example/status', os.path.join(self.tmp, state),
+                         lambda r, s, live=False: self.launched.append(r) or None, lambda d: True, lambda b: None,
+                         fetch=self.fetch, live=self.hooks() if hooks == 'default' else hooks,
+                         burn_status_url=burn_url, burn_launch=launch or self.fake_child(),
+                         burn_report=self.report if report is None else report)
+
+    def book(self, window=None, wei=BURN_WEI, **over):
+        row = {'window': window or self.window, 'state': 'booked', 'simulated': False,
+               'amount': bb.eth_str(wei, 18), 'at': bb.iso()}
+        row.update(over)
+        self.burn_rows.insert(0, row)                 # newest first, as an engine lists them
+        return row
+
+    def test_a_booked_burn_runs_once_and_is_reported(self):
+        self.book()
+        run = self.runner()
+        handled = run.poll_once()
+        k = f'burn|{self.window}|{BURN_WEI}'
+        self.assertEqual(handled, [k])
+        self.assertEqual(self.burn_launched, [(self.window, BURN_WEI)])
+        signed = self.recs('signed')[0]
+        txh = signed['tx']
+        self.assertEqual(self.answers, [{'window': self.window, 'tx': txh, 'amount': bb.eth_str(BURN_WEI, 18),
+                                         'amount_wei': str(BURN_WEI), 'method': 'burn', 'signed_at': signed['at']}])
+        self.assertTrue(bb.ISO_RE.match(signed['at']))
+        self.assertTrue(run.state['burns'][self.window]['reported'])
+        ent = run.state['seen'][k]
+        self.assertEqual((ent['state'], ent['tx'], ent['burn'], ent['method']), ('done', txh, True, 'burn'))
+        for _ in range(2):
+            self.assertEqual(run.poll_once(), [])
+        run2 = self.runner()                                        # a restart: the same state file
+        self.assertEqual(run2.poll_once(), [])
+        # a lost state file: the journal still refuses a second burn for the window (the child is refused, blocked)
+        run3 = self.runner(state='runner_lost.json')
+        self.assertEqual(run3.poll_once(), [k])
+        self.assertEqual(run3.state['seen'][k]['state'], 'failed')
+        self.assertIn('already has its transaction', run3.state['seen'][k]['why'])
+        self.assertEqual(len(self.burn_launched), 2)
+        self.assertEqual(len(self.signer.signed), 1, 'one burn per window, whatever the runner forgot')
+        self.assertEqual({a['tx'] for a in self.answers}, {txh}, 'only that one burn was ever reported')
+        self.assertEqual(self.journal.state().failures, 0)
+        self.assertEqual(self.launched, [], 'the DRY buy side had nothing to do')
+
+    def test_a_report_the_burn_engine_cannot_verify_yet_is_retried_and_a_refusal_is_final(self):
+        self.book()
+
+        def report(body):
+            self.answers.append(body)
+            return (503, {'error': 'no receipt for that transaction yet'}) if len(self.answers) == 1 else (200, {})
+        run = self.runner(report=report)
+        run.poll_once()
+        self.assertFalse(run.state['burns'][self.window]['reported'])
+        run.poll_once()
+        self.assertTrue(run.state['burns'][self.window]['reported'])
+        self.assertEqual(len({a['tx'] for a in self.answers}), 1, 'the same transaction, reported again')
+        self.assertEqual(len(self.answers), 2)
+        # a 400 is final: not retried (the later hours book less: 5 % of what is left after each burn)
+        w2 = live_window(hours_ahead=1)
+        self.book(window=w2, wei=400_000 * 10 ** 18)
+        self.advance(run, 1)
+        run.burn_report = lambda body: self.answers.append(body) or (400, {'error': 'no such booking'})
+        run.poll_once()
+        run.poll_once()
+        self.assertTrue(run.state['burns'][w2]['report_final'])
+        self.assertFalse(run.state['burns'][w2]['reported'])
+        self.assertEqual(len(self.answers), 3)
+        # reporting off: booked as such, once
+        run.burn_report = None
+        w3 = live_window(hours_ahead=2)
+        self.book(window=w3, wei=300_000 * 10 ** 18)
+        self.advance(run, 2)
+        run.poll_once()
+        self.assertEqual(run.state['burns'][w3]['why'], 'reporting is off')
+        self.assertEqual(len(self.signer.signed), 3)
+        self.assertEqual(self.chain.token_balances[bl.WALLET], WALLET_LABRAT - 1_200_000 * 10 ** 18)
+        # a booking over 5 % of what the wallet holds NOW is a check failure in the child: LIVE stops
+        w4 = live_window(hours_ahead=3)
+        self.book(window=w4, wei=500_000 * 10 ** 18)              # 5 % of 8.8M is 440,000
+        self.advance(run, 3)
+        run.poll_once()
+        st = self.journal.state()
+        self.assertEqual(st.stop['kind'], 'check')
+        self.assertIn('over 5% of the wallet', st.stop['why'])
+        self.assertEqual(len(self.signer.signed), 3, 'nothing signed')
+
+    def test_a_crashed_child_is_resolved_and_reported_never_run_again(self):
+        self.book()
+        run = self.runner(launch=self.fake_child(crash_at_broadcast=True))
+        run.poll_once()
+        self.assertEqual(self.journal.state().failures, 0, 'a signed burn is decided by its receipt, not counted')
+        self.assertEqual(self.answers, [])
+        for _ in range(3):                         # resolve: the identical bytes again, then the receipt, the report
+            run.poll_once()
+        self.assertTrue(run.state['burns'][self.window]['reported'])
+        self.assertEqual(len(self.signer.signed), 1, 'never signed again')
+        self.assertEqual(len(self.burn_launched), 1, 'never run again')
+        self.assertEqual(len(self.chain.sent), 1)
+
+    def test_failed_children_count_and_a_stopped_live_skips(self):
+        self.book()
+        run = self.runner(launch=self.fake_child(no_op=True))
+        run.poll_once()
+        st = self.journal.state()
+        self.assertEqual(st.failures, 1)
+        self.assertIn('a gate did not hold in the child', st.windows[f'burn:{self.window}']['failed']['why'])
+        w2 = live_window(hours_ahead=1)
+        self.book(window=w2)
+        self.advance(run, 1)
+        run.burn_launch = lambda row: None                    # a child that gives nothing at all
+        run.poll_once()
+        st = self.journal.state()
+        self.assertEqual((st.failures, st.stop['kind']), (2, 'failures'))
+        w3 = live_window(hours_ahead=2)
+        self.book(window=w3)
+        self.advance(run, 2)
+        n = len(self.burn_launched)
+        handled = run.poll_once()
+        self.assertEqual(len(handled), 1)
+        self.assertEqual(len(self.burn_launched), n, 'not run: LIVE is stopped')
+        self.assertIn('LIVE is stopped', run.state['seen'][handled[0]]['why'])
+        self.assertEqual(self.signer.signed, [])
+
+    def test_only_a_live_burn_engine_only_valid_rows_and_only_with_the_gates(self):
+        self.book()
+        run = self.runner()
+        for mode, simulated in (('DRY', True), ('LIVE', True), ('DRY', False)):
+            self.burn_status['mode'], self.burn_status['simulated'] = mode, simulated
+            self.assertEqual(run.poll_once(), [], (mode, simulated))
+        self.burn_status['mode'], self.burn_status['simulated'] = 'LIVE', False
+        self.burn_rows[:] = []
+        for over in ({'state': 'executed'}, {'simulated': True}, {'window': '2026-09-25T20:30:00Z'},
+                     {'amount': '0'}, {'amount': '1e5'}, {'amount': bb.eth_str(bl.MAX_BURN_WEI + 1, 18)},
+                     {'amount': None, 'amount_wei': 'abc'}, {'amount': None, 'amount_wei': -5},
+                     {'amount': None, 'amount_wei': True}):
+            self.book(**over)
+        self.assertEqual(run.poll_once(), [])
+        self.assertEqual(self.burn_launched, [])
+        self.assertEqual(rn.burn_row_wei({'amount_wei': 7, 'amount': '1'}), 7, 'amount_wei wins')
+        self.assertEqual(rn.burn_row_wei({'amount_wei': '70'}), 70)
+        self.assertEqual(rn.burn_row_wei({'amount': '1.5'}), 15 * 10 ** 17)
+        self.assertIsNone(rn.burn_row_wei({}))
+        self.assertTrue(rn.valid_burn_row({'window': self.window, 'state': 'booked', 'simulated': False,
+                                           'amount_wei': str(BURN_WEI)}))
+        # too late: skipped, not run
+        self.burn_rows[:] = []
+        self.book(window=bb.iso(bb.window_start(time.time()) - 3 * 3600))
+        handled = run.poll_once()
+        self.assertEqual(run.state['seen'][handled[0]]['state'], 'skipped')
+        self.assertEqual(self.burn_launched, [])
+        # a booking listed in both lists is one booking; a status with a "burns" section is read the same way
+        self.burn_rows[:] = []
+        row = self.book()
+        self.burn_status = {'mode': 'LIVE', 'burns': {'simulated': False, 'recent': [row], 'bookings': [dict(row)]}}
+        self.assertEqual(run.poll_once(), [f'burn|{self.window}|{BURN_WEI}'])
+        self.assertEqual(len(self.burn_launched), 1)
+        self.assertEqual(len(self.signer.signed), 1)
+        self.burn_status = {'mode': 'LIVE', 'simulated': False, 'bookings': self.burn_rows, 'recent': self.burn_rows}
+        self.burn_rows[:] = []
+        self.signer.signed.clear()
+        self.burn_launched.clear()
+        # without the burn gates (buys only), without a burn URL, or with no hooks at all (DRY): the burn engine is
+        # never even read, and the buy side runs exactly as before
+        self.burn_rows[:] = []
+        self.book()
+        self.reads[:] = []
+        for hooks, url in ((self.hooks(burns=False), self.BURN_URL), (self.hooks(), None), (None, self.BURN_URL)):
+            run = self.runner(hooks=hooks, burn_url=url, state=f'r_{id(hooks)}_{bool(url)}.json')
+            self.assertEqual(run.poll_once(), [])
+        self.assertEqual(self.reads, ['https://engine.example/status'] * 3)
+        self.assertEqual(self.burn_launched, [])
+        self.assertEqual(self.signer.signed, [])
+
+    def test_a_buy_and_a_burn_of_one_hour_run_in_turn_on_one_nonce_account(self):
+        """Both engines booked the hour: the buy runs first, then the burn, each at the next nonce, both reported,
+        never at the same time (one session lock, and the journal signs nothing while anything is unresolved)."""
+        order = []
+        self.buy_status = {'mode': 'LIVE', 'label': bb.LIVE_BOOKINGS_LABEL,
+                           'buys': {'count': 1, 'simulated': False, 'recent': [
+                               {'at': bb.iso(), 'window': self.window, 'eth_in': '0.001', 'labrat_out': None,
+                                'simulated': False, 'state': 'booked'}]}}
+        self.book()
+        reports = []
+
+        def buy_launch(r, seed, live=False):
+            self.assertTrue(live)
+            self.assertTrue(run._session.locked(), 'the session lock is held while a child runs')
+            order.append(('buy', r['window']))
+            b = self.buyer(window=r['window'], amount=bb.parse_eth(r['eth_in']))
+            b.preflight()
+            sent = b.sign_and_send(self.data(bb.parse_eth(r['eth_in'])), int(time.time()) + 1200)
+            info = b.wait_receipt()
+            return {'ok': True, 'mode': 'LIVE', 'verdict': 'live_bought', 'window': r['window'], 'tx': sent['tx'],
+                    'signed': True, 'sent': True, 'block': info['block'],
+                    'labrat_out': bb.token_str(info['labrat_out_wei']), 'session_at': bb.iso(), 'targets_hit': 3,
+                    'misses': 1, 'checks_passed': 16, 'checks_total': 16, 'simulation': 'ok',
+                    'session_proof': hashlib.sha256(b'live').hexdigest(), 'run_dir': 'runs/buyrig_live_x'}
+        child = self.fake_child()
+
+        def burn_launch(row):
+            self.assertTrue(run._session.locked())
+            order.append(('burn', row['window']))
+            return child(row)
+        run = rn.Runner('https://engine.example/status', os.path.join(self.tmp, 'runner.json'), buy_launch,
+                        lambda d: True, lambda body: reports.append(('buy', body)) or (200, {}), fetch=self.fetch,
+                        live=self.hooks(), burn_status_url=self.BURN_URL, burn_launch=burn_launch,
+                        burn_report=lambda body: reports.append(('burn', body)) or (200, {}))
+        handled = run.poll_once()
+        self.assertEqual(handled, [f'live|{self.window}|0.001', f'burn|{self.window}|{BURN_WEI}'])
+        self.assertEqual(order, [('buy', self.window), ('burn', self.window)], 'the buy first, then the burn')
+        self.assertEqual([tx['nonce'] for tx in self.signer.signed], [0, 1])
+        self.assertEqual([tx['to'] for tx in self.signer.signed], [bb.ROUTER, bb.TOKEN])
+        st = self.journal.state()
+        self.assertTrue(st.bought(self.window) and st.burned(self.window))
+        self.assertEqual(st.expected_nonce(), 2)
+        self.assertEqual([k for k, _b in reports], ['buy', 'burn'])
+        self.assertEqual(reports[1][1], rn.burn_report_body(st.executed_burns()[0]))
+        self.assertEqual((reports[1][1]['tx'], reports[1][1]['amount_wei']), (self.recs('signed')[1]['tx'], str(BURN_WEI)))
+        self.assertEqual(run.poll_once(), [])
+        self.assertEqual(len(self.signer.signed), 2)
+        # a burn cannot start while the lock is held by a buy session (a second thread): it waits, never overlaps
+        run2 = self.runner(state='runner2.json')
+        w2 = live_window(hours_ahead=1)
+        self.book(window=w2, wei=100_000 * 10 ** 18)
+        self.advance(run2, 1)
+        run2._session.acquire()
+        t = threading.Thread(target=run2.poll_once, daemon=True)
+        t.start()
+        t.join(0.5)
+        self.assertTrue(t.is_alive(), 'the burn waits for the session lock')
+        self.assertEqual(len(self.burn_launched), 1)
+        run2._session.release()
+        t.join(10)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(len(self.burn_launched), 2)
+
+    def test_the_child_command_and_its_environment(self):
+        calls = []
+        real_run = rn.subprocess.run
+
+        def fake_run(cmd, **kw):
+            calls.append((cmd, kw.get('env')))
+            with open(cmd[cmd.index('--result-json') + 1], 'w', encoding='utf-8') as fh:
+                json.dump(bl.burn_result(self.window, BURN_WEI, verdict='burn_off', error='BURN_LIVE is not 1'), fh)
+            return SimpleNamespace(returncode=1, stdout='BURN_RESULT {}')
+        rn.subprocess.run = fake_run
+        old_key = os.environ.get(bl.ENV_KEY)
+        os.environ[bl.ENV_KEY] = '0x' + '22' * 32
+        try:
+            res = rn.make_burn_launch('auto')({'window': self.window, 'amount_wei': BURN_WEI})
+        finally:
+            rn.subprocess.run = real_run
+            if old_key is None:
+                os.environ.pop(bl.ENV_KEY, None)
+            else:
+                os.environ[bl.ENV_KEY] = old_key
+        (cmd, env), = calls
+        self.assertEqual(cmd[1:-1], [str(LIVE_DIR / 'buyrig_live.py'), '--burn', '--window', self.window,
+                                     '--amount-wei', str(BURN_WEI), '--burn-method', 'auto', '--result-json'])
+        self.assertEqual(env[bl.ENV_KEY], '0x' + '22' * 32, 'the burn child gets the key, like a LIVE buy session')
+        self.assertEqual(res['verdict'], 'burn_off')
+        self.assertEqual(rn.default_burn_report_url(self.BURN_URL), 'https://burn.example/burn_report')
+        self.assertEqual(rn.default_report_url('https://engine.example/status'), 'https://engine.example/pons_session')
+        self.assertEqual(rn.burn_key({'window': self.window, 'amount': '1'}), f'burn|{self.window}|{10 ** 18}')
+        # the report body: what live/burn.py's REPORT_KEYS take, the transfer method spelled 'dead' there
+        ex = {'window': self.window, 'tx': '0x' + 'ab' * 32, 'amount_wei': BURN_WEI, 'burned_wei': BURN_WEI,
+              'method': 'transfer', 'block': 1, 'signed_at': '2026-09-26T14:00:31Z'}
+        self.assertEqual(rn.burn_report_body(ex), {'window': self.window, 'tx': ex['tx'],
+                                                   'amount': bb.eth_str(BURN_WEI, 18), 'amount_wei': str(BURN_WEI),
+                                                   'method': 'dead', 'signed_at': '2026-09-26T14:00:31Z'})
+        self.assertEqual(set(rn.burn_report_body({**ex, 'method': None, 'signed_at': None})),
+                         {'window', 'tx', 'amount', 'amount_wei'})
 
 
 # ---------------------------------------------------------------------------------------------------- the real session

@@ -31,6 +31,21 @@ bytes again) and reports every buy the rig's journal shows as mined and not yet 
 window, eth_in and the tx hash (plus the session's proof and counts when it has them). The engine verifies it on chain
 before counting it; a 503 (no receipt there yet) is retried at the next poll. A LIVE session that ended without a buy
 and without a record in the rig's journal is booked there as one failed buy (two in a row stop LIVE).
+
+BURNS (switched OFF): with --burn-status-url <the burn engine's /status> (live/burn.py) the runner also executes the
+burns that engine books, because this service holds the only key. Only when the process environment holds the burn
+gates (BURN_LIVE=1, BURN_CONFIRM=LABRAT, BUYBACK_RH_KEY of the pinned wallet; live/buyrig_live.py burn_env_gate), and
+only against a burn engine in live bookings (status mode LIVE, simulated false): each booked burn it lists
+(bookings / recent: simulated false, state "booked", its window and amount / amount_wei) runs once, while its window
+can still be signed, as `python live/buyrig_live.py --burn --window <window> --amount-wei <wei>` (a child process
+with the key, no browser; it re-checks every gate and signs at most one transaction for the burn window, through the
+same journal and nonce account as the buys). Burns are handled after the buys of the same poll, in the same thread,
+and the journal refuses to sign while any signed transaction is unresolved: a burn never runs concurrently with a
+buy. Every burn the rig's journal shows as mined and not yet reported is reported: POST <burn-report-url> (default
+<burn engine>/burn_report; Bearer BURN_RIG_TOKEN, or BUYBACK_RIG_TOKEN when that is not set) with {window, tx,
+amount, amount_wei, method, signed_at} (amount: LABRAT, a decimal string to 18 places; method: burn, or dead for a
+transfer to the dead address). The burn engine verifies it on chain; a 503 is retried at the next poll. A burn child
+that ended without a record of its own in the journal is booked as one failed burn (the same two-failures stop).
 """
 import argparse
 import hashlib
@@ -39,6 +54,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -55,8 +71,10 @@ if str(ROOT) not in sys.path:
 STATUS_URL = 'https://labrat-buyback-production.up.railway.app/status'
 STATE_PATH = ROOT / 'runs' / 'buyrig' / 'runner.json'
 RIG_TOKEN_ENV = 'BUYBACK_RIG_TOKEN'
+BURN_TOKEN_ENV = 'BURN_RIG_TOKEN'          # the burn engine's report token (falls back to BUYBACK_RIG_TOKEN)
 RELAY_TOKEN_ENV = 'LABRAT_PUBLISH_TOKEN'
 SESSION_TIMEOUT_S = 900
+BURN_TIMEOUT_S = 600                       # a burn child: gates, one transaction, up to 2 minutes for its receipt
 REPLAY_TIMEOUT_S = 1800
 KEEP_KEYS = 500
 ISO_FMT = '%Y-%m-%dT%H:%M:%SZ'
@@ -125,6 +143,55 @@ def valid_live_batch(r):
 
 def live_key(r):
     return f"live|{r['window']}|{r['eth_in']}"
+
+
+def burn_row_wei(r):
+    """A booked burn's amount in LABRAT wei (18 decimals): amount_wei (an integer, or a string of digits) when the
+    burn engine gives it, else amount (a decimal LABRAT string). None when neither parses."""
+    import buyback
+    aw = r.get('amount_wei')
+    if isinstance(aw, int) and not isinstance(aw, bool) and aw >= 0:
+        return aw
+    if isinstance(aw, str) and aw.isdigit():
+        return int(aw)
+    a = r.get('amount')
+    if isinstance(a, str) and buyback.DEC_RE.match(a):
+        try:
+            return buyback.parse_eth(a)
+        except ValueError:
+            return None
+    return None
+
+
+def valid_burn_row(r):
+    """A booked REAL burn of a burn engine in live bookings: simulated false, state "booked", the booked UTC hour
+    (window) and an amount the rig accepts (buyrig_live.MIN_BURN_WEI .. MAX_BURN_WEI, in wei or as decimal LABRAT)."""
+    import buyback
+    import buyrig_live
+    if not isinstance(r, dict) or r.get('simulated') is not False or r.get('state') != 'booked':
+        return False
+    if not isinstance(r.get('window'), str) or not buyback.WINDOW_ID_RE.match(r['window']):
+        return False
+    wei = burn_row_wei(r)
+    return wei is not None and buyrig_live.MIN_BURN_WEI <= wei <= buyrig_live.MAX_BURN_WEI
+
+
+def burn_key(r):
+    return f"burn|{r['window']}|{burn_row_wei(r)}"
+
+
+def burn_report_body(ex):
+    """The burn engine's report of one executed burn (from buyrig_live State.executed_burns(); live/burn.py
+    REPORT_KEYS): window, tx, amount (LABRAT, decimal, 18 places) and amount_wei (digits), plus method ('burn', or
+    'dead' for a transfer to the dead address) and signed_at when the journal has them."""
+    import buyback
+    body = {'window': ex['window'], 'tx': ex['tx'], 'amount': buyback.eth_str(ex['amount_wei'], 18),
+            'amount_wei': str(int(ex['amount_wei']))}
+    if ex.get('method') in ('burn', 'transfer'):
+        body['method'] = 'burn' if ex['method'] == 'burn' else 'dead'
+    if isinstance(ex.get('signed_at'), str) and buyback.ISO_RE.match(ex['signed_at']):
+        body['signed_at'] = ex['signed_at']
+    return body
 
 
 def child_env(live=False, environ=None):
@@ -218,12 +285,15 @@ def live_report_body(ex, session=None):
 
 
 class LiveHooks:
-    """The runner's LIVE side: the rig's journal (buyrig_live) and its gated RPC. Built only when the env gates hold.
+    """The runner's LIVE side: the rig's journal (buyrig_live) and its gated RPC. Built only when the env gates hold
+    (buys: the buy gates; burns: the burn gates; either is enough to build it, each side runs only with its own).
     It never signs: resolve() finishes unfinished windows (receipt, or the identical signed bytes again)."""
 
-    def __init__(self, rpc, journal, log_fn=log):
+    def __init__(self, rpc, journal, log_fn=log, buys=True, burns=False):
         import buyrig_live
         self.L, self.rpc, self.journal, self.log = buyrig_live, rpc, journal, log_fn
+        self.buys, self.burns = bool(buys), bool(burns)
+        self.why_buys = self.why_burns = ''
 
     def resolve(self):
         st = self.journal.state()
@@ -237,8 +307,27 @@ class LiveHooks:
     def executed(self):
         return self.journal.state().executed()
 
+    def executed_burns(self):
+        return self.journal.state().executed_burns()
+
     def signable(self, window, now):
         return self.L.signable(window, now, self.L.SESSION_MARGIN_S)
+
+    def settle_burn(self, window, res):
+        """A burn child that ended without a record of its own in the journal (it crashed, timed out, or was a no-op
+        because a gate failed in the child): one failed burn. A signed burn is left to its receipt."""
+        st = self.journal.state()
+        w = st.windows.get(self.L.slot(window, self.L.KIND_BURN))
+        if w and (w['failed'] or w['signed'] or w['receipt'] or w['expired']):
+            return None
+        if st.stop:
+            return None
+        if isinstance(res, dict) and res.get('mode') == 'LIVE' and res.get('refusal_kind') == 'blocked':
+            return None                     # refused before anything was attempted (stopped, unresolved...): not a burn
+        why = ((res or {}).get('error') or (res or {}).get('verdict') or 'the burn child ended without a result')
+        if isinstance(res, dict) and res.get('mode') != 'LIVE':
+            why = f'the burn child ran as a no-op (a gate did not hold in the child: {why})'
+        return self.L.record_failure(self.journal, window, str(why)[:300], self.log, self.L.KIND_BURN)
 
     def settle(self, window, res):
         """A LIVE session that ended without a record of its own in the journal (it crashed, timed out, or ran DRY
@@ -264,14 +353,19 @@ class Runner:
     session is launch(batch, seed, live=True)."""
 
     def __init__(self, status_url, state_path, launch, replay, report, fetch=fetch_json, clock=time.time,
-                 max_age_s=3600.0, catch_up=0, live=None):
+                 max_age_s=3600.0, catch_up=0, live=None, burn_status_url=None, burn_launch=None, burn_report=None):
         self.status_url, self.state_path = status_url, Path(state_path)
         self.launch, self.replay, self.report, self.fetch, self.clock = launch, replay, report, fetch, clock
         self.max_age_s, self.catch_up = float(max_age_s), int(catch_up)
         self.live = live
+        # burns (off unless a burn engine URL is given AND the hooks hold the burn gates): burn_launch(row) -> the
+        # child's result dict (buyrig_live.run_burn) or None; burn_report(body) -> (status, response) or None
+        self.burn_status_url, self.burn_launch, self.burn_report = burn_status_url, burn_launch, burn_report
         self.state = self._load()
         self.last_refusal = None
+        self.last_burn_refusal = None
         self.sessions = 0
+        self._session = threading.Lock()   # one child at a time: a burn never runs while a buy session runs
 
     # ---- state (one JSON file, written atomically after every change)
     def _load(self):
@@ -310,8 +404,25 @@ class Runner:
         self.last_refusal = why
         return []
 
+    def refuse_burn(self, why):
+        if why != self.last_burn_refusal:
+            log(f'not running burns: {why}')
+        self.last_burn_refusal = why
+        return []
+
+    @property
+    def burns_on(self):
+        return self.live is not None and self.live.burns and bool(self.burn_status_url)
+
     def poll_once(self):
-        """-> the keys of the batches handled in this poll (run, skipped or failed)."""
+        """-> the keys of the batches handled in this poll (run, skipped or failed): the buys, then (with a burn engine
+        and the burn gates) the burns, in this one thread."""
+        handled = self._poll_buys()
+        if self.burns_on:
+            handled = handled + self._poll_burns()
+        return handled
+
+    def _poll_buys(self):
         try:
             st = self.fetch(self.status_url)
         except Exception as e:
@@ -319,13 +430,14 @@ class Runner:
         if not isinstance(st, dict):
             return self.refuse('the engine status is not a JSON object')
         buys = st.get('buys') if isinstance(st.get('buys'), dict) else {}
-        if self.live is not None and st.get('mode') == 'LIVE' and buys.get('simulated') is False:
+        live_buys = self.live is not None and self.live.buys
+        if live_buys and st.get('mode') == 'LIVE' and buys.get('simulated') is False:
             return self._poll_live(buys)
         if self.live is not None:
             self._live_upkeep()                 # a signed buy is resolved and reported whatever the engine says now
         if st.get('mode') != 'DRY' or buys.get('simulated') is not True:
             return self.refuse('the engine is not simulated (mode DRY): the buy rig runs only for simulated buys'
-                               if self.live is None else 'the engine is neither simulated (DRY) nor in live bookings')
+                               if not live_buys else 'the engine is neither simulated (DRY) nor in live bookings')
         recent = buys.get('recent') if isinstance(buys.get('recent'), list) else []
         batches = [r for r in reversed(recent) if valid_batch(r)]          # oldest first
         self.last_refusal = None
@@ -362,7 +474,8 @@ class Runner:
         self.sessions += 1
         log(f"batch {k}: the rat buys {r['eth_in']} ETH of LABRAT on pons (simulated), seed {seed}")
         try:
-            res = self.launch(r, seed)
+            with self._session:
+                res = self.launch(r, seed)
         except Exception as e:
             res = None
             log(f'batch {k}: the session failed to run ({type(e).__name__}: {str(e)[:160]})')
@@ -480,7 +593,8 @@ class Runner:
         self.sessions += 1
         log(f"LIVE batch {k}: the rat buys {r['eth_in']} ETH of LABRAT on pons for the window {w}, seed {seed}")
         try:
-            res = self.launch(r, seed, live=True)
+            with self._session:
+                res = self.launch(r, seed, live=True)
         except Exception as e:
             res = None
             log(f'LIVE batch {k}: the session failed to run ({type(e).__name__}: {str(e)[:160]})')
@@ -508,6 +622,128 @@ class Runner:
         log(f"LIVE batch {k}: " + (f"bought ({res.get('labrat_out')} LABRAT, {res.get('tx')})" if why is None
                                    else f'no buy: {why}'))
         self._report_live()
+
+    # ---- BURNS (only with LiveHooks.burns: the burn env gates held at start, and a burn engine URL) -----------------
+    def _burn_upkeep(self):
+        """Every burn poll: finish the rig's unfinished windows (never a new transaction), then report every burn its
+        journal shows as mined and not yet reported."""
+        try:
+            self.live.resolve()
+        except Exception as e:
+            log(f'BURN: resolving unfinished windows failed for now ({type(e).__name__})')
+        self._report_burns()
+
+    def _burn_state(self, window):
+        burns = self.state.setdefault('burns', {})
+        while len(burns) > KEEP_KEYS:
+            burns.pop(next(iter(burns)))
+        return burns.setdefault(window, {})
+
+    def _report_burns(self):
+        try:
+            executed = self.live.executed_burns()
+        except Exception as e:
+            log(f'BURN: the rig journal could not be read ({type(e).__name__})')
+            return
+        for ex in executed:
+            ent = self._burn_state(ex['window'])
+            if ent.get('reported') or ent.get('report_final'):
+                continue
+            body = burn_report_body(ex)
+            try:
+                out = self.burn_report(body) if self.burn_report else None
+            except Exception as e:
+                out = ('error', f'{type(e).__name__}: {str(e)[:160]}')
+            if out is None:
+                if ent.get('why') != 'reporting is off':
+                    ent.update(tx=ex['tx'], why='reporting is off')
+                    self._save()
+                    log(f"BURN: the burn for {ex['window']} ({ex['tx']}) is not reported: reporting is off")
+                continue
+            code, resp = out
+            ent.update(tx=ex['tx'], report_status=code, report_error=None if code == 200 else str(resp)[:200],
+                       reported=code == 200, at=iso(self.clock()))
+            # 503 (no receipt on the engine's RPC yet), 500 or a network error: retried at the next poll; any other
+            # refusal is final (and loud: a real burn the engine does not count)
+            if code not in (200, 500, 503, 'error'):
+                ent['report_final'] = True
+            self._save()
+            log(f"BURN: reported the burn for {ex['window']} ({ex['tx']}): burn engine {code}"
+                + ('' if code == 200 else f': {str(resp)[:200]}' + ('' if ent.get('report_final') else ' (retried)')))
+
+    def _poll_burns(self):
+        """The burn engine's bookings: each booked burn once, while its window is executable, after this poll's buys."""
+        try:
+            st = self.fetch(self.burn_status_url)
+        except Exception as e:
+            return self.refuse_burn(f'the burn engine status could not be read ({type(e).__name__})')
+        if not isinstance(st, dict):
+            return self.refuse_burn('the burn engine status is not a JSON object')
+        # live/burn.py lists mode / simulated / bookings / recent at the top level; a "burns" section is taken too
+        sec = st.get('burns') if isinstance(st.get('burns'), dict) else st
+        self._burn_upkeep()                     # a signed burn is resolved and reported whatever the engine says now
+        if sec.get('mode', st.get('mode')) != 'LIVE' or sec.get('simulated') is not False:
+            return self.refuse_burn('the burn engine is not in live bookings (mode LIVE, burns not simulated): its '
+                                    'burns stay simulated there and nothing is executed')
+        self.last_burn_refusal = None
+        listed = []
+        for key in ('bookings', 'recent'):      # the outstanding bookings, and the recent list (newest first)
+            if isinstance(sec.get(key), list):
+                listed.extend(reversed(sec[key]))
+        rows, keys = [], set()
+        for r in listed:                        # oldest first, each booking once
+            if valid_burn_row(r) and burn_key(r) not in keys:
+                keys.add(burn_key(r))
+                rows.append(r)
+        rows.sort(key=lambda r: r['window'])
+        handled = []
+        for r in rows:
+            k = burn_key(r)
+            if k in self.state['seen']:
+                continue
+            handled.append(k)
+            now = self.clock()
+            if not self.live.signable(r['window'], now):
+                self._mark(k, 'skipped', why='too late: a window is signed at most one hour after it ends',
+                           window=r['window'], burn=True)
+                log(f'BURN {k}: too late to execute, skipped')
+                continue
+            stop = self.live.stopped()
+            if stop:
+                self._mark(k, 'skipped', why=f"LIVE is stopped ({str(stop.get('why'))[:160]}; stop id {stop.get('id')})",
+                           window=r['window'], burn=True)
+                log(f"BURN {k}: skipped, LIVE is stopped (stop id {stop.get('id')})")
+                continue
+            self._run_burn(k, r)
+        return handled
+
+    def _run_burn(self, k, r):
+        import buyback
+        import buyrig_live
+        w, wei = r['window'], burn_row_wei(r)
+        self._mark(k, 'started', window=w, burn=True, amount_wei=str(wei))    # before anything runs: never twice
+        self.sessions += 1
+        log(f'BURN {k}: burning {buyback.token_str(wei)} LABRAT for the window {w} (the burn engine\'s booking)')
+        res = None
+        try:
+            with self._session:                 # never while a buy session runs (and vice versa)
+                res = self.burn_launch({'window': w, 'amount_wei': wei, 'amount': buyback.eth_str(wei, 18)})
+        except Exception as e:
+            log(f'BURN {k}: the burn child failed to run ({type(e).__name__}: {str(e)[:160]})')
+        try:
+            self.live.settle_burn(w, res)
+        except Exception as e:
+            log(f'BURN {k}: the rig journal could not be updated ({type(e).__name__})')
+        res = res if isinstance(res, dict) else {}
+        tx = res.get('tx')
+        ok = bool(res.get('ok') and res.get('signed') and res.get('sent') and isinstance(tx, str)
+                  and buyrig_live.HASH_RE.match(tx))
+        why = None if ok else str(res.get('error') or res.get('verdict') or 'the burn child gave no result')[:200]
+        self._mark(k, 'done' if ok else 'failed', window=w, burn=True, amount_wei=str(wei), tx=tx,
+                   verdict=res.get('verdict'), method=res.get('method'), why=why)
+        log(f'BURN {k}: ' + (f"burned ({res.get('burned')} LABRAT, {res.get('method')}(), {tx})" if ok
+                             else f'no burn: {why}'))
+        self._report_burns()
 
 
 # ---------------------------------------------------------------------------------------------------- side effects
@@ -544,6 +780,33 @@ def make_launch(relay=None, out_root=None, python=sys.executable):
     return launch
 
 
+def make_burn_launch(method='auto', python=sys.executable):
+    """The burn child: `python live/buyrig_live.py --burn --window W --amount-wei N --burn-method M --result-json F`
+    with the key in its environment (the only child besides a LIVE buy session that gets it; no browser starts)."""
+    def launch(row):
+        fd, res_path = tempfile.mkstemp(prefix='burn_result_', suffix='.json')
+        os.close(fd)
+        try:
+            cmd = [python, str(LIVE_DIR / 'buyrig_live.py'), '--burn', '--window', row['window'],
+                   '--amount-wei', str(int(row['amount_wei'])), '--burn-method', method, '--result-json', res_path]
+            p = subprocess.run(cmd, cwd=str(ROOT), timeout=BURN_TIMEOUT_S, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace',
+                               env=child_env(True))
+            tail = [ln for ln in (p.stdout or '').splitlines() if ln.startswith('BURN_RESULT ')]
+            log(f'burn child exit {p.returncode}: ' + (tail[-1][:300] if tail else '(no result line)'))
+            try:
+                with open(res_path, encoding='utf-8') as fh:
+                    return json.load(fh)
+            except (OSError, ValueError):
+                return None
+        finally:
+            try:
+                os.remove(res_path)
+            except OSError:
+                pass
+    return launch
+
+
 def make_replay(python=sys.executable):
     def replay(run_dir):
         p = subprocess.run([python, str(ROOT / 'replay_session.py'), str(ROOT / run_dir)], cwd=str(ROOT),
@@ -560,31 +823,40 @@ def make_report(url, token):
     return lambda body: post_json(url, body, token)
 
 
-def default_report_url(status_url):
+def default_report_url(status_url, endpoint='/pons_session'):
     base = status_url.split('?', 1)[0]
     if base.endswith('/status'):
         base = base[:-len('/status')]
-    return base.rstrip('/') + '/pons_session'
+    return base.rstrip('/') + endpoint
+
+
+def default_burn_report_url(burn_status_url):
+    return default_report_url(burn_status_url, '/burn_report')
 
 
 def live_hooks(environ=None, log_fn=log):
-    """-> (LiveHooks, '') when the LIVE env gates hold (buyrig_live.env_gate), else (None, why): DRY only. The runner
-    keeps no key: the account is used here only to open the gated RPC (resolve() re-broadcasts, never signs)."""
+    """-> (LiveHooks, '') when the buy env gates (buyrig_live.env_gate) or the burn env gates (burn_env_gate) hold,
+    else (None, why): DRY only. hooks.buys / hooks.burns say which side may run; hooks.why_buys / why_burns say why
+    the other may not. The runner keeps no key: the account is used here only to open the gated RPC (resolve()
+    re-broadcasts, never signs); a burn child gets the key from the environment like a LIVE buy session."""
     import buyrig_live
     acct, why = buyrig_live.env_gate(environ)
-    if acct is None:
-        return None, why
+    bacct, bwhy = buyrig_live.burn_env_gate(environ)
+    if acct is None and bacct is None:
+        return None, f'{why}; burns: {bwhy}'
     try:
         if buyrig_live.VOLUME is not None and not os.path.ismount(str(buyrig_live.VOLUME)):
             return None, f'{buyrig_live.VOLUME} is not a mounted volume (the LIVE journal must survive a redeploy)'
-        rpc = buyrig_live.open_rpc(acct, environ=environ)
+        rpc = buyrig_live.open_rpc(acct if acct is not None else bacct, environ=environ)
     except buyrig_live.LiveRefused as e:
         return None, str(e)
     finally:
-        acct = None
+        acct = bacct = None
     journal = buyrig_live.Journal()
     buyrig_live.apply_operator_env(journal, rpc, environ, log_fn)
-    return LiveHooks(rpc, journal, log_fn), ''
+    hooks = LiveHooks(rpc, journal, log_fn, buys=not why, burns=not bwhy)
+    hooks.why_buys, hooks.why_burns = why, bwhy
+    return hooks, ''
 
 
 def main(argv=None):
@@ -598,9 +870,18 @@ def main(argv=None):
     ap.add_argument('--max-age', type=float, default=3600.0, help='skip batches booked longer ago than this (s)')
     ap.add_argument('--state', default=str(STATE_PATH))
     ap.add_argument('--out-root', help='where the sessions write their run dirs (default runs/)')
+    ap.add_argument('--burn-status-url', help='the burn engine\'s public /status (live/burn.py): its booked burns are '
+                                              'executed here, only with BURN_LIVE=1, BURN_CONFIRM=LABRAT and the key '
+                                              'in the environment')
+    ap.add_argument('--burn-report-url', help='default: <burn-status-url without /status>/burn_report')
+    ap.add_argument('--burn-method', choices=('auto', 'burn', 'transfer'), default='auto',
+                    help='auto: the token bytecode decides (burn(uint256) when it has it, else transfer to dead)')
     a = ap.parse_args(argv)
-    if not a.status_url.startswith('https://') and not a.status_url.startswith(('http://127.0.0.1', 'http://localhost')):
+    ok_url = lambda u: u.startswith('https://') or u.startswith(('http://127.0.0.1', 'http://localhost'))  # noqa: E731
+    if not ok_url(a.status_url):
         raise SystemExit('--status-url must be https (or http on localhost)')
+    if a.burn_status_url and not ok_url(a.burn_status_url):
+        raise SystemExit('--burn-status-url must be https (or http on localhost)')
     if a.relay and len(os.environ.get(RELAY_TOKEN_ENV, '').strip()) < 16:
         raise SystemExit(f'--relay needs {RELAY_TOKEN_ENV} in the environment')
     token = os.environ.get(RIG_TOKEN_ENV, '').strip()
@@ -608,10 +889,28 @@ def main(argv=None):
     if not token:
         log(f'{RIG_TOKEN_ENV} is not set: sessions run and are recorded, but not reported to the engine')
     hooks, why = live_hooks()
-    log('LIVE: on (booked real buys are executed; every session re-checks every gate)' if hooks else
-        f'LIVE: off ({why}); simulated sessions only')
+    if hooks is None:
+        log(f'LIVE: off ({why}); simulated sessions only')
+    else:
+        log('LIVE buys: on (booked real buys are executed; every session re-checks every gate)' if hooks.buys else
+            f'LIVE buys: off ({hooks.why_buys}); simulated sessions only')
+    burn_report = None
+    if a.burn_status_url:
+        btoken = os.environ.get(BURN_TOKEN_ENV, '').strip() or token
+        if hooks is None or not hooks.burns:
+            log(f"BURN: off ({why if hooks is None else hooks.why_burns}); the burn engine's bookings are not executed")
+        else:
+            if not btoken:
+                log(f'{BURN_TOKEN_ENV} is not set: burns would run but could not be reported to the burn engine')
+            burn_report = make_report(a.burn_report_url or default_burn_report_url(a.burn_status_url), btoken)
+            log(f'BURN: on (booked burns of {a.burn_status_url} are executed, method {a.burn_method}; each child '
+                're-checks every gate)')
+    else:
+        log('BURN: off (no --burn-status-url)')
     runner = Runner(a.status_url, a.state, make_launch(a.relay, a.out_root), make_replay(),
-                    make_report(report_url, token), max_age_s=a.max_age, catch_up=a.catch_up, live=hooks)
+                    make_report(report_url, token), max_age_s=a.max_age, catch_up=a.catch_up, live=hooks,
+                    burn_status_url=a.burn_status_url, burn_launch=make_burn_launch(a.burn_method),
+                    burn_report=burn_report)
     log(f'watching {a.status_url} every {a.poll:g} s; state {a.state}'
         + (f"; streaming to {a.relay.split('?')[0]} (pons channel)" if a.relay else ''))
     try:

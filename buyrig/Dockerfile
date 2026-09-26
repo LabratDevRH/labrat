@@ -42,5 +42,8 @@ buyrig.load_brain('runs/final/steer.pt', 'runs/final/policy.pt'); print('network
 # /data (a volume): runs/ (every session's recording and its proof, --out-root), buyrig/runner.json (which batches
 # ran, so a redeploy never runs a batch twice) and, in LIVE, buyrig/live_journal.jsonl + buyrig/windows/ (one
 # transaction per window, ever; LIVE refuses to run unless /data is a mounted volume)
+# BURN_STATUS_URL (the burn engine's /status, live/burn.py) makes the runner execute that engine's booked burns too,
+# only with BURN_LIVE=1, BURN_CONFIRM=LABRAT and the key (see live/buyrig_runner.py "BURNS"); BURN_METHOD forces
+# burn | transfer (default auto: the token bytecode decides)
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["sh", "-c", "mkdir -p /data/runs /data/buyrig && exec python live/buyrig_runner.py --state /data/buyrig/runner.json --out-root /data/runs ${BUYRIG_RELAY:+--relay $BUYRIG_RELAY}"]
+CMD ["sh", "-c", "mkdir -p /data/runs /data/buyrig && exec python live/buyrig_runner.py --state /data/buyrig/runner.json --out-root /data/runs ${BUYRIG_RELAY:+--relay $BUYRIG_RELAY} ${BURN_STATUS_URL:+--burn-status-url $BURN_STATUS_URL} ${BURN_METHOD:+--burn-method $BURN_METHOD}"]
