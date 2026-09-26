@@ -1619,6 +1619,47 @@ class DryExecutor:
         return {'ok': True}
 
 
+_EXEC_CACHE = {}
+TX_HASH_RE = re.compile(r'^0x[0-9a-f]{64}$')
+
+
+def executed_summary(path, limit=12):
+    """Every REAL buy ever executed (the 'executed' records of journal_bookings.jsonl), for the public status in every
+    mode: a paused engine (back in DRY) keeps showing what was bought. Nothing here is a figure the engine acts on."""
+    empty = {'count': 0, 'eth_in': '0', 'labrat_out': '0', 'recent': []}
+    if not path or not os.path.exists(path):
+        return empty
+    try:
+        st = os.stat(path)
+    except OSError:
+        return empty
+    key = (st.st_mtime_ns, st.st_size)
+    hit = _EXEC_CACHE.get(path)
+    if hit and hit[0] == key:
+        return hit[1]
+    n = eth = tok = 0
+    recent = []
+    with open(path, encoding='utf-8') as fh:
+        for line in fh:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if r.get('ev') != 'executed' or r.get('simulated') is not False:
+                continue
+            amt, t_ = int(r.get('amount_wei') or 0), int(r.get('tokens_wei') or 0)
+            tx = r.get('tx') if isinstance(r.get('tx'), str) and TX_HASH_RE.match(r['tx']) else None
+            n += 1; eth += amt; tok += t_
+            recent.append({'at': iso(r['t']) if r.get('t') else None,
+                           'window': iso(int(r['window'])) if r.get('window') is not None else None,
+                           'eth_in': eth_str(amt), 'labrat_out': token_str(t_), 'tx': tx, 'block': r.get('block'),
+                           'hit_rate': r.get('hit_rate'), 'state': 'executed', 'simulated': False,
+                           'clicked_by_rat': True})
+    out = {'count': n, 'eth_in': eth_str(eth), 'labrat_out': token_str(tok), 'recent': recent[::-1][:limit]}
+    _EXEC_CACHE[path] = (key, out)
+    return out
+
+
 class BookingExecutor:
     """LIVE BOOKINGS: books the hour's buy for the buy rig instead of buying it. Never signs, never sends (its RPC is a
     ReadRpc). The route is simulated first exactly as DRY does (the buyback wallet, its balance raised by an override),
@@ -2390,6 +2431,7 @@ class Engine:
                          'per_hour_eth': eth_str(c.max_hour_wei), 'per_day_eth': eth_str(c.max_day_wei),
                          'total_eth': eth_str(c.max_total_wei), 'max_pending_eth': None,
                          'gas_per_day_eth': eth_str(c.max_gas_day_wei), 'gas_total_eth': eth_str(c.max_gas_total_wei)},
+                'executed': executed_summary(getattr(self, 'bookings_journal_path', None)),
                 'stopped': stopped,
                 'updated': iso(now),
             }
@@ -2858,6 +2900,7 @@ def main(argv=None):
         try:
             engine = Engine(cfg, mode, journal, rpc, executor, sim, accept_test=a.accept_test_streams,
                             relay_url=a.relay, live_bookings=bookings)
+            engine.bookings_journal_path = os.path.join(jdir, BOOKINGS_JOURNAL)   # executed real buys, every mode
         except LiveRefused as e:
             raise SystemExit(f'LIVE refused, nothing was signed or sent: {e}') from None
         if bookings:

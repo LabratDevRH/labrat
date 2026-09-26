@@ -28,9 +28,10 @@ const RM = window.matchMedia ? matchMedia('(prefers-reduced-motion: reduce)') : 
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && links.classList.contains('open')) { close(); menu.focus(); } });
   document.addEventListener('click', e => { if (links.classList.contains('open') && !e.target.closest('#nav')) close(); });
 
-  // highlight the section in view
+  // highlight the section in view (links may point at this page's sections as "#id" or "/page#id"; page links have no id)
   if (!('IntersectionObserver' in window)) return;
-  const map = new Map($$('a', links).map(a => [a.getAttribute('href').slice(1), a]));
+  const map = new Map($$('a', links).map(a => [String(a.getAttribute('href') || '').replace(/^[^#]*#/, ''), a])
+    .filter(([id]) => id && !/[\/#]/.test(id)));
   const seen = new Map();
   const io = new IntersectionObserver(es => {
     es.forEach(e => seen.set(e.target.id, e.isIntersecting ? e.intersectionRatio : 0));
@@ -314,13 +315,17 @@ const LIVE = {
   el: $('#live'), badge: $('#badge'), badgeT: $('#badge-t'), label: $('#live-label'),
   nav: $('#nav-status'), navT: $('#nav-status-t'), hudMode: $('#hud-mode'), note: $('#hud-note'),
   ph: $('#live-ph'), phTitle: $('#ph-title'), phSub: $('#ph-sub'),
-  cReward: makeChart($('#c-reward')), cSuccess: makeChart($('#c-success')),
+  cReward: $('#c-reward') ? makeChart($('#c-reward')) : null, cSuccess: $('#c-success') ? makeChart($('#c-success')) : null,
 };
+// a page without the live panel (/burn has the Rat Maze panel and the burns, no 3D view): nothing here runs there
+const HAS_LIVE = !!(LIVE.el && LIVE.badge && LIVE.badgeT && LIVE.label && LIVE.nav && LIVE.navT && LIVE.hudMode && LIVE.note &&
+                    LIVE.ph && LIVE.phTitle && LIVE.phSub && LIVE.cReward && LIVE.cSuccess);
 const REPLAY_LABEL = 'Replay: a recorded launch session';   // when replay/session.json carries no label of its own
 
 const stripTag = s => String(s || '').replace(/^\s*(LIVE|REPLAY|STANDBY)\s*[·:-]\s*/i, '').replace(/^\s*replay\s*[:·-]\s*/i, '').trim();
 
 function setMode(mode) {
+  if (!HAS_LIVE) return;
   const L = LIVE, st = L.st || {};
   L.mode = mode; L.el.dataset.mode = mode;
   const B = { connecting: ['conn', 'CONNECTING', 'connecting'], live: ['live', 'LIVE TRAINING', 'live'],
@@ -368,6 +373,7 @@ function setRun(el, name) {
 }
 
 function renderHUD() {
+  if (!HAS_LIVE) return;
   const L = LIVE, st = L.st || {};
   const task = $('#h-task'), run = $('#h-run'), stepsK = $('#h-steps-k'), steps = $('#h-steps');
   const fallsK = $('#h-falls').previousElementSibling, falls = $('#h-falls');
@@ -427,12 +433,12 @@ function onTarget(t) {
 }
 
 function hidePlaceholder() {
-  if (LIVE.phGone) return;
+  if (LIVE.phGone || !HAS_LIVE) return;
   LIVE.phGone = true; LIVE.ph.classList.add('gone');
   setTimeout(() => { if (LIVE.phGone) LIVE.ph.hidden = true; }, 900);
 }
 function showPlaceholder() {
-  if (!LIVE.phGone) return;
+  if (!LIVE.phGone || !HAS_LIVE) return;
   LIVE.phGone = false; LIVE.ph.hidden = false; LIVE.ph.classList.remove('gone');
   if (LIVE.phKick) LIVE.phKick();
 }
@@ -557,6 +563,43 @@ function onMetrics(rows, info) {
   size(); kick();
 })();
 
+/* ------------------------------------------------------------------ the page's own relay socket
+   js/live.js holds the relay socket while the 3D view runs and hands the other channels' messages to the page's panels.
+   A page without the 3D view (/burn), or one whose view could not start or was torn down, opens this one instead.
+   Text messages are routed by the channel the relay marks them with: "pons" (the buy rig), "maze" (the second trainer,
+   Rat Maze), none (the training channel: Rat Tiles); binary frames are handed over as they are (each reader checks its
+   own prefix: b"PJPG" a pons frame, b"MZ" a maze frame, a bare rat frame the training channel's). It reconnects with
+   backoff, and on a close tells every reader that its channel went idle, so nothing stays "live" without a socket. */
+function relaySocket(h) {
+  const url = window.LABRAT_RELAY;
+  if (typeof url !== 'string' || !/^wss?:\/\//i.test(url)) return false;
+  const call = (f, ...a) => { try { if (typeof f === 'function') f(...a); } catch (e) { console.warn('labrat: socket hook', e); } };
+  let wait = 2000;
+  const open = () => {
+    let ws;
+    try { ws = new WebSocket(url); } catch (e) { setTimeout(open, wait); return; }
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => { wait = 2000; call(h.onRelay, true); };
+    ws.onmessage = ev => {
+      if (typeof ev.data !== 'string') { call(h.onBinary, ev.data); return; }
+      if (ev.data.length > 65536) return;
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (!m || typeof m !== 'object') return;
+      if (m.channel === 'pons') call(h.onPons, m);
+      else if (m.channel === 'maze') call(h.onMaze, m);
+      else call(h.onText, m);
+    };
+    ws.onclose = () => {
+      call(h.onRelay, false);
+      call(h.onText, { type: 'idle' }); call(h.onMaze, { type: 'idle', channel: 'maze' });
+      setTimeout(open, wait); wait = Math.min(wait * 2, 30000);
+    };
+    ws.onerror = () => { try { ws.close(); } catch (e) { /* ignore */ } };
+  };
+  open();
+  return true;
+}
+
 /* ------------------------------------------------------------------ the rat on pons (the relay's pons channel)
    The buy rig (live/buyrig.py) streams the real pons page while the rat clicks through a $LABRAT buy: masked JPEG
    frames (b"PJPG" + JPEG) and messages marked "channel":"pons" (pons_hello / pons_step / pons_result / pons_bye from the
@@ -578,7 +621,10 @@ const PONS = (function ratOnPons() {
               k: $('#rp-k'), target: $('#rp-target'), phase: $('#rp-phase'), steps: $('#rp-steps'), amtK: $('#rp-amt-k'), amt: $('#rp-amt'),
               outK: $('#rp-out-k'), out: $('#rp-out'), checks: $('#rp-checks'), clicks: $('#rp-clicks'), next: $('#rp-next'),
               note: $('#rp-note') };
-  const api = { onPons() {}, onFrame() {}, onRelay() {}, onBuyback() {}, ownSocket() {} };
+  // a page without this panel (/burn) still gets the page's own socket through the same call
+  const api = { onPons() {}, onFrame() {}, onRelay() {}, onBuyback() {},
+                ownSocket(other) { if (api.own) return; const o = other && typeof other === 'object' ? other : {};
+                  api.own = relaySocket({ onRelay: o.onRelay, onText: o.onText, onMaze: o.onMaze }); } };
   if (!wrap || !E.cv || !E.cv.getContext || Object.values(E).some(x => !x)) return api;
   // frames are decoded off the main thread (createImageBitmap) and handed to the canvas without a copy
   // (bitmaprenderer); a 2d canvas where that is missing
@@ -898,30 +944,17 @@ const PONS = (function ratOnPons() {
     if (!wrap.hidden) render();
   }
   // the 3D view could not start, or was torn down (so live.js holds no relay socket): a socket of the page's own.
-  // other: {onText(m), onRelay(open)} for the page's other panels (Rat Tiles reads the training channel's texts)
+  // other: {onText(m), onMaze(m), onRelay(open)} for the page's other panels (Rat Tiles reads the training channel's
+  // texts, Rat Maze the maze channel's)
   function ownSocket(other) {
-    const url = window.LABRAT_RELAY;
-    if (S.own || typeof url !== 'string' || !/^wss?:\/\//i.test(url)) return;
-    S.own = true;
+    if (S.own) return;
     const o = other && typeof other === 'object' ? other : {};
     const call = (f, x) => { try { if (typeof f === 'function') f(x); } catch (e) { console.warn('labrat: socket hook', e); } };
-    let wait = 2000;
-    const open = () => {
-      let ws;
-      try { ws = new WebSocket(url); } catch (e) { setTimeout(open, wait); return; }
-      ws.binaryType = 'arraybuffer';
-      ws.onopen = () => { wait = 2000; onRelay(true); call(o.onRelay, true); };
-      ws.onmessage = ev => {
-        if (typeof ev.data !== 'string') { onFrame(ev.data); return; }
-        if (ev.data.length > 65536) return;
-        let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-        if (!m || typeof m !== 'object') return;
-        if (m.channel === 'pons') onPons(m); else call(o.onText, m);
-      };
-      ws.onclose = () => { onRelay(false); call(o.onRelay, false); call(o.onText, { type: 'idle' }); setTimeout(open, wait); wait = Math.min(wait * 2, 30000); };
-      ws.onerror = () => { try { ws.close(); } catch (e) { /* ignore */ } };
-    };
-    open();
+    S.own = relaySocket({
+      onRelay: open => { onRelay(open); call(o.onRelay, open); },
+      onBinary: onFrame,             // keeps only b"PJPG" frames (isPonsFrame); a maze or training frame is dropped
+      onPons, onText: o.onText, onMaze: o.onMaze,
+    });
   }
   setInterval(() => { if (!wrap.hidden && !document.hidden) render(); }, 2000);
   render();
@@ -1953,8 +1986,13 @@ const TILES = (function ratTiles() {
 })();
 
 /* ------------------------------------------------------------------ Rat Maze: R-01 escapes a maze
-   A training run whose hello says task "maze" also streams, on the relay socket the 3D view uses (live.js hands them
-   over through onMaze; the relay replays the current maze's layout and then the newest snapshot to a late joiner):
+   Rat Maze has a trainer of its own, streaming on the relay's MAZE CHANNEL: every text message of that channel reaches
+   the page marked "channel":"maze" (its hello / state / metrics / checkpoint / episode / bye / idle, and the maze /
+   maze_end messages below), and its rat frames carry a b"MZ" prefix (this panel draws no rat frames). live.js hands the
+   channel's texts over through onMazeChannel and the page's own socket through onMaze; onChannel below reads them. The
+   older way, a run whose hello says task "maze" on the training channel itself (live.js's onMaze / onStatus, or onRaw),
+   is still read, but only while the maze channel has no session: the two never mix.
+   A maze run streams (the relay replays the current maze's layout and then the newest snapshot to a late joiner):
      {"type":"maze","t","maze_id","w","h","walls","cell":[cx,cy],"pos":[x,y],"cheese":[gx,gy],"trail":[[cx,cy],...],
       "bumps","steps","dist"}
          up to 8 a second. walls: the maze's layout, one hex char per cell, row-major, the bits N=8, E=4, S=2, W=1 set
@@ -1969,11 +2007,14 @@ const TILES = (function ratTiles() {
    This panel draws the maze from above (a drawing of the game's state: the layout, the marker, the trail, the cheese and
    each outcome come from the stream; the marker is the labrat logo), a quarter of a second behind the stream,
    interpolating the marker between snapshots, and keeps the score.
-   Honesty: LIVE only when live.js reports a live training run; a test stream is labelled as one; every value from the
-   stream is checked before it is drawn or written. The home page only has the teaser (#mz-teaser). */
+   Honesty: LIVE only when the relay reports a live training run on the channel; a test stream is labelled as one; every
+   value from the stream is checked before it is drawn or written. The home page only has the teaser (#mz-teaser); the
+   panel lives on /burn, where each hour's escape rate sizes the hour's $LABRAT burn (onBurn shows that sentence once the
+   burn engine's status has been read). On a page without the live panel this panel also sets the nav's status chip. */
 const MAZE = (function ratMaze() {
   const teaser = $('#mz-teaser'), teaserSt = $('#mz-teaser-st');
   const sec = $('#maze');
+  const navSt = !HAS_LIVE && $('#nav-status') && $('#nav-status-t') ? { a: $('#nav-status'), t: $('#nav-status-t') } : null;
   const E = sec ? { badge: $('#mz-badge'), badgeT: $('#mz-badge-t'), conn: $('#mz-conn'), screen: $('#mz-screen'),
     cv: $('#mz-canvas'), emptyT: $('#mz-empty-t'), emptyS: $('#mz-empty-s'), cap: $('#mz-cap'), now: $('#mz-now'),
     nowS: $('#mz-now-s'), size: $('#mz-size'), esc: $('#mz-esc'), rate: $('#mz-rate'), avg: $('#mz-avg'),
@@ -1997,7 +2038,10 @@ const MAZE = (function ratMaze() {
 
   /* ---- state */
   const S = {
-    st: null,                  // {live, test, streaming, task, run} from the 3D view (or this panel's own socket)
+    st: null,                  // {live, test, streaming, task, run}: the session this panel follows (ch, else def)
+    ch: null,                  // the maze channel's session, the same shape, or null while it has none
+    def: null,                 // the training channel's status (the older way: a maze run streamed there), or null
+    src: 'training',           // which of the two the maze / maze_end messages are taken from right now
     open: false, wasOpen: false,
     snaps: [], lastAt: 0, play: null, lastT: 0,
     maze: null,                // the current maze's layout {id, w, h, open, dead, cheese, key, at}, from a snapshot with walls
@@ -2007,7 +2051,7 @@ const MAZE = (function ratMaze() {
     run: null, had: false,
     pending: [], fx: [],
     rat: { ang: Math.PI, vx: 0, vy: 0 },
-    bbMaze: false,
+    counts: false,             // the burn engine's status has been read: its escapes size the hour's burn (#mz-bb)
   };
   let lastMode = '', raf = 0, visible = true, W = 0, H = 0, dpr = 1, lastDraw = 0;
 
@@ -2035,7 +2079,7 @@ const MAZE = (function ratMaze() {
 
   /* st.stream (from live.js, or from onRaw): the relay's training session, null or {live, test, task, run}. When the
      status carries that key it is the truth about the relay (the 3D view's own live / test flags only change while it
-     is on screen); without it, the flags are all there is. */
+     is on screen); without it, the flags are all there is. This is the training channel (the older way). */
   function onStatus(st) {
     if (!st || typeof st !== 'object') return;
     const s = st.stream && typeof st.stream === 'object' ? st.stream : null;
@@ -2043,10 +2087,33 @@ const MAZE = (function ratMaze() {
     const streaming = hasStream ? !!s : st.live === true || st.test === true || st.source === 'test';
     const live = s ? s.live === true && s.test !== true : !hasStream && st.live === true;
     const src = s || st;
-    const next = { live, test: streaming && !live, streaming,
-                   task: typeof src.task === 'string' ? src.task : null, run: typeof src.run === 'string' ? src.run : null };
-    if (streaming && next.task === 'maze' && next.run && next.run !== S.run) newRun(next.run);
-    S.st = next;
+    S.def = { live, test: streaming && !live, streaming,
+              task: typeof src.task === 'string' ? src.task : null, run: typeof src.run === 'string' ? src.run : null };
+    apply();
+  }
+  /* the relay's maze channel: its state (a late joiner's first message), hello, bye and idle set the channel's session;
+     its maze / maze_end messages feed the panel while that session is the one followed */
+  let chHello = null;
+  function onChannel(m) {
+    if (!m || typeof m !== 'object' || m.channel !== 'maze') return;
+    switch (m.type) {
+      case 'state': chHello = m.live === true && m.hello && typeof m.hello === 'object' ? m.hello : null; break;
+      case 'hello': chHello = m; break;
+      case 'bye': case 'idle': chHello = null; break;
+      case 'maze': case 'maze_end': if (S.src === 'maze') onMazeMsg(m); return;
+      default: return;
+    }
+    const h = chHello, test = !!h && isTestHello(h);
+    S.ch = h ? { live: !test, test, streaming: true, task: typeof h.task === 'string' ? h.task : 'maze',
+                 run: typeof h.run === 'string' ? h.run : null } : null;
+    apply();
+  }
+  /* the session this panel follows: the maze channel's while it has one, else the training channel's status */
+  function apply() {
+    const ch = S.ch, next = ch || S.def;
+    const src = ch ? 'maze' : 'training';
+    if (next && next.streaming && next.task === 'maze' && (next.run !== S.run || src !== S.src)) newRun(next.run);
+    S.src = src; S.st = next;
     teaserUpdate();
     if (!panel) return;
     renderUi(); kick();
@@ -2054,6 +2121,8 @@ const MAZE = (function ratMaze() {
   function onRelay(open) {
     S.open = !!open;
     if (S.open) S.wasOpen = true;
+    // the socket is gone: so is the maze channel's session (its state comes again with the next socket)
+    if (!S.open && S.ch) { chHello = null; S.ch = null; apply(); return; }
     if (panel) { renderUi(); kick(); }
   }
 
@@ -2096,7 +2165,12 @@ const MAZE = (function ratMaze() {
     const { vx, vy } = S.rat;
     return Math.abs(vx) > Math.abs(vy) ? (vx > 0 ? 1 : 3) : (vy > 0 ? 2 : 0);
   }
+  /* a maze / maze_end message of the training channel (live.js's onMaze, or onRaw): read only while that channel is
+     the one followed (no maze channel session), so the two trainers' mazes never mix on one board */
   function onMaze(m) {
+    if (S.src === 'training') onMazeMsg(m);
+  }
+  function onMazeMsg(m) {
     if (!panel || !m || typeof m !== 'object') return;
     const now = performance.now() / 1000;
     if (m.type === 'maze') {
@@ -2619,16 +2693,23 @@ const MAZE = (function ratMaze() {
     const B = { connecting: ['conn', 'CONNECTING'], live: ['live', 'LIVE TRAINING'], test: ['test', 'TEST STREAM'],
                 wait: live ? ['live', 'LIVE TRAINING'] : ['test', 'TEST STREAM'], standby: ['off static', 'STANDBY'] }[m];
     E.badge.className = 'badge ' + B[0]; put(E.badgeT, B[1]);
-    const other = S.st && S.st.streaming && S.st.task !== 'maze' ? (TASKS[S.st.task] ? TASKS[S.st.task].name : 'another task') : null;
+    // the nav's status chip, on a page without the live panel (/burn): this panel's state
+    if (navSt) {
+      const N = { connecting: ['conn', 'connecting'], live: ['live', 'live'], test: ['test', 'test'],
+                  wait: live ? ['live', 'live'] : ['test', 'test'], standby: ['conn', 'standby'] }[m];
+      navSt.a.className = 'nav-status ' + N[0]; put(navSt.t, N[1]);
+      navSt.a.title = m === 'live' || (m === 'wait' && live) ? 'A Rat Maze training run is streaming now'
+        : m === 'test' || m === 'wait' ? 'A publisher test stream (not a live training run)' : 'Status of the Rat Maze panel';
+      navSt.a.setAttribute('aria-label', 'Rat Maze: ' + N[1]);
+    }
     put(E.conn, m === 'live' || m === 'test' ? 'in the maze now' : m === 'wait' ? 'starting'
-      : other ? 'training on another task' : !S.open && S.wasOpen ? 'reconnecting' : '');
+      : !S.open && S.wasOpen ? 'reconnecting' : '');
     let t = '', s = '';
     if (m === 'connecting') t = 'Connecting to the lab';
     else if (m === 'wait') { t = 'R-01 is about to enter the maze'; s = 'The first maze appears in a moment.'; }
     else if (m === 'standby') {
       t = 'R-01 isn’t in the maze right now';
-      s = other ? 'It is training on another task (' + other + '). Rat Maze sessions appear here while they stream.'
-        : 'The next session will appear here.';
+      s = 'Rat Maze sessions appear here while they stream; between them the hour keeps its count.';
       if (S.had && S.esc + S.to > 0) s = 'Last session: ' + plural(S.esc, 'maze', 'mazes') + ' escaped, ' + S.to + ' timed out. ' + s;
     }
     put(E.emptyT, t); put(E.emptyS, s);
@@ -2662,7 +2743,7 @@ const MAZE = (function ratMaze() {
     }
     if (S.best > 1) sub.push('best streak ' + S.best);
     put(E.sub, sub.join(' · '));
-    E.bb.hidden = !S.bbMaze;
+    E.bb.hidden = !S.counts;
     if (changed && !raf) { const t2 = performance.now() / 1000; draw(t2, m, 0); kick(); }
   }
 
@@ -2688,9 +2769,12 @@ const MAZE = (function ratMaze() {
     const h = rawHello;
     onStatus({ stream: h ? { live: !isTestHello(h), test: isTestHello(h), task: h.task, run: h.run } : null });
   }
-  function onBuyback(j) {
-    const on = !!(j && Array.isArray(j.tasks) && j.tasks.includes('maze'));
-    if (on !== S.bbMaze) { S.bbMaze = on; if (panel) renderUi(); }
+  /* the buyback engine (its --tasks leave the maze out: escapes size burns, not buybacks) */
+  function onBuyback() { /* nothing to show: see onBurn */ }
+  /* the burn engine's status has been read (the burn panel polls it): the maze's escapes size the hour's burn */
+  function onBurn(j) {
+    const on = !!(j && typeof j === 'object');
+    if (on !== S.counts) { S.counts = on; if (panel) renderUi(); }
   }
 
   if (panel) {
@@ -2705,7 +2789,7 @@ const MAZE = (function ratMaze() {
     kick();
   }
   teaserUpdate();
-  return { onStatus, onMaze, onRelay, onRaw, onBuyback };
+  return { onStatus, onMaze, onChannel, onRelay, onRaw, onBuyback, onBurn };
 })();
 
 /* ------------------------------------------------------------------ rat buybacks (buyback.js)
@@ -2797,9 +2881,12 @@ const MAZE = (function ratMaze() {
     if (E.next.textContent !== t) E.next.textContent = t;
   }
 
-  function banner(live) {
+  const BANNER_PAUSED = { pill: 'Buybacks paused',
+    text: 'Buybacks are paused: the buyback wallet is held at its gas reserve. Every buyback that was executed is ' +
+          'listed below with its transaction on the explorer.' };
+  function banner(live, paused) {
     if (!BANNER_DRY) return;
-    const b = live ? BANNER_LIVE : BANNER_DRY;
+    const b = live ? BANNER_LIVE : paused ? BANNER_PAUSED : BANNER_DRY;
     if (BN.pill.textContent !== b.pill) BN.pill.textContent = b.pill;
     if (BN.text.textContent !== b.text) BN.text.textContent = b.text;
     BN.box.classList.toggle('live', live);
@@ -2808,7 +2895,25 @@ const MAZE = (function ratMaze() {
   function render(j) {
     last = j;
     const live = j.mode === 'LIVE';
-    banner(live);
+    // real buys ever executed (the engine reads them from its bookings journal in every mode): a paused engine
+    // (back in DRY after live buybacks) says so and keeps the list, each with its transaction
+    const ex = obj(j.executed) || {}, exN = int(ex.count) || 0, exRecent = Array.isArray(ex.recent) ? ex.recent : [];
+    const paused = !live && exN > 0;
+    banner(live, paused);
+    const exK = $('#bb-exec-k'), exL = $('#bb-exec');
+    if (exK && exL) {
+      exK.hidden = exL.hidden = exN === 0;
+      if (exN > 0) {
+        exK.textContent = 'Executed buybacks · ' + exN + ' · ' + (dec(ex.eth_in) || '—') + ' ETH → ' + fmtTok(ex.labrat_out) + ' LABRAT';
+        exL.innerHTML = exRecent.slice(0, 12).map(r => {
+          if (!r || typeof r !== 'object' || r.simulated !== false || !TX.test(r.tx || '')) return '';
+          const at = typeof r.at === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(r.at) ? r.at.slice(0, 16).replace('T', ' ') + ' UTC' : '';
+          const rate = typeof r.hit_rate === 'number' ? ' · hit rate ' + Math.round(r.hit_rate * 1000) / 10 + '%' : '';
+          return '<li><span class="bb-t">' + esc(at) + '</span><span>buy: ' + esc(fmtEth(r.eth_in)) + ' &rarr; ' + esc(fmtTok(r.labrat_out)) +
+            ' LABRAT <em>clicked by the rat on pons</em>' + esc(rate) + ' ' + txLink(r.tx) + '</span></li>';
+        }).join('');
+      }
+    }
     E.mode.textContent = live ? 'LIVE' : 'Simulated';
     E.mode.classList.toggle('dry', !live);
     const rl = j.relay || {}, src = j.source || {};
@@ -2957,17 +3062,260 @@ const MAZE = (function ratMaze() {
   poll();
 })();
 
+/* ------------------------------------------------------------------ rat burns (burn.js, the /burn page)
+   Reads the burn engine's public status JSON (live/burn.py). One burn an hour, on the hour (UTC), sized by that hour's
+   escape rate at Rat Maze: burn = floor(burn share x the wallet's LABRAT balance at the hour's close x escape rate),
+   escape rate = escapes / (escapes + timeouts), the share at most 5% (a hard ceiling in the engine).
+     mode         "DRY" (simulated: each burn is checked with eth_call, never sent) or "LIVE" (real bookings)
+     window       {start, end, escapes, timeouts, escape_rate, wallet_balance, projected_burn}   the hour being counted
+     last_window  {... the same, plus burn: {state, amount, tx, simulated, note}}                the hour that ended last
+     totals       {burned, burns};  next_burn_at (ISO) / next_burn_in_s;  budget {pct, rule} or rule (text)
+     burns        {recent: [{at, window, amount, escape_rate, state, tx, simulated}], simulated}  (or recent at the top)
+     relay {connected, counting, test_stream}, source {public_relay, test}, stopped, updated
+   Amounts are whole LABRAT, as decimal strings or numbers. Anything absent renders as a dash.
+   Every figure carries its mode: anything not executed on-chain is labelled "Simulated" and never called a burn; a
+   test stream is never called live; a stale status is shown as stale; no address-like string is ever shown.
+   LIVE (mode "LIVE"): each hour's burn is booked (state "booked": not executed yet, never shown as burned) and executed
+   by the buy rig's signer; only an entry the engine verified on chain (state "executed" or "burned", simulated false,
+   its 0x + 64-hex tx hash) is shown as a burn, with its explorer link. The tx hash is used only in that link's href,
+   checked character by character. The banner at the top of /burn follows the mode: "Burns start soon" / "Burns live". */
+(function burns() {
+  const C = window.LABRAT_BURN, wrap = $('#brn-wrap');
+  if (!wrap || !C || typeof C !== 'object' || C.enabled !== true || typeof C.statusUrl !== 'string' || !C.statusUrl) return;
+  let url;
+  try { url = new URL(C.statusUrl, location.href); } catch (e) { return; }
+  const localHost = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if (!(url.protocol === 'https:' || (url.protocol === 'http:' && localHost))) {
+    console.warn('labrat: LABRAT_BURN.statusUrl must be https (or http on localhost)'); return;
+  }
+  const ADDR = /0x[0-9a-fA-F]{40}/;
+  const txt = s => (typeof s === 'string' && !ADDR.test(s)) ? s : null;
+  const int = v => (Number.isInteger(v) && v >= 0) ? v : null;
+  const obj = v => (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;
+  // an amount of LABRAT: a decimal string or a finite number, never negative
+  const amt = v => typeof v === 'number' ? (Number.isFinite(v) && v >= 0 ? v : null)
+    : (typeof v === 'string' && /^\d{1,24}(\.\d{1,18})?$/.test(v)) ? Number(v) : null;
+  const isoMs = s => (typeof s === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?Z$/.test(s)) ? Date.parse(s) : NaN;
+  const hm = ms => new Date(ms).toISOString().slice(11, 16);
+  const fmtTok = n => n === null ? '—' : n >= 100 ? Math.round(n).toLocaleString('en-US') : n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  const fmtN = v => v.toLocaleString('en-US');
+  // a rate 0..1, as the engine's number or string
+  const rate01 = r => {
+    const v = typeof r === 'string' && /^(0(\.\d{1,8})?|1(\.0{1,8})?)$/.test(r) ? Number(r) : r;
+    return typeof v === 'number' && isFinite(v) && v >= 0 && v <= 1 ? v : null;
+  };
+  // a window's escape rate: the engine's figure, else escapes / (escapes + timeouts)
+  const rateOf = w => {
+    if (!w) return null;
+    const r = rate01(w.escape_rate);
+    if (r !== null) return r;
+    const e = int(w.escapes), t = int(w.timeouts);
+    return e === null || t === null || e + t === 0 ? null : e / (e + t);
+  };
+  const pctTxt = r => r === null ? '—' : (r * 100).toFixed(r === 0 || r === 1 ? 0 : 1) + '%';
+  // the burn share: budget.pct (a string or number, 0 < pct <= 5); 5 when the engine does not say
+  const shareOf = j => {
+    const b = obj(j.budget) || {}, v = [b.pct, b.burn_pct, j.burn_pct].find(x => x !== undefined && x !== null);
+    const n = typeof v === 'string' && /^\d{1,2}(\.\d{1,4})?$/.test(v) ? Number(v) : typeof v === 'number' ? v : NaN;
+    return Number.isFinite(n) && n > 0 && n <= 5 ? n : 5;
+  };
+  const shareTxt = p => (Number.isInteger(p) ? String(p) : p.toFixed(2).replace(/\.?0+$/, '')) + '%';
+  const E = { mode: $('#brn-mode'), test: $('#brn-test'), conn: $('#brn-conn'),
+              winT: $('#brn-win-t'), next: $('#brn-next'), bar: $('#brn-win-bar'),
+              wEsc: $('#brn-w-esc'), wTo: $('#brn-w-to'), wRuns: $('#brn-w-runs'), wRate: $('#brn-w-rate'),
+              fBal: $('#brn-f-bal'), fBalSub: $('#brn-f-bal-sub'), fPct: $('#brn-f-pct'), fRate: $('#brn-f-rate'),
+              fK: $('#brn-f-k'), fBurn: $('#brn-f-burn'), fNote: $('#brn-f-note'),
+              last: $('#brn-last'), lastK: $('#brn-last-k'), lastStats: $('#brn-last-stats'), lastBurn: $('#brn-last-burn'),
+              tBurnsK: $('#brn-burns-k'), tBurns: $('#brn-burns'), tBurnedK: $('#brn-burned-k'), tBurned: $('#brn-burned'), tBal: $('#brn-bal'),
+              list: $('#brn-list'), note: $('#brn-note') };
+  if (Object.values(E).some(x => !x)) return;
+  // the banner at the top of /burn (optional: another page may not have it)
+  const BN = { box: $('#brn-banner'), pill: $('#brn-pill'), text: $('#brn-banner-t') };
+  const BANNER_DRY = BN.box && BN.pill && BN.text ? { pill: BN.pill.textContent, text: BN.text.textContent } : null;
+  const BANNER_LIVE = { pill: 'Burns live',
+    text: 'Every hour, one $LABRAT burn is sent from the rat’s wallet below, sized by that hour’s escape rate at Rat Maze ' +
+          'and never more than 5% of what the wallet holds. Each burn is verified on chain and linked to its transaction ' +
+          'on the explorer.' };
+  const TX = /^0x[0-9a-f]{64}$/;                           // a transaction hash, and nothing else, becomes a link
+  const TX_URL = 'https://robinhoodchain.blockscout.com/tx/';
+  const txLink = h => TX.test(h) ? '<a class="bb-tx" href="' + TX_URL + h + '" target="_blank" rel="noopener">View transaction</a>' : '';
+  const STALE_S = 90;          // the engine rewrites its status at least every 10 s; older than this = not running
+  // an engine note shown as text: plain words only, nothing address- or number-heavy
+  const safeNote = s => (typeof s === 'string' && s.length <= 140 && /^[A-Za-z][A-Za-z0-9 ,;:.%()'’\/-]*$/.test(s) && !/0x/i.test(s)) ? s.replace(/\.$/, '') : '';
+  const DONE = new Set(['executed', 'burned']);
+  wrap.hidden = false;
+  let last = null;             // the newest status, for the countdown between polls
+
+  function tick() {            // the hour's progress bar and the countdown to the next burn (every second)
+    const j = last;
+    if (!j) return;
+    const upd = isoMs(j.updated), stale = !Number.isFinite(upd) || (Date.now() - upd) / 1000 > STALE_S;
+    const w = obj(j.window), s = w ? isoMs(w.start) : NaN, e = w ? isoMs(w.end) : NaN, now = Date.now();
+    const frac = Number.isFinite(s) && Number.isFinite(e) && e > s ? Math.min(1, Math.max(0, (now - s) / (e - s))) : 0;
+    E.bar.style.transform = 'scaleX(' + frac.toFixed(4) + ')';
+    const stopped = txt(j.stopped);
+    let at = isoMs(j.next_burn_at);
+    if (!Number.isFinite(at) && int(j.next_burn_in_s) !== null && Number.isFinite(upd)) at = upd + j.next_burn_in_s * 1000;
+    let t = '';
+    if (stopped) t = 'Burns stopped';
+    else if (stale) t = 'Status not updating';
+    else if (Number.isFinite(at)) {
+      const left = Math.max(0, Math.round((at - now) / 1000));
+      const mm = Math.floor(left / 60), ss = left % 60;
+      t = 'Next burn ' + hm(at) + ' UTC · ' + (left <= 0 ? 'due now' : 'in ' + mm + ':' + String(ss).padStart(2, '0'));
+    }
+    if (E.next.textContent !== t) E.next.textContent = t;
+  }
+
+  function banner(live) {
+    if (!BANNER_DRY) return;
+    const b = live ? BANNER_LIVE : BANNER_DRY;
+    if (BN.pill.textContent !== b.pill) BN.pill.textContent = b.pill;
+    if (BN.text.textContent !== b.text) BN.text.textContent = b.text;
+    BN.box.classList.toggle('live', live);
+  }
+
+  function render(j) {
+    last = j;
+    const live = j.mode === 'LIVE';
+    banner(live);
+    E.mode.textContent = live ? 'LIVE' : 'Simulated';
+    E.mode.classList.toggle('dry', !live);
+    const rl = obj(j.relay) || {}, src = obj(j.source) || {};
+    // a TEST stream, test streams accepted, another relay, or an engine too old to say: never shown as live escapes
+    const test = src.test !== false || src.public_relay !== true || src.accept_test_streams === true || rl.test_stream === true;
+    E.test.hidden = !test;
+    const upd = isoMs(j.updated);
+    const stale = !Number.isFinite(upd) || (Date.now() - upd) / 1000 > STALE_S;
+    const tot = obj(j.totals) || {}, bl = obj(j.burns) || {};
+    const simulated = !live || tot.simulated === true || bl.simulated === true;
+    const share = shareOf(j);
+
+    // this hour
+    const w = obj(j.window), ws = w ? isoMs(w.start) : NaN, we = w ? isoMs(w.end) : NaN;
+    E.winT.textContent = Number.isFinite(ws) && Number.isFinite(we) ? hm(ws) + '–' + hm(we) + ' UTC' : '';
+    const n = v => int(v) !== null ? fmtN(v) : '—';
+    const esc0 = w ? int(w.escapes) : null, to0 = w ? int(w.timeouts) : null;
+    E.wEsc.textContent = w ? n(w.escapes) : '—'; E.wTo.textContent = w ? n(w.timeouts) : '—';
+    E.wRuns.textContent = esc0 !== null && to0 !== null ? fmtN(esc0 + to0) : '—';
+    const rate = rateOf(w);
+    E.wRate.textContent = pctTxt(rate);
+
+    // the rule, with this hour's numbers: the wallet's LABRAT x the burn share x the escape rate
+    const bal = w ? amt(w.wallet_balance) : null;
+    E.fBal.textContent = bal !== null ? fmtTok(bal) + ' LABRAT' : '—';
+    E.fBalSub.textContent = bal !== null ? 'in the rat’s wallet now' : '';
+    E.fPct.textContent = shareTxt(share);
+    E.fRate.textContent = pctTxt(rate);
+    const proj = w ? amt(w.projected_burn) : null;
+    const est = proj !== null ? proj : bal !== null && rate !== null ? Math.floor(bal * share / 100 * rate) : null;
+    E.fK.textContent = (simulated ? 'Simulated burn' : 'Burn') + ' on the hour';
+    E.fBurn.textContent = est !== null ? (proj !== null ? '' : '≈ ') + fmtTok(est) + ' LABRAT' : '—';
+    E.fNote.textContent = est !== null
+      ? 'At this hour’s escape rate so far; the burn is sized when the hour closes, from the balance then, and never exceeds ' + shareTxt(share) + ' of it.'
+      : 'Sized when the hour closes: ' + shareTxt(share) + ' of the wallet’s LABRAT × that hour’s escape rate. No escapes, no burn.';
+
+    // the last hour
+    const lw = obj(j.last_window);
+    E.last.hidden = !lw;
+    if (lw) {
+      const ls = isoMs(lw.start), le = isoMs(lw.end);
+      E.lastK.textContent = 'Last hour' + (Number.isFinite(ls) && Number.isFinite(le) ? ' · ' + hm(ls) + '–' + hm(le) + ' UTC' : '');
+      const lr = rateOf(lw), lbal = amt(lw.wallet_balance);
+      E.lastStats.textContent = [int(lw.escapes) !== null ? fmtN(lw.escapes) + ' escaped' : '', int(lw.timeouts) !== null ? fmtN(lw.timeouts) + ' timed out' : '',
+        'escape rate ' + pctTxt(lr), lbal !== null ? 'wallet held ' + fmtTok(lbal) + ' LABRAT' : ''].filter(Boolean).join(' · ');
+      // its burn: {state: due | simulated | booked | executed | burned | none | expired, note, amount, simulated, tx (LIVE, once verified)}
+      const lb = obj(lw.burn) || {};
+      const why = [lb.note, lw.note].map(safeNote).find(Boolean) || '';
+      const burned = live && lb.simulated === false && DONE.has(lb.state) && TX.test(lb.tx || '');
+      const a = amt(lb.amount), aTxt = a !== null ? fmtTok(a) + ' LABRAT' : '';
+      let line = '';
+      if (burned) line = 'Burned: ' + aTxt;
+      else if (lb.state === 'simulated') line = 'Simulated burn: ' + (aTxt || '—') + ' · checked on the live chain, not sent';
+      else if (live && lb.state === 'booked') line = (aTxt ? 'Burn of ' + aTxt + ' booked' : 'Burn booked') + ': the rat’s wallet sends it next, not executed yet';
+      else if (lb.state === 'due') line = (live ? 'Burn' : 'Simulated burn') + (aTxt ? ' of ' + aTxt : '') + ' booked: ' + (live ? 'executed next' : 'simulated next');
+      else if (lb.state === 'expired') line = (live ? 'The hour’s burn was not executed in time' : 'The hour’s burn was not completed in time') + (why ? ': ' + why : '');
+      else if (lb.state === 'none' || (a === null && Object.keys(lb).length)) line = 'No burn this hour' + (why ? ': ' + why : '');
+      else if (a !== null && !live) line = 'Simulated burn: ' + aTxt;
+      E.lastBurn.innerHTML = esc(line) + (burned ? ' · ' + txLink(lb.tx) : '');
+      E.lastBurn.hidden = !line;
+    }
+
+    // totals
+    const nb = int(tot.burns), burnedTot = amt(tot.burned);
+    E.tBurnsK.textContent = simulated ? 'Simulated burns' : 'Burns';
+    E.tBurnedK.textContent = simulated ? 'LABRAT (simulated)' : 'LABRAT burned';
+    E.tBurns.textContent = nb !== null ? fmtN(nb) : '—';
+    E.tBurned.textContent = fmtTok(burnedTot);
+    E.tBal.textContent = bal !== null ? fmtTok(bal) : '—';
+    const recent = Array.isArray(bl.recent) ? bl.recent : Array.isArray(j.recent) ? j.recent : [];
+    E.list.innerHTML = recent.slice(0, 6).map(r => {
+      if (!r || typeof r !== 'object') return '';
+      const sim = !live || r.simulated !== false;
+      // LIVE: a burn only once the engine verified it on chain (state executed / burned, with its transaction hash)
+      const executed = !sim && DONE.has(r.state) && TX.test(r.tx || '');
+      const at = txt(r.at) && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?Z$/.test(r.at) ? r.at.slice(11, 16) + ' UTC' : '';
+      const rr = rate01(r.escape_rate);
+      const rateT = rr !== null ? ' <em>(escape rate ' + esc(pctTxt(rr)) + ')</em>' : '';
+      const a = amt(r.amount), aTxt = a !== null ? fmtTok(a) + ' LABRAT' : '—';
+      if (!sim && !executed) {             // LIVE, booked or expired: never shown as burned
+        const what = r.state === 'expired' ? 'not executed' : 'booked, not executed yet';
+        return '<li><span class="bb-t">' + esc(at) + '</span><span>' + esc(aTxt) + ' burn ' + what + rateT + '</span></li>';
+      }
+      return '<li><span class="bb-t">' + esc(at) + '</span><span>' + (sim ? 'simulated burn' : 'burn') + ': ' + esc(aTxt) + rateT +
+        (executed ? ' ' + txLink(r.tx) : '') + '</span></li>';
+    }).join('');
+
+    const stopped = txt(j.stopped);
+    const counting = rl.counting === true && !stale;
+    E.conn.textContent = stale ? 'status stale' : stopped ? 'burns stopped'
+      : counting ? (test ? 'counting a test stream' : 'counting live play')
+      : rl.connected === true ? 'waiting for a maze session' : 'not connected';
+    E.conn.className = 'bb-conn' + (stale || stopped ? ' off' : counting && !test ? ' on' : '');
+    const updTxt = Number.isFinite(upd) ? hm(upd) + ' UTC' : 'an unknown time';
+    E.note.textContent = (stale ? 'This status has not updated since ' + updTxt + ': the counter may not be running. ' : '') +
+      (test ? 'These counts come from a test stream. ' : '') +
+      (stopped ? 'Burns stopped: ' + stopped + '. ' : '') +
+      (simulated ? 'Burns shown are simulated against the live chain: checked, not sent. '
+                 : 'A burn counts only once its transaction is verified on chain: sent from the rat’s wallet, for the booked amount, out of circulation. ') +
+      'Escapes and timeouts are counted as each maze ends; one burn an hour, on the hour (UTC), never more than ' + shareTxt(share) + ' of the wallet’s LABRAT.';
+    tick();
+  }
+
+  let timer = 0;
+  async function poll() {
+    timer = 0;
+    try {
+      const r = await fetch(url.href, { cache: 'no-store', credentials: 'omit' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      if (!j || typeof j !== 'object') throw new Error('bad status');
+      render(j);
+      MAZE.onBurn(j);                    // Rat Maze says its escapes size the hour's burn
+    } catch (e) {
+      E.conn.textContent = 'status unavailable'; E.conn.className = 'bb-conn off';
+    }
+    if (!document.hidden) timer = setTimeout(poll, 15000);
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !timer) poll(); });
+  setInterval(() => { if (!document.hidden) tick(); }, 1000);
+  poll();
+})();
+
 /* ------------------------------------------------------------------ mount the 3D viewer (js/live.js) */
 setMode('connecting');
 recordedReady.then(() => renderHUD());
 
-// the page's own relay socket, for when the 3D view (and so its socket) is not there: the pons panel, Rat Tiles and
-// Rat Maze
+// the page's own relay socket, for when the 3D view (and so its socket) is not there: the pons panel, Rat Tiles (the
+// training channel) and Rat Maze (the maze channel)
 const fallbackSocket = () => PONS.ownSocket({ onText: m => { TILES.onRaw(m); MAZE.onRaw(m); },
+                                              onMaze: m => MAZE.onChannel(m),
                                               onRelay: o => { TILES.onRelay(o); MAZE.onRelay(o); } });
 
 (async function mountViewer() {
   const el = $('#live-view');
+  // a page without the 3D view (/burn): its panels read the relay through the page's own socket
+  if (!el || !HAS_LIVE) { fallbackSocket(); return; }
   let mod = null;
   try { mod = await import('./live.js'); }
   catch (e) { console.warn('labrat: live viewer unavailable -', e && e.message ? e.message : e); }
@@ -2987,8 +3335,10 @@ const fallbackSocket = () => PONS.ownSocket({ onText: m => { TILES.onRaw(m); MAZ
       // Rat Tiles (a training run with task "tiles"): board snapshots and tile outcomes, and each attempt's result
       onTiles: m => { try { TILES.onTiles(m); } catch (e) { console.warn('labrat: onTiles', e); } },
       onEpisode: m => { try { TILES.onEpisode(m); } catch (e) { console.warn('labrat: onEpisode', e); } },
-      // Rat Maze (a training run with task "maze"): maze snapshots and each maze's outcome
+      // Rat Maze (a training run with task "maze" on the training channel): maze snapshots and each maze's outcome
       onMaze: m => { try { MAZE.onMaze(m); } catch (e) { console.warn('labrat: onMaze', e); } },
+      // the relay's maze channel (the maze trainer): its session and its maze messages; its frames are not drawn here
+      onMazeChannel: m => { try { MAZE.onChannel(m); } catch (e) { console.warn('labrat: onMazeChannel', e); } },
       onRelay: (open, gone) => { PONS.onRelay(open); TILES.onRelay(open); MAZE.onRelay(open); if (gone) fallbackSocket(); },
     });
     // null: the 3D view could not start here; the dot-rat placeholder stays up with the offline message
