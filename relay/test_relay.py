@@ -3,11 +3,13 @@
 Starts the relay with the Procfile's own command line on 127.0.0.1:4762 (RELAY_TEST_PORT overrides it) and drives it
 with a fake publisher and several viewers: two fast ones (the websockets client), a deliberately slow one and a stuck
 one (hand-rolled websocket clients on a socket with a 4 KB receive buffer, reading at a pace we set), plus short-lived
-ones for the caps. Then, on a fresh relay, the pons channel: a fake buy-rig publisher next to a training publisher.
+ones for the caps. Then, on fresh relays: the pons channel (a fake buy-rig publisher next to a training publisher),
+Rat Tiles, Rat Maze on the default channel, and the maze channel (a fake Rat Maze publisher on /publish?channel=maze
+next to a fake Rat Tiles publisher on the default channel: one viewer gets both, each marked as its own).
 
     python relay/test_relay.py
 
-Takes about two minutes (it waits out the real 15 s idle timer four times). Prints PASS/FAIL per check and exits
+Takes about three minutes (it waits out the real 15 s idle timer six times). Prints PASS/FAIL per check and exits
 non-zero on any failure. It only ever stops the relay processes it started itself.
 """
 import asyncio
@@ -828,6 +830,8 @@ async def other_relays():
         check(code == 503, '/publish without a token is refused (503)', f'HTTP {code}')
         code, _ = await refused_status(PONS_PUB, AUTH)
         check(code == 503, '/publish?channel=pons is refused (503) too', f'HTTP {code}')
+        code, _ = await refused_status(f'ws://{HOSTPORT}/publish?channel=maze', AUTH)
+        check(code == 503, '/publish?channel=maze is refused (503) too', f'HTTP {code}')
         V = await Rec('V').start()
         await until(lambda: len(V.msgs) >= 1, 3)
         check(V.msgs and strict(V.msgs[0][1]).get('live') is False, 'viewers still connect and see not-live')
@@ -867,6 +871,16 @@ async def other_relays():
         check(st['pons']['live'] is True and st['pons']['hello'] == as_pons(tp) and as_pons(tp) in V.texts()
               and [m for _, m in V.msgs if is_pons(m)] == [pons_frame(1)],
               'a pons test session ("test": true) reaches viewers, marked as a test')
+        MQ = await connect(f'ws://{HOSTPORT}/publish?channel=maze', additional_headers=AUTH, open_timeout=5)
+        tm = dict(MAZE_HELLO, test=True, label='TEST (not a live training run): relay test maze')
+        await MQ.send(json.dumps(tm))
+        await MQ.send(make_frame(2))
+        await until(lambda: any(is_mz(m) for _, m in V.msgs), 3)
+        st = await status()
+        check(st['maze_channel']['live'] is True and st['maze_channel']['hello'] == as_maze(tm)
+              and as_maze(tm) in V.texts() and [m for _, m in V.msgs if is_mz(m)] == [b'MZ' + make_frame(2)],
+              'a maze-channel test stream reaches viewers, marked as a test and as the maze channel\'s')
+        await MQ.close()
         await PQ.close()
         await P.close()
         await V.close()
@@ -1728,11 +1742,356 @@ async def maze_checks(closers, raws):
     check(True, 'its first (layout) snapshot goes straight through')
 
 
+MAZE_PUB = f'ws://{HOSTPORT}/publish?channel=maze'
+
+
+def is_mz(b):
+    """A maze-channel frame as viewers get it: b"MZ" + the publisher's frame."""
+    return isinstance(b, bytes) and b[:2] == b'MZ'
+
+
+def mz_k(b):
+    return frame_k(b[2:])
+
+
+def as_maze(d):
+    return dict(d, channel='maze')
+
+
+def tagged(rec, after=0):
+    """The maze-channel texts a viewer got (parsed), in order."""
+    return [strict(m) for _, m in rec.msgs[after:] if isinstance(m, str) and strict(m).get('channel') == 'maze']
+
+
+def untagged(rec, after=0):
+    """The default-channel texts a viewer got (raw), in order: no "channel" key at all."""
+    return [m for _, m in rec.msgs[after:] if isinstance(m, str) and 'channel' not in strict(m)]
+
+
+async def maze_channel_relay():
+    relay = Relay({'LABRAT_PUBLISH_TOKEN': TOKEN}, 'mazechannel')
+    closers, raws = [], []
+    try:
+        await maze_channel_checks(closers, raws)
+    finally:
+        for r in raws:
+            r.shutdown()
+        for c in closers:
+            try:
+                await c()
+            except Exception:
+                pass
+        relay.stop()
+        log = relay.text()
+    check('Traceback' not in log and 'Exception in ASGI' not in log, 'the relay logged no exceptions (maze channel)',
+          f'log: {relay.logpath}')
+    if 'Traceback' in log or 'Exception in ASGI' in log:
+        print(log[-4000:])
+
+
+async def maze_channel_checks(closers, raws):
+    section('maze channel: auth, its own publisher slot, and Rat Maze runs only')
+    for hdrs, what in [(None, 'no Authorization header'), ({'Authorization': 'Bearer nope-nope-nope-nope'}, 'a wrong token')]:
+        code, _ = await refused_status(MAZE_PUB, hdrs)
+        check(code == 401, f'/publish?channel=maze refuses {what}', f'HTTP {code}')
+    A = await Rec('A').start()
+    closers.append(A.close)
+    await asyncio.sleep(0.4)
+    check(len(A.msgs) == 1 and A.texts()[0].get('type') == 'state' and 'channel' not in A.texts()[0],
+          'a viewer gets no maze-channel message before the channel has had a session', f'{len(A.msgs)} messages')
+    T = await connect(PUB, additional_headers=AUTH, open_timeout=5)          # Rat Tiles on the default channel
+    closers.append(T.close)
+    await T.send(json.dumps(TILES_HELLO))
+    M = await connect(MAZE_PUB, additional_headers=AUTH, open_timeout=5)
+    check(True, 'a maze-channel publisher is accepted while the default channel streams')
+    code, _ = await refused_status(MAZE_PUB, AUTH)
+    check(code == 409, 'a second maze-channel publisher is refused while the first is fresh (409)', f'HTTP {code}')
+    code, _ = await refused_status(PUB, AUTH)
+    check(code == 409, 'the default channel\'s slot is still its own (a second publisher there: 409)', f'HTTP {code}')
+    await until(lambda: A.find_text(lambda d: d == TILES_HELLO) is not None, 3)
+    mark = len(A.msgs)
+    await M.send(json.dumps(TILES_HELLO))                                      # a tiles run on the maze channel
+    code = await close_code_of(M, 5)
+    reason = M.close_reason or ''
+    await asyncio.sleep(0.2)
+    st = await status()
+    check(code == 1008 and 'Rat Maze' in reason and st['maze_channel']['live'] is False and A.msgs[mark:] == []
+          and st['counts'].get('maze_channel_refused_wrong_task_hello') == 1,
+          'a hello with task "tiles" on the maze channel is refused (1008) and never shown', f'close {code} {reason!r}')
+    check(not any(w in reason.lower() for w in ('auth', 'token')),
+          'the refusal does not read as a token problem (publish_training.py stops for good on those)')
+    check(st['live'] is True and st['hello'] == TILES_HELLO, 'the default channel did not notice')
+    M = await connect(MAZE_PUB, additional_headers=AUTH, open_timeout=5)
+    closers.append(M.close)
+
+    section('maze channel: forwarded marked "channel":"maze" and b"MZ"; the default channel unchanged')
+    mark = len(A.msgs)
+    await M.send(make_frame(1))                                                # before the hello: dropped
+    await M.send(json.dumps({'type': 'metrics', 'row': {'steps': 1}}))         # before the hello: dropped
+    await M.send(json.dumps(MAZE_HELLO))
+    rows_m = [{'steps': 1000 * (i + 1), 'ret': 2.0 + i, 'hits': 3 + i} for i in range(3)]
+    for r in rows_m:
+        await M.send(json.dumps({'type': 'metrics', 'row': r}))
+    ck_m = {'type': 'checkpoint', 'steps': 3000, 'sha256': 'cd' * 32}
+    await M.send(json.dumps(ck_m))
+    row_text = json.dumps({'type': 'metrics', 'row': {'steps': 500, 'ret': 1.5}})
+    snap_t = tiles_snap(5)
+    await T.send(row_text)
+    await T.send(make_frame(11))
+    await T.send(snap_t)
+    lay = maze_snap(100, maze_id=1, layout=True)
+    pos = maze_snap(101, maze_id=1)
+    end1 = maze_end(1)
+    ep_m = {'type': 'episode', 'n': 0, 'presses': 1, 'hits': 1, 'misses': 0, 'fell': False}
+    await M.send(lay)
+    await M.send(make_frame(2))
+    await M.send(pos)
+    await M.send(end1)
+    await M.send(json.dumps(ep_m))
+    await until(lambda: A.find_text(lambda d: d.get('type') == 'episode' and d.get('channel') == 'maze', mark) is not None, 3)
+    seq = A.msgs[mark:]
+    raw_texts = [m for _, m in seq if isinstance(m, str)]
+    check(row_text in raw_texts and snap_t in raw_texts, 'default-channel texts (a row, a tiles snapshot) are forwarded '
+          'verbatim, with no "channel" key added')
+    check([m for _, m in seq if isinstance(m, bytes) and not is_mz(m)] == [make_frame(11)],
+          'the default channel\'s frame is forwarded byte for byte, no prefix')
+    want = ([as_maze(MAZE_HELLO)] + [as_maze({'type': 'metrics', 'row': r}) for r in rows_m] + [as_maze(ck_m)]
+            + [as_maze(strict(lay)), as_maze(strict(pos)), as_maze(strict(end1)), as_maze(ep_m)])
+    got = tagged(A, mark)
+    check(got == want, 'the maze channel\'s hello, rows, checkpoint, layout and position snapshots, maze_end and '
+          'episode arrive with "channel":"maze", in order; nothing sent before its hello', str([t.get('type') for t in got]))
+    check([m for _, m in seq if is_mz(m)] == [b'MZ' + make_frame(2)], 'its frame arrives as b"MZ" + the frame, byte for byte')
+    check(all(strict(m).get('channel') == 'maze' for m in raw_texts if strict(m).get('type') in ('maze', 'maze_end')),
+          'no maze / maze_end text of the channel reaches a viewer unmarked')
+    st = await status()
+    mc = st['maze_channel']
+    check(st['live'] is True and st['hello'] == TILES_HELLO and st['metrics'] == {'steps': 500, 'ret': 1.5}
+          and st['history_rows'] == 1 and st['frames_in'] == 1 and st['checkpoint'] is None,
+          '/status top level: still the default channel alone (Rat Tiles, its row, its frame)')
+    check(mc['channel'] == 'maze' and mc['live'] is True and mc['hello'] == as_maze(MAZE_HELLO) and mc['metrics'] == rows_m[-1]
+          and mc['history_rows'] == 3 and mc['checkpoint'] == as_maze(ck_m) and mc['episode'] == as_maze(ep_m)
+          and mc['frames_in'] == 1 and mc['publisher']['in_session'] is True and mc['frame_prefix'] == 'MZ'
+          and mc['tasks'] == ['maze'] and mc['maze'] and mc['maze']['maze_id'] == 1 and mc['maze']['steps'] == 101,
+          '/status maze_channel: live, its hello, last row, 3 rows, checkpoint, episode, frame count, maze snapshot',
+          json.dumps({k: mc[k] for k in ('live', 'history_rows', 'frames_in', 'maze')}))
+    c = st['counts']
+    check(c.get('maze_channel_dropped_outside_session') == 2 and not c.get('dropped_outside_session')
+          and c.get('maze_channel_publishers_accepted') == 2 and c.get('publishers_accepted') == 1,
+          'the channel\'s drops and handshakes are counted under maze_channel_*, apart from the default channel\'s',
+          json.dumps({k: v for k, v in c.items() if 'maze_channel' in k}))
+
+    section('maze channel: a late joiner gets both states, each channel\'s replay in order, the maze channel marked')
+    B = await Rec('B').start()
+    closers.append(B.close)
+    await until(lambda: len(B.msgs) >= 7, 3)
+    await asyncio.sleep(0.3)
+    m = [x for _, x in B.msgs]
+    kinds = [('mz', mz_k(x)) if is_mz(x) else ('frame', frame_k(x)) if isinstance(x, bytes)
+             else ('text', strict(x).get('type'), strict(x).get('channel')) for x in m]
+    s0 = strict(m[0]) if m and isinstance(m[0], str) else {}
+    s1 = strict(m[3]) if len(m) > 3 and isinstance(m[3], str) else {}
+    check(kinds == [('text', 'state', None), ('frame', 11), ('text', 'tiles', None), ('text', 'state', 'maze'), ('mz', 2),
+                    ('text', 'maze', 'maze'), ('text', 'maze', 'maze')],
+          'it gets: the default state, its frame, its tiles snapshot; then the maze state, its MZ frame, the layout, '
+          'the newest snapshot; no pons state', str(kinds))
+    check(s0.get('live') is True and s0.get('hello') == TILES_HELLO and 'channel' not in s0
+          and set(s0) == {'type', 'live', 'hello', 'checkpoint', 'episode', 'history'},
+          'the default state is exactly as before (no "channel" key)')
+    check(s1 == {'type': 'state', 'channel': 'maze', 'live': True, 'hello': as_maze(MAZE_HELLO), 'checkpoint': as_maze(ck_m),
+                 'episode': as_maze(ep_m), 'history': rows_m}
+          and isinstance(m[3], str) and m[3].startswith('{"type":"state","channel":"maze",'),
+          'the maze state: "channel":"maze" right after "type", live, its hello, checkpoint, episode and rows')
+    check(len(m) > 6 and m[5] == json.dumps(as_maze(strict(lay)), separators=(',', ':'))
+          and m[6] == json.dumps(as_maze(strict(pos)), separators=(',', ':')),
+          'the replayed layout and newest snapshot are the marked texts exactly as they were forwarded')
+
+    section('maze channel: caps and junk are counted under maze_channel_*, the default counters stay clean')
+    mark = len(A.msgs)
+    await M.send(make_frame(7777, size=4100))                                  # over 4096 bytes
+    await M.send(b'\x00\x00')                                                  # not a frame
+    await M.send('not json at all')
+    await M.send(json.dumps({'type': 'state', 'channel': 'maze', 'live': True}))   # relay-only
+    await M.send(tiles_snap(9))                                                # a tiles snapshot in a maze run
+    await M.send(maze_snap(300, maze_id=1, w=0))                               # a zero-width maze
+    await M.send(json.dumps({'type': 'metrics', 'row': {'steps': 900000, 'pad': 'x' * 70000}}))   # over 64 KB
+    end2 = maze_end(2, 'timeout')
+    await M.send(make_frame(3))
+    await M.send(end2)
+    await until(lambda: A.find_text(lambda d: d.get('type') == 'maze_end' and d.get('maze_id') == 2, mark) is not None, 3)
+    seq = A.msgs[mark:]
+    check([mz_k(x) for _, x in seq if is_mz(x)] == [3] and not [x for _, x in seq if isinstance(x, bytes) and not is_mz(x)]
+          and tagged(A, mark) == [as_maze(strict(end2))] and untagged(A, mark) == [],
+          'only the good frame (as MZ) and the good maze_end got through', str([t.get('type') for t in tagged(A, mark)]))
+    c = (await status())['counts']
+    check(c.get('maze_channel_dropped_frame_too_big') == 1 and c.get('maze_channel_dropped_bad_frame') == 1
+          and c.get('maze_channel_dropped_bad_json') == 1 and c.get('maze_channel_dropped_unknown_type') == 1
+          and c.get('maze_channel_dropped_tiles_wrong_task') == 1 and c.get('maze_channel_dropped_bad_maze') == 1
+          and c.get('maze_channel_dropped_text_too_big') == 1 and not c.get('dropped_error')
+          and not any(k.startswith('dropped_') for k in c),
+          'each is counted under maze_channel_* and none under the default channel\'s dropped_*',
+          json.dumps({k: v for k, v in c.items() if 'dropped' in k}))
+
+    section('maze channel: frames of both channels side by side, each in order, each with its own drop budget')
+    await asyncio.sleep(0.3)
+    mark = len(A.msgs)
+
+    async def burst(ws, k0, n, mk):
+        t0 = time.perf_counter()
+        for i in range(n):                                                     # 25 fps
+            d = t0 + i * 0.04 - time.perf_counter()
+            if d > 0:
+                await asyncio.sleep(d)
+            await ws.send(mk(k0 + i))
+    await asyncio.gather(burst(T, 2000, 50, make_frame), burst(M, 5000, 50, make_frame))
+    await asyncio.sleep(0.5)
+    seq = A.msgs[mark:]
+    check([frame_k(x) for _, x in seq if isinstance(x, bytes) and not is_mz(x)] == list(range(2000, 2050))
+          and [mz_k(x) for _, x in seq if is_mz(x)] == list(range(5000, 5050)),
+          'a fast viewer gets all 50 default frames and all 50 MZ frames, each sequence in order')
+    D = RawViewer('D', 'stuck', rcvbuf=4096)
+    raws.append(D)
+    D.start()
+    await until_status(lambda s: s['viewers'] == 3, 3)
+    key = 'frames_dropped_for_slow_viewers'
+    c_fill = (await status())['counts'].get(key, 0)
+    n_fill = 0
+    for i in range(600):                     # fill D's socket and the relay's send buffer, until its outbox is full
+        await T.send(make_frame(3000 + i))   # (the relay has begun dropping its oldest queued default frame)
+        n_fill += 1
+        await asyncio.sleep(0.02)
+        if i % 25 == 24 and (await status())['counts'].get(key, 0) > c_fill:
+            break
+    c0 = (await status())['counts']
+    check(c0.get(key, 0) > c_fill, 'a stuck viewer\'s outbox fills up and drop-oldest begins', f'after {n_fill} frames')
+    for i in range(30):                      # 30 default frames onto a full default budget (16 queued, 1 in flight)
+        await T.send(make_frame(4000 + i))
+    for i in range(30):                      # then 30 MZ frames onto an empty MZ budget
+        await M.send(make_frame(7000 + i))
+    await asyncio.sleep(0.3)
+    c1 = (await status())['counts']
+    D.mode = 'fast'
+    await until(lambda: 7029 in [mz_k(p) for _, kind, p in D.msgs if kind == 'bin' and is_mz(p)], 8)
+    d_def = [frame_k(p) for _, kind, p in D.msgs if kind == 'bin' and not is_mz(p) and 4000 <= frame_k(p) < 4030]
+    d_mz = [mz_k(p) for _, kind, p in D.msgs if kind == 'bin' and is_mz(p) and 7000 <= mz_k(p) < 7030]
+    mz_dropped = c1.get('maze_channel_' + key, 0) - c0.get('maze_channel_' + key, 0)
+    check(d_mz == list(range(7014, 7030)) and mz_dropped == 14,
+          'the stuck viewer keeps the newest 16 MZ frames (14 of 30 dropped, counted under maze_channel_)',
+          f'{len(d_mz)} MZ frames, last {d_mz[-1] if d_mz else "-"}, {mz_dropped} dropped')
+    check(d_def == list(range(4014, 4030)) and not D.eof,
+          'its default-channel frames end on the newest 16 too (a budget of their own), and it stays connected',
+          f'{len(d_def)} of 30')
+    check(c1.get(key, 0) - c0.get(key, 0) == 30, 'the 30 default frames displaced 30 (16 old + 14 new), counted under '
+          'the default counter, none of them for the MZ frames', f"{c1.get(key, 0) - c0.get(key, 0)}")
+
+    section('maze channel: bye, a new run, and a disconnect never touch the default channel (and the other way round)')
+    mark = len(A.msgs)
+    await M.send(json.dumps({'type': 'bye'}))
+    await until(lambda: A.find_text(lambda d: d.get('type') == 'idle' and d.get('channel') == 'maze', mark) is not None, 3)
+    check(tagged(A, mark) == [{'type': 'bye', 'channel': 'maze'}, {'type': 'idle', 'channel': 'maze', 'reason': 'bye'}]
+          and untagged(A, mark) == [],
+          'maze bye: viewers get it, then idle (bye), both marked "channel":"maze"; nothing on the default channel')
+    st = await status()
+    check(st['live'] is True and st['maze_channel']['live'] is False and st['maze_channel']['hello'] == as_maze(MAZE_HELLO),
+          '/status after the bye: default still live, maze channel not live (last hello kept)')
+    G = await Rec('G').start()
+    closers.append(G.close)
+    await until(lambda: len(G.msgs) >= 4, 3)
+    await asyncio.sleep(0.3)
+    gm = [x for _, x in G.msgs]
+    gs = strict(gm[3]) if len(gm) > 3 and isinstance(gm[3], str) else {}
+    check(len(gm) == 4 and gs.get('type') == 'state' and gs.get('channel') == 'maze' and gs.get('live') is False
+          and not [x for x in gm if is_mz(x)],
+          'a viewer joining now gets the maze state with live=false and no MZ frame or snapshot', f'{len(gm)} messages')
+    mark = len(A.msgs)
+    await M.send(make_frame(8000))                                             # after the bye: dropped
+    await M.send(json.dumps(MAZE_HELLO2))
+    st = await until_status(lambda s: s['maze_channel']['hello'] == as_maze(MAZE_HELLO2), 3)
+    await asyncio.sleep(0.2)
+    check(st['maze_channel']['live'] is True and st['maze_channel']['history_rows'] == 0
+          and st['maze_channel']['checkpoint'] is None and st['maze_channel']['maze'] is None
+          and not [x for _, x in A.msgs[mark:] if is_mz(x)],
+          'a new maze run: live again, from nothing; the frame between bye and hello was dropped')
+    mark = len(A.msgs)
+    await T.send(json.dumps({'type': 'bye'}))                                  # the default channel says bye
+    await until(lambda: A.find_text(lambda d: d.get('type') == 'idle' and 'channel' not in d, mark) is not None, 3)
+    st = await status()
+    check([strict(m) for m in untagged(A, mark)] == [{'type': 'bye'}, {'type': 'idle', 'reason': 'bye'}]
+          and tagged(A, mark) == [] and st['live'] is False and st['maze_channel']['live'] is True,
+          'the default channel\'s bye and idle are unmarked, and the maze channel stays live through them')
+    await T.send(json.dumps(TILES_HELLO))
+    await until_status(lambda s: s['live'] is True, 3)
+    mark = len(A.msgs)
+    t_close = time.perf_counter()
+    await M.close()
+    await until(lambda: A.find_text(lambda d: d.get('type') == 'idle' and d.get('channel') == 'maze', mark) is not None, 3)
+    hit = A.find_text(lambda d: d.get('type') == 'idle' and d.get('channel') == 'maze', mark)
+    dt = (hit[1] - t_close) if hit else -1
+    check(hit and hit[2] == {'type': 'idle', 'channel': 'maze', 'reason': 'disconnected'} and dt < 1.0,
+          'the maze publisher disconnecting: viewers get its idle (disconnected) at once', f'after {dt * 1000:.0f} ms')
+    await asyncio.sleep(0.2)
+    st = await status()
+    check(st['live'] is True and untagged(A, mark) == [] and st['maze_channel']['publisher'] is None,
+          'the default channel stayed live; no unmarked idle was sent')
+
+    section('maze channel: quiet for 15 s -> idle; resume; a newer publisher replaces a quiet one')
+    stop = asyncio.Event()
+
+    async def keep_training():                                                 # the default channel stays fresh
+        k = 9000
+        while not stop.is_set():
+            await T.send(make_frame(k))
+            k += 1
+            await asyncio.sleep(0.5)
+    kt = asyncio.create_task(keep_training())
+    try:
+        M2 = await connect(MAZE_PUB, additional_headers=AUTH, open_timeout=5)
+        closers.append(M2.close)
+        await M2.send(json.dumps(MAZE_HELLO))
+        await until_status(lambda s: s['maze_channel']['live'] is True, 3)
+        mark = len(A.msgs)
+        await M2.send(make_frame(6000))
+        t_quiet = time.perf_counter()
+        await until(lambda: A.find_text(lambda d: d.get('type') == 'idle' and d.get('channel') == 'maze', mark) is not None,
+                    20, step=0.05)
+        hit = A.find_text(lambda d: d.get('type') == 'idle' and d.get('channel') == 'maze', mark)
+        dt = (hit[1] - t_quiet) if hit else -1
+        check(hit and hit[2].get('reason') == 'quiet' and 15.0 <= dt <= 16.5,
+              'a maze publisher that sends nothing for 15 s: viewers get its idle (quiet)', f'after {dt:.2f} s')
+        st = await status()
+        check(st['live'] is True and untagged(A, mark) == [], 'the default channel is not affected by the maze channel going quiet')
+        mark = len(A.msgs)
+        await M2.send(make_frame(6001))
+        await until(lambda: any(is_mz(x) and mz_k(x) == 6001 for _, x in A.msgs[mark:]), 3)
+        seq = [x for _, x in A.msgs[mark:] if is_mz(x) or (isinstance(x, str) and strict(x).get('channel') == 'maze')]
+        ok = (len(seq) >= 2 and isinstance(seq[0], str) and strict(seq[0]).get('type') == 'state'
+              and strict(seq[0]).get('live') is True and seq[1] == b'MZ' + make_frame(6001))
+        check(ok, 'when the quiet maze publisher sends again: a fresh maze state (live), then the MZ frame')
+        mark = len(A.msgs)
+        await until(lambda: A.find_text(lambda d: d.get('type') == 'idle' and d.get('channel') == 'maze', mark) is not None,
+                    20, step=0.05)
+        M3 = await connect(MAZE_PUB, additional_headers=AUTH, open_timeout=5)
+        closers.append(M3.close)
+        check(True, 'a new maze publisher replaces one that has been quiet for 15 s')
+        code = await close_code_of(M2, 5)
+        check(code == 4001, 'the replaced maze publisher is closed (4001)', f'close {code}')
+        await M3.send(json.dumps(MAZE_HELLO2))
+        st = await until_status(lambda s: s['maze_channel']['live'] is True, 3)
+        c = st['counts']
+        check(st['maze_channel']['live'] is True and st['maze_channel']['hello'] == as_maze(MAZE_HELLO2) and st['live'] is True
+              and c.get('maze_channel_publishers_replaced') == 1 and c.get('maze_channel_publishers_accepted') == 4
+              and c.get('maze_channel_publishers_refused_busy') == 1 and c.get('publishers_replaced') is None,
+              'the new maze publisher is live, the default channel still live; the channel\'s handshakes counted apart')
+    finally:
+        stop.set()
+        await kt
+
+
 async def amain():
     await main_relay()
     await pons_relay()
     await tiles_relay()
     await maze_relay()
+    await maze_channel_relay()
     await other_relays()
 
 

@@ -60,6 +60,7 @@ Every change to a service variable redeploys the service. That is how a job star
 | `PUBLISH_GRACE_S` | seconds the publisher keeps running after training ends (default 120; it says bye 90 s after the last `log.jsonl` row) |
 | `LABRAT_PUBLISH_TOKEN` | the relay's publish token. Unset: the job trains without the live view |
 | `LABRAT_RELAY_PUBLISH` | default `wss://labrat-relay-production.up.railway.app/publish` |
+| `LABRAT_RELAY_CHANNEL` | optional: the relay channel the publisher streams on (`publish_training.py --channel`). Unset: the default channel (the site's 3D view and Rat Tiles panel, counted by the buyback engine). `maze`: the relay's second training channel, read by the site's `/burn` page and the burn engine; Rat Maze runs only, so it needs `TRAIN_TASK=maze` (otherwise the publisher is not started and the log says why). See "A second trainer for Rat Maze" |
 
 Example, a new steering run from the final steering network with the curriculum:
 
@@ -114,6 +115,65 @@ curriculum starts at 0 and climbs by itself). Use a new `TRAIN_NAME`.
 - **Stop or pause:** set `TRAIN_TASK=none`. The redeploy stops `train.py`, its workers and the publisher (which
   says bye). Set `TRAIN_TASK` back with the same `TRAIN_NAME` to resume from the last checkpoint.
 - **A new job:** use a new `TRAIN_NAME`. Old runs stay on the volume.
+
+## A second trainer for Rat Maze: `labrat-trainer-maze`
+
+One service streams one run, and the site wants two at once: Rat Tiles on `labrat-trainer` drives the buybacks
+(`/buyback`, the relay's default channel) and Rat Maze drives the burns (`/burn`, the relay's **maze channel**,
+`relay/README.md`). The second trainer is the **same image**, run as a second Railway service with two variables
+that differ: `TRAIN_TASK=maze` and `LABRAT_RELAY_CHANNEL=maze`. `entry.py` passes the channel to the publisher as
+`--channel maze`, which connects to `/publish?channel=maze`; the relay forwards that stream marked
+`"channel":"maze"` (frames prefixed `MZ`), so the default channel and everything that reads it are untouched.
+Nothing new is built or written for it; only configuration.
+
+Order matters: deploy the relay with the maze channel first, then the site and the buyback engine that know to skip
+it, and only then this service (the relay sends nothing for the channel until a publisher streams on it).
+
+**Create it (Railway dashboard, same project as `labrat-relay` and `labrat-trainer`):**
+
+1. **New → Empty Service**, name it `labrat-trainer-maze`.
+2. **Settings → Source:** the same source as `labrat-trainer`. Deployed with the CLI from the repo root, that is
+   `railway up --service labrat-trainer-maze` (the same upload as for `labrat-trainer`, so the same files and the
+   same `trainer/Dockerfile` build the same image; if `labrat-trainer` deploys from GitHub instead, connect the same
+   repo and branch). Root directory: the repo root (not `trainer/`).
+3. **Settings → Build:** the variable `RAILWAY_DOCKERFILE_PATH=trainer/Dockerfile` (step 5), no build or start
+   command (the image's `tini -- python /app/trainer/entry.py` runs).
+4. **Volume:** attach a **new** volume mounted at `/data` (a volume belongs to one service; this one starts empty and
+   `entry.py` seeds its `runs/final/` from the image on first start). One replica. No public domain, no health check
+   path (the trainer serves no HTTP). Restart policy **On Failure**. App sleeping **off**.
+5. **Variables** (every change redeploys; set them all, then deploy once):
+
+   ```
+   RAILWAY_DOCKERFILE_PATH=trainer/Dockerfile
+   RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30
+   TRAIN_TASK=maze
+   TRAIN_NAME=maze_v1_live
+   TRAIN_STEPS=6000000
+   TRAIN_RESUME=trainer/maze_v1_start.pt
+   TRAIN_ARGS=--curriculum
+   TRAIN_WORKERS=<the service's vCPU limit - 1>
+   LABRAT_RELAY_CHANNEL=maze
+   LABRAT_PUBLISH_TOKEN=<the relay's LABRAT_PUBLISH_TOKEN, the same value labrat-trainer has>
+   LABRAT_RELAY_PUBLISH=wss://labrat-relay-production.up.railway.app/publish   (the default; set it only if it differs)
+   ```
+
+   Nothing else. In particular no wallet variable of any kind: `entry.py` names one in the log and passes it to nobody.
+6. **Deploy** (`railway up --service labrat-trainer-maze` from the repo root, or the dashboard's deploy). The log
+   should show `runs/ -> /data/runs (a mounted volume)`, `new job runs/maze_v1_live: maze, 6,000,000 steps from
+   trainer/maze_v1_start.pt`, `publisher started (pid ...) -> wss://.../publish (channel maze)`, then the
+   publisher's `publishing on the relay's 'maze' channel (wss://.../publish?channel=maze)` and `connected to`.
+   The relay's `/status` then shows `"maze_channel": {"live": true, "hello": {"task": "maze", ...}}` once the
+   first checkpoint is saved (every 5 PPO iterations), while its top-level `live`/`hello` keep describing
+   `labrat-trainer`'s Rat Tiles run.
+
+**Checks and failure modes.** `publishing on the relay's 'maze' channel` missing from the log: the variable is not
+set (the run then streams on the default channel and the log says so: `note: a Rat Maze job without
+LABRAT_RELAY_CHANNEL=maze streams on the relay's default channel`). `ERROR: LABRAT_RELAY_CHANNEL=maze carries Rat Maze
+runs only, but TRAIN_TASK is ...`: the publisher is not started until `TRAIN_TASK=maze`. `the relay does not know
+this publish channel (HTTP 400)` then `the relay refused the publisher (exit 2)`: the relay running is older than
+the maze channel; redeploy the relay first, then redeploy this service. `HTTP 409: another publisher is streaming`:
+something else already holds the maze channel (a local test publisher, or an older deployment of this service
+still draining); it retries by itself. Stop or pause it like any job: `TRAIN_TASK=none`.
 
 ### Restarts
 

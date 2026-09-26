@@ -21,6 +21,12 @@ The job comes from environment variables (on Railway: the service's Variables; e
     LABRAT_PUBLISH_TOKEN   the relay's publish token. Only the publisher gets it (in its environment); it is never
                            printed, logged or written anywhere by this script.
     LABRAT_RELAY_PUBLISH   the relay's publish URL (default wss://labrat-relay-production.up.railway.app/publish).
+    LABRAT_RELAY_CHANNEL   optional: the relay channel the publisher streams on (publish_training.py --channel).
+                           Empty (or "training"): the default channel, the one the site's 3D view and Rat Tiles
+                           panel read and the buyback engine counts. "maze": the relay's second training channel,
+                           which the site's /burn page and the burn engine read; it carries Rat Maze runs only, so
+                           it needs TRAIN_TASK=maze. Set it on the second trainer service (labrat-trainer-maze,
+                           trainer/README.md) so Rat Tiles and Rat Maze can stream at the same time.
     PUBLISH_GRACE_S        seconds the publisher keeps running after training ends, so it says bye (default 120;
                            it says bye once log.jsonl has been silent for 90 s).
     LABRAT_DATA_DIR        the volume (default /data). runs/ next to train.py is made a link to <data>/runs, and
@@ -64,6 +70,10 @@ MAZE_START = os.path.join(HERE, 'maze_v1_start.pt')     # optional: a trained Ra
 DEFAULT_DATA = '/data'
 DEFAULT_RELAY = 'wss://labrat-relay-production.up.railway.app/publish'
 TOKEN_ENV = 'LABRAT_PUBLISH_TOKEN'
+CHANNEL_ENV = 'LABRAT_RELAY_CHANNEL'               # the relay channel (publish_training.py --channel); empty: default
+CHANNEL_RE = re.compile(r'^[a-z][a-z0-9_-]{0,31}$')
+DEFAULT_CHANNEL_WORDS = ('', 'training', 'default', 'none')
+MAZE_CHANNEL = 'maze'                              # the relay's second training channel: Rat Maze runs only
 JOB_FILE = 'trainer_job.json'
 TASKS = ('lever', 'cursor', 'steer', 'tiles', 'maze')
 STEERING_TASKS = ('steer', 'tiles', 'maze')        # the steering network (5 outputs); the others: 38 outputs
@@ -503,8 +513,9 @@ class Publisher:
 
     MAX_RESTARTS = 5
 
-    def __init__(self, relay):
+    def __init__(self, relay, channel=''):
         self.relay = relay
+        self.channel = channel                     # '' = the relay's default channel; 'maze' = the maze channel
         self.child = None
         self.restarts = 0
         self.next_start = None
@@ -513,6 +524,8 @@ class Publisher:
     def argv(self):
         a = [sys.executable, '-u', os.path.join(APP, 'live', 'publish_training.py'), '--watch', RUNS_LINK,
              '--relay', self.relay]
+        if self.channel:
+            a += ['--channel', self.channel]       # explicit (the variable is inherited too; the flag wins)
         u = urlparse(self.relay)
         if u.scheme == 'ws' and (u.hostname or '').endswith('.railway.internal'):
             a.append('--allow-insecure')           # Railway's private network (encrypted), not the internet
@@ -521,7 +534,8 @@ class Publisher:
     def start(self):
         self.child = Child('publisher', self.argv(), child_env(keep_token=True))
         self.next_start = None
-        log(f'publisher started (pid {self.child.p.pid}) -> {self.relay}')
+        log(f'publisher started (pid {self.child.p.pid}) -> {self.relay}'
+            + (f' (channel {self.channel})' if self.channel else ''))
 
     def check(self):
         if self.gave_up:
@@ -563,6 +577,23 @@ def check_relay(url):
     return None
 
 
+def read_channel(env, task):
+    """(channel, problem): the relay channel from LABRAT_RELAY_CHANNEL ('' = the default channel), and why the
+    publisher cannot be started with it, or None. The maze channel carries Rat Maze runs only, and the relay would
+    close any other task's hello (1008), so that mismatch is caught here."""
+    raw = env.get(CHANNEL_ENV, '')
+    channel = raw.strip().lower()
+    if channel in DEFAULT_CHANNEL_WORDS:
+        return '', None
+    if channel == 'pons':
+        return channel, f'{CHANNEL_ENV}=pons is the buy rig\'s channel, not a training channel'
+    if not CHANNEL_RE.match(channel):
+        return channel, f'{CHANNEL_ENV} must be a short lower-case word (got {raw!r})'
+    if channel == MAZE_CHANNEL and task != 'maze':
+        return channel, f'{CHANNEL_ENV}=maze carries Rat Maze runs only, but TRAIN_TASK is {task!r}'
+    return channel, None
+
+
 # ---------------------------------------------------------------------------------------------- main
 def idle(stop, why):
     log(f'idle: {why}')
@@ -593,14 +624,18 @@ def run_job(job, stop):
 
     relay = os.environ.get('LABRAT_RELAY_PUBLISH', '').strip() or DEFAULT_RELAY
     token = os.environ.get(TOKEN_ENV, '').strip()
+    channel, channel_problem = read_channel(os.environ, job.task)
     pub = None
-    problem = check_relay(relay)
+    problem = check_relay(relay) or channel_problem
     if problem:
         log(f'ERROR: {problem}. The publisher is not started; training runs without the live view')
     elif not token:
         log(f'{TOKEN_ENV} is not set: the publisher is not started; training runs without the live view')
     else:
-        pub = Publisher(relay)
+        if job.task == 'maze' and channel != MAZE_CHANNEL:
+            log(f'note: a Rat Maze job without {CHANNEL_ENV}=maze streams on the relay\'s default channel (the Rat '
+                f'Tiles one); the site\'s /burn page and the burn engine read the maze channel')
+        pub = Publisher(relay, channel)
         pub.start()
 
     try:

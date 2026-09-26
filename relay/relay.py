@@ -2,12 +2,18 @@
 
     WS  /publish   the training publisher (the default channel). Needs the header
                    "Authorization: Bearer <LABRAT_PUBLISH_TOKEN>". One at a time.
+    WS  /publish?channel=maze
+                   the second training channel (same token): the Rat Maze trainer's publisher
+                   (publish_training.py --channel maze). The same protocol as the default channel, forwarded to
+                   viewers marked as the maze channel's (see "The maze channel" below). One at a time, independent
+                   of the default channel's publisher.
     WS  /publish?channel=pons
                    the pons buy rig (same token): the rat clicking through a $LABRAT buy on the real pons page, as
                    masked JPEG frames plus step messages. One at a time, independent of the training publisher.
-    WS  /live      public viewers (the website). Receive-only; a viewer may send a tiny "ping". Viewers get both
-                   channels on one socket (see "The pons channel" below).
-    GET /status    JSON: live, hello, metrics (the last log.jsonl row), viewers, a few counters, and "pons".
+    WS  /live      public viewers (the website). Receive-only; a viewer may send a tiny "ping". Viewers get all
+                   channels on one socket (see "The maze channel" and "The pons channel" below).
+    GET /status    JSON: live, hello, metrics (the last log.jsonl row), viewers, a few counters, "maze_channel" and
+                   "pons".
     GET /healthz   {"ok": true}
 
 What a viewer receives, in order:
@@ -30,6 +36,30 @@ The relay invents nothing: it forwards what the publisher sends and replays what
 publisher is connected, has sent a hello with source "training" that is not a test stream, and has sent something
 in the last 15 s. A test stream (publish_training.py --assume-live-for-test: hello "test": true, label "TEST ...")
 is refused unless RELAY_ALLOW_TEST=1, which is for a local relay only.
+
+The maze channel (/publish?channel=maze). A second training channel, for the Rat Maze trainer (a second Railway
+trainer service with TRAIN_TASK=maze and LABRAT_RELAY_CHANNEL=maze), so Rat Tiles on the default channel and Rat Maze
+can stream at the same time: Rat Tiles drives the buybacks (site /buyback), Rat Maze drives the burns (site /burn).
+It has its own publisher slot, its own hello / history / checkpoint / episode / last frame / maze snapshots, its own
+state replay, 15 s idle timer and "live" (the same rules as the default channel; the same token). It accepts exactly
+what the default channel accepts (hello / metrics / checkpoint / episode / bye / maze / maze_end and binary frames,
+the same caps and validation), except that its hello must say "task":"maze": any other task closes the publisher
+with 1008 (the channel is what the /burn page and the burn engine read as Rat Maze). Everything it sends to viewers
+is marked as the maze channel's, so the default channel's view (site/js/live.js) can skip it and the /burn page can
+pick it out:
+    - text messages carry "channel":"maze" (the relay sets it when forwarding, on the publisher's own types, on the
+      channel's state and on its idle: {"type":"state","channel":"maze",...}, {"type":"idle","channel":"maze",...}).
+      The default channel's texts are unchanged (no "channel" key is added to them).
+    - binary frames are b"MZ" + the publisher's frame (1868 bytes for the rat), the prefix added by the relay; the
+      default channel's frames are unchanged. A viewer's outbox keeps a separate drop-oldest budget for them.
+    - a late joiner gets, after the default channel's replay and before the pons channel's, the maze channel's state
+      and then (while it is live) its last frame, the current maze's layout snapshot and the newest snapshot, exactly
+      as for the default channel. Nothing is sent for the channel until it has had a session, so a relay with this
+      channel changes nothing for a site that does not know it until the maze trainer actually streams.
+    - drops and refusals on the channel are counted under maze_channel_* in /status counts; its stream is under
+      /status "maze_channel" (live, hello, metrics, checkpoint, episode, publisher, history_rows, state_rows,
+      frames_in, fps_in, maze).
+A maze run may still stream on the default channel (an old publisher, relay/maze_demo.py): that path is unchanged.
 
 The pons channel. Everything it sends to viewers is marked as its own, so the training view (site/js/live.js) can
 skip it and the site's "Rat on pons" panel can pick it out:
@@ -139,8 +169,13 @@ VIEWERS_PER_IP = 8            # /live sockets one client address may hold (RELAY
 REFUSAL_LOG_WINDOW_S = 60.0   # refused publisher handshakes: at most REFUSAL_LOG_MAX log lines per window ...
 REFUSAL_LOG_MAX = 3           # ... then one summary line (the full totals are in /status counts)
 
+# ---- the maze channel (/publish?channel=maze): a second training channel, for the Rat Maze trainer -------------------
+MAZE_CHANNEL = 'maze'
+MZ_MAGIC = b'MZ'                  # a maze-channel frame as viewers get it: these 2 bytes, then the publisher's frame
+MAZE_CHANNEL_TASKS = ('maze',)    # the only hello.task the maze channel carries
+
 # ---- the pons channel (/publish?channel=pons) -----------------------------------------------------------------------
-CHANNELS = ('training', 'pons')   # /publish?channel=...; none (or "training") is the training channel
+CHANNELS = ('training', 'pons', MAZE_CHANNEL)   # /publish?channel=...; none (or "training") is the training channel
 PONS_MAGIC = b'PJPG'              # a pons frame: these 4 bytes, then one JPEG (SOI ... EOI); forwarded with the prefix
 PONS_MAX_BINARY = 256 * 1024      # pons frame cap, prefix included (the Procfile's --ws-max-size leaves room above it)
 PONS_MIN_FRAME = 4 + 4            # the prefix plus the smallest possible JPEG head and tail
@@ -248,17 +283,21 @@ class Viewer:
     stuck on one send for VIEWER_STUCK_S, is hopelessly behind and is closed (1013, try again later), after which its
     page can reconnect and get a fresh state.
 
+    The maze channel's frames (b"MZ" + a frame) are queued the same way, with a budget of their own: past
+    VIEWER_MAX_FRAMES queued maze frames the oldest maze frame is dropped, and the default channel's frames are never
+    dropped for them (nor they for those).
+
     Pons frames (the pons channel's masked JPEGs) are not queued: each viewer holds at most one, the newest, and gets
     it at most PONS_VIEWER_FPS times a second. It goes out after any queued text (so a pons_hello / pons_state
     arrives before the frames that follow it) and ahead of queued training frames (so those cannot starve it)."""
-    __slots__ = ('ws', 'q', 'n_bin', 'n_text', 'dropped', 'wake', 'done', 'closed', 'kill_code', 'kill_reason',
-                 'sending_since', 'bucket', 'bucket_t', 'pons_frame', 'pons_next', 'tiles_q', 'tiles_bucket', 'tiles_t',
-                 'maze_q', 'maze_bucket', 'maze_t')
+    __slots__ = ('ws', 'q', 'n_bin', 'n_mz', 'n_text', 'dropped', 'wake', 'done', 'closed', 'kill_code', 'kill_reason',
+                 'sending_since', 'bucket', 'bucket_t', 'pons_frame', 'pons_next', 'boards', 'buckets')
 
     def __init__(self, ws):
         self.ws = ws
         self.q = deque()
-        self.n_bin = 0
+        self.n_bin = 0                    # queued default-channel frames
+        self.n_mz = 0                     # queued maze-channel frames (b"MZ" + frame)
         self.n_text = 0
         self.dropped = 0
         self.wake = asyncio.Event()
@@ -271,20 +310,18 @@ class Viewer:
         self.bucket_t = time.monotonic()
         self.pons_frame = None            # the newest pons frame not yet sent to this viewer
         self.pons_next = 0.0              # monotonic time before which no pons frame goes out (the per-viewer rate)
-        self.tiles_q = None               # the Rat Tiles snapshot (str) in this viewer's outbox, not yet sent
-        self.tiles_bucket = TILES_VIEWER_BURST
-        self.tiles_t = time.monotonic()
-        self.maze_q = None                # the Rat Maze position snapshot (str) in this viewer's outbox, not yet sent
-        self.maze_bucket = MAZE_VIEWER_BURST
-        self.maze_t = time.monotonic()
+        self.boards = {}                  # slot key -> the game snapshot (str) in this viewer's outbox, not yet sent:
+                                          # a Rat Tiles board or a Rat Maze position snapshot, one per stream and kind
+        self.buckets = {}                 # slot key -> (tokens, monotonic time): that slot's per-viewer rate cap
 
     def push_bytes(self, b):
+        """A default-channel frame (a whole pose): past VIEWER_MAX_FRAMES queued, the oldest queued one is dropped."""
         if self.closed:
             return
         if self.n_bin >= VIEWER_MAX_FRAMES:
             q = self.q
             for i, item in enumerate(q):
-                if item.__class__ is bytes:
+                if item.__class__ is bytes and not item.startswith(MZ_MAGIC):
                     del q[i]
                     break
             self.n_bin -= 1
@@ -292,6 +329,23 @@ class Viewer:
             HUB.count('frames_dropped_for_slow_viewers')
         self.q.append(b)
         self.n_bin += 1
+        self.wake.set()
+
+    def push_mz(self, b):
+        """A maze-channel frame (b"MZ" + a whole pose): the same drop-oldest rule, with a budget of its own."""
+        if self.closed:
+            return
+        if self.n_mz >= VIEWER_MAX_FRAMES:
+            q = self.q
+            for i, item in enumerate(q):
+                if item.__class__ is bytes and item.startswith(MZ_MAGIC):
+                    del q[i]
+                    break
+            self.n_mz -= 1
+            self.dropped += 1
+            HUB.count('maze_channel_frames_dropped_for_slow_viewers')
+        self.q.append(b)
+        self.n_mz += 1
         self.wake.set()
 
     def push_text(self, s):
@@ -305,54 +359,42 @@ class Viewer:
         self.n_text += 1
         self.wake.set()
 
-    def push_tiles(self, s):
-        """A Rat Tiles snapshot (a whole board): at most TILES_VIEWER_PER_S a second for this viewer (the rest are
-        dropped), and at most one in its outbox: a newer one removes the unsent older one and goes at the end, so the
-        snapshots and the tile events stay in the order the publisher sent them."""
+    def push_board(self, s, hub, kind, per_s, burst):
+        """A game snapshot of one stream (`hub`): a Rat Tiles board (kind "tiles") or a Rat Maze position snapshot
+        (kind "maze", walls null). At most per_s a second for this viewer (the rest are dropped, counted under the
+        stream's <kind>_dropped_for_rate), and at most one unsent in its outbox: a newer one removes the older one and
+        goes at the end, so the snapshots and the events stay in the order the publisher sent them. Each stream and
+        kind has its own slot and rate cap, so the maze channel never displaces a default-channel snapshot."""
         if self.closed:
             return
+        key = hub.channel + ':' + kind
         now = time.monotonic()
-        self.tiles_bucket = min(TILES_VIEWER_BURST, self.tiles_bucket + (now - self.tiles_t) * TILES_VIEWER_PER_S)
-        self.tiles_t = now
-        if self.tiles_bucket < 1.0:
-            HUB.count('tiles_dropped_for_rate')
+        tokens, t = self.buckets.get(key, (burst, now))
+        tokens = min(burst, tokens + (now - t) * per_s)
+        if tokens < 1.0:
+            self.buckets[key] = (tokens, now)
+            hub.count(f'{kind}_dropped_for_rate')
             return
-        self.tiles_bucket -= 1.0
-        old = self.tiles_q
+        self.buckets[key] = (tokens - 1.0, now)
+        old = self.boards.get(key)
         if old is not None:
             try:
-                self.q.remove(old)        # compared by identity first: this viewer's one queued snapshot
+                self.q.remove(old)        # compared by identity first: this viewer's one queued snapshot of the slot
                 self.n_text -= 1
-                HUB.count('tiles_replaced_for_slow_viewers')
+                hub.count(f'{kind}_replaced_for_slow_viewers')
             except ValueError:
                 pass
-        self.tiles_q = s
+        self.boards[key] = s
         self.push_text(s)
 
-    def push_maze(self, s):
-        """A Rat Maze position snapshot (walls null): at most MAZE_VIEWER_PER_S a second for this viewer (the rest are
-        dropped), and at most one in its outbox: a newer one removes the unsent older one and goes at the end, so the
-        snapshots, the layout snapshots and the maze_end events stay in the order the publisher sent them. (A layout
+    def push_tiles(self, s, hub=None):
+        """A Rat Tiles snapshot (a whole board): at most TILES_VIEWER_PER_S a second, one unsent at most."""
+        self.push_board(s, hub or HUB, 'tiles', TILES_VIEWER_PER_S, TILES_VIEWER_BURST)
+
+    def push_maze(self, s, hub=None):
+        """A Rat Maze position snapshot (walls null): at most MAZE_VIEWER_PER_S a second, one unsent at most. (A layout
         snapshot, walls not null, goes through push_text: never dropped, never replaced.)"""
-        if self.closed:
-            return
-        now = time.monotonic()
-        self.maze_bucket = min(MAZE_VIEWER_BURST, self.maze_bucket + (now - self.maze_t) * MAZE_VIEWER_PER_S)
-        self.maze_t = now
-        if self.maze_bucket < 1.0:
-            HUB.count('maze_dropped_for_rate')
-            return
-        self.maze_bucket -= 1.0
-        old = self.maze_q
-        if old is not None:
-            try:
-                self.q.remove(old)        # compared by identity first: this viewer's one queued position snapshot
-                self.n_text -= 1
-                HUB.count('maze_replaced_for_slow_viewers')
-            except ValueError:
-                pass
-        self.maze_q = s
-        self.push_text(s)
+        self.push_board(s, hub or HUB, 'maze', MAZE_VIEWER_PER_S, MAZE_VIEWER_BURST)
 
     def push_pons(self, b):
         """A pons frame: replaces the one this viewer has not been sent yet (frames are whole pictures)."""
@@ -369,10 +411,9 @@ class Viewer:
         self.closed = True
         self.kill_code, self.kill_reason = code, reason
         self.q.clear()
-        self.n_bin = self.n_text = 0
+        self.n_bin = self.n_mz = self.n_text = 0
         self.pons_frame = None
-        self.tiles_q = None
-        self.maze_q = None
+        self.boards.clear()
         self.wake.set()
         self.done.set()
 
@@ -409,13 +450,18 @@ class Viewer:
                         continue
                     item = q.popleft()
                     if item.__class__ is bytes:
-                        self.n_bin -= 1
+                        if item.startswith(MZ_MAGIC):
+                            self.n_mz -= 1
+                        else:
+                            self.n_bin -= 1
                     else:
                         self.n_text -= 1
-                        if item is self.tiles_q:
-                            self.tiles_q = None
-                        if item is self.maze_q:
-                            self.maze_q = None
+                        boards = self.boards
+                        if boards:        # a queued game snapshot leaving the outbox frees its slot
+                            for key, s in boards.items():
+                                if s is item:
+                                    del boards[key]
+                                    break
                 self.sending_since = time.monotonic()
                 if item.__class__ is bytes:
                     await ws.send_bytes(item)
@@ -477,17 +523,26 @@ def _is_ping(text):
 
 # ---- the publisher --------------------------------------------------------------------------------------------------
 class Publisher:
-    __slots__ = ('ws', 'peer', 'last_rx', 'in_session')
+    __slots__ = ('ws', 'peer', 'last_rx', 'in_session', 'hub')
 
-    def __init__(self, ws, peer):
+    def __init__(self, ws, peer, hub=None):
         self.ws = ws
         self.peer = peer
         self.last_rx = time.monotonic()   # connecting counts as activity: a fresh connection holds the slot 15 s
         self.in_session = False           # True between a (training) hello and a bye
+        self.hub = hub                    # the training stream it publishes to (HUB or MAZE); None for the pons rig
 
 
 class Hub:
-    def __init__(self):
+    """One training stream: the default channel (HUB) or the maze channel (MAZE). The default hub also holds what is
+    shared by every channel: the viewers, the per-address counts and the /status counters. The maze hub points at
+    the same viewer set and counter dict, and counts under a maze_channel_ prefix."""
+
+    def __init__(self, channel='training'):
+        self.channel = channel
+        self.tagged = channel != 'training'   # texts forwarded with "channel":<channel>, frames with the MZ prefix
+        self.prefix = f'{channel}_channel_' if self.tagged else ''   # its /status counter keys
+        self.log = f'{channel} channel: ' if self.tagged else ''     # its log lines
         self.pub = None
         self.live = False
         self.hello = None                 # the latest hello, kept after the run ends (with live=false)
@@ -495,7 +550,7 @@ class Hub:
         self.state_rows = 0               # rows the current state message carries (fewer than kept if they are big)
         self.checkpoint = None
         self.episode = None
-        self.last_frame = None
+        self.last_frame = None            # as viewers get it (on the maze channel: with the MZ prefix)
         self.tiles = None                 # the newest Rat Tiles snapshot (its text, as forwarded) of this run
         self.tiles_info = None            # a few of its fields, for /status
         self.maze = None                  # the newest Rat Maze snapshot (its text, as forwarded) of this run
@@ -513,7 +568,14 @@ class Hub:
         self._fps_t = time.monotonic()
         self.fps_in = 0.0
 
+    def share(self, main):
+        """Make this (secondary) hub use the main hub's viewers and counters."""
+        self.viewers = main.viewers
+        self.counts = main.counts
+        return self
+
     def count(self, key, n=1):
+        key = self.prefix + key
         self.counts[key] = self.counts.get(key, 0) + n
 
     def dirty(self):
@@ -522,12 +584,29 @@ class Hub:
     def last_row(self):
         return self.history[-1][0] if self.history else None
 
+    def has_state(self):
+        """Whether this stream has had a session (a hello): before that a secondary channel sends nothing."""
+        return self.hello is not None
+
+    def tag(self, msg):
+        """A message of this stream as viewers get it: on a secondary channel with "channel" set, as ASCII JSON."""
+        if self.tagged:
+            msg['channel'] = self.channel
+        return _compact(msg)
+
+    def idle_text(self, reason):
+        if not self.tagged:
+            return {'quiet': IDLE_QUIET, 'bye': IDLE_BYE, 'disconnected': IDLE_GONE}[reason]
+        return _compact({'type': 'idle', 'channel': self.channel, 'reason': reason})
+
     def state_text(self):
         """The state message, cached until something changes. Everything in it is ASCII JSON (so its length in
         characters is its length in bytes), and it stays under STATE_MAX: hello, checkpoint and episode are at most
-        MAX_PART each, and the history is the newest run of rows that fits in what is left."""
+        MAX_PART each, and the history is the newest run of rows that fits in what is left. On a secondary channel
+        it carries "channel" right after "type"."""
         if self._state is None:
-            head = ('{"type":"state","live":' + ('true' if self.live else 'false')
+            head = ('{"type":"state"' + (f',"channel":"{self.channel}"' if self.tagged else '')
+                    + ',"live":' + ('true' if self.live else 'false')
                     + ',"hello":' + _compact(self.hello) + ',"checkpoint":' + _compact(self.checkpoint)
                     + ',"episode":' + _compact(self.episode) + ',"history":[')
             room = STATE_MAX - len(head) - 2
@@ -548,16 +627,22 @@ class Hub:
             v.push_text(s)
 
     def broadcast_bytes(self, b):
-        for v in list(self.viewers):
-            v.push_bytes(b)
+        """A frame of this stream, as viewers get it (push_mz keeps the maze channel's own drop-oldest budget)."""
+        if self.tagged:
+            for v in list(self.viewers):
+                v.push_mz(b)
+        else:
+            for v in list(self.viewers):
+                v.push_bytes(b)
 
-    def set_idle(self, text, why):
+    def set_idle(self, reason, why):
+        """reason: "quiet" | "bye" | "disconnected" (what viewers are told)."""
         if not self.live:
             return
         self.live = False
         self.dirty()
-        say(f'idle: {why}')
-        self.broadcast_text(text)
+        say(f'{self.log}idle: {why}')
+        self.broadcast_text(self.idle_text(reason))
 
     def touch(self, pub):
         """A usable message from the publisher: it is fresh; if it had gone quiet mid-run, the run is live again."""
@@ -565,11 +650,13 @@ class Hub:
         if pub.in_session and not self.live:
             self.live = True
             self.dirty()
-            say('live again: the publisher is sending again')
+            say(f'{self.log}live again: the publisher is sending again')
             self.broadcast_text(self.state_text())
 
 
 HUB = Hub()
+MAZE = Hub(MAZE_CHANNEL).share(HUB)       # the maze channel: its own stream, the same viewers and counters
+STREAMS = (HUB, MAZE)
 
 
 class PonsHub:
@@ -654,8 +741,10 @@ def _loads_browser_safe(text):
 
 
 def on_pub_text(pub, text):
-    """Handle one text message from the publisher. Returns None, or (close_code, reason) to close the publisher."""
-    H = HUB
+    """Handle one text message from a training publisher (the default channel, or the maze channel: pub.hub says
+    which). Returns None, or (close_code, reason) to close the publisher. On the maze channel the message is
+    forwarded with "channel":"maze" set (as ASCII JSON); on the default channel unchanged."""
+    H = pub.hub
     if len(text) > MAX_TEXT or len(text.encode('utf-8')) > MAX_TEXT:
         H.count('dropped_text_too_big')
         return None
@@ -673,29 +762,39 @@ def on_pub_text(pub, text):
         if len(text.encode('utf-8')) > MAX_TEXT:
             H.count('dropped_text_too_big')
             return None
-    if kind in ('hello', 'checkpoint', 'episode') and len(_compact(msg)) > MAX_PART:
-        H.count('dropped_part_too_big')   # kept for the state message (as ASCII JSON), which must stay small
-        return None
     if kind in ('tiles', 'tile') and len(text.encode('utf-8')) > (TILES_MAX_TEXT if kind == 'tiles' else TILE_MAX_TEXT):
         H.count(f'dropped_{kind}_too_big')
         return None
     if kind in ('maze', 'maze_end') and len(text.encode('utf-8')) > (MAZE_MAX_TEXT if kind == 'maze' else MAZE_END_MAX_TEXT):
         H.count(f'dropped_{kind}_too_big')
         return None
+    if H.tagged:                          # the caps above are the publisher's; the tag comes on top of them
+        text = H.tag(msg)
+        if len(text) > MAX_TEXT:
+            H.count('dropped_text_too_big')
+            return None
+    if kind in ('hello', 'checkpoint', 'episode') and len(_compact(msg)) > MAX_PART:
+        H.count('dropped_part_too_big')   # kept for the state message (as ASCII JSON), which must stay small
+        return None
 
     if kind == 'hello':
         if msg.get('source') != 'training':
             H.count('refused_non_training_hello')
-            say(f"refused a hello with source {msg.get('source')!r}: this relay only carries live training")
+            say(f"{H.log}refused a hello with source {msg.get('source')!r}: this relay only carries live training")
             return 1008, 'this relay only carries live training (hello.source must be "training")'
         if _is_test_stream(msg) and not ALLOW_TEST:
             H.count('refused_test_hello')
-            say('refused a test stream (hello "test" or a label starting with TEST): it is not a live training run')
+            say(f'{H.log}refused a test stream (hello "test" or a label starting with TEST): it is not a live '
+                f'training run')
             return 1008, 'test streams are not live training; this relay shows them only with RELAY_ALLOW_TEST=1'
         run, task = msg.get('run'), msg.get('task')
         if task not in TASKS or not isinstance(run, str) or not run:
             H.count('dropped_bad_hello')
             return None
+        if H.channel == MAZE_CHANNEL and task not in MAZE_CHANNEL_TASKS:
+            H.count('refused_wrong_task_hello')
+            say(f'{H.log}refused a hello with task {task!r}: this channel carries Rat Maze runs only')
+            return 1008, 'the maze channel carries Rat Maze runs only (hello.task must be "maze")'
         prev = H.hello
         same = bool(prev) and all(prev.get(k) == msg.get(k) for k in ('run', 'task', 'started'))
         H.history.clear()                 # every hello starts a fresh curve; the publisher re-sends its rows after it
@@ -707,7 +806,7 @@ def on_pub_text(pub, text):
         pub.last_rx = time.monotonic()
         H.live = True
         H.dirty()
-        say(f'live: run {run!r}, task {task}')
+        say(f'{H.log}live: run {run!r}, task {task}')
         H.broadcast_text(text)
         return None
 
@@ -719,7 +818,7 @@ def on_pub_text(pub, text):
         pub.in_session = False
         pub.last_rx = time.monotonic()
         H.broadcast_text(text)
-        H.set_idle(IDLE_BYE, 'the publisher said bye')
+        H.set_idle('bye', 'the publisher said bye')
         return None
 
     if kind in ('tiles', 'tile'):
@@ -757,7 +856,7 @@ def on_tiles_text(pub, msg, text, kind):
     """A Rat Tiles snapshot ("tiles") or tile outcome ("tile") from the training publisher, inside a session whose
     hello has task "tiles". Snapshots go to each viewer through its rate cap (Viewer.push_tiles) and the newest is
     kept for late joiners; tile events go to everyone, like any other text."""
-    H = HUB
+    H = pub.hub
     if not (H.hello and H.hello.get('task') == 'tiles'):
         H.count('dropped_tiles_wrong_task')
         return None
@@ -769,7 +868,7 @@ def on_tiles_text(pub, msg, text, kind):
         H.tiles, H.tiles_info = text, _tiles_info(msg)
         H.count('tiles_in')
         for v in list(H.viewers):
-            v.push_tiles(text)
+            v.push_tiles(text, H)
         return None
     if msg.get('result') not in TILE_RESULTS:
         H.count('dropped_bad_tile')
@@ -805,7 +904,7 @@ def on_maze_text(pub, msg, text, kind):
     hello has task "maze". A layout snapshot (walls not null) goes to every viewer like any text and is kept as the
     current maze's layout; a position snapshot (walls null) goes to each viewer through its rate cap
     (Viewer.push_maze); the newest snapshot is kept for late joiners; maze_end events go to everyone."""
-    H = HUB
+    H = pub.hub
     if not (H.hello and H.hello.get('task') == 'maze'):
         H.count('dropped_maze_wrong_task')
         return None
@@ -824,7 +923,7 @@ def on_maze_text(pub, msg, text, kind):
             if H.maze_layout is not None and H.maze_layout_id != msg['maze_id']:
                 H.maze_layout = H.maze_layout_id = None   # a maze whose layout never came: no layout to replay
             for v in list(H.viewers):
-                v.push_maze(text)
+                v.push_maze(text, H)
         return None
     if msg.get('result') not in MAZE_RESULTS or not _is_int(msg.get('maze_id'), 0, 10 ** 9):
         H.count('dropped_bad_maze_end')
@@ -836,7 +935,9 @@ def on_maze_text(pub, msg, text, kind):
 
 
 def on_pub_bytes(pub, data):
-    H = HUB
+    """One binary frame from a training publisher: checked as the publisher sent it, forwarded unchanged on the
+    default channel and as b"MZ" + frame on the maze channel."""
+    H = pub.hub
     n = len(data)
     if n > MAX_BINARY:
         H.count('dropped_frame_too_big')
@@ -848,6 +949,8 @@ def on_pub_bytes(pub, data):
         H.count('dropped_outside_session')
         return
     H.touch(pub)
+    if H.tagged:
+        data = MZ_MAGIC + data
     H.last_frame = data
     H.frames_in += 1
     H._fps_n += 1
@@ -996,18 +1099,19 @@ async def _ticker():
     while True:
         await asyncio.sleep(0.5)
         now = time.monotonic()
-        p = H.pub
-        if H.live and (p is None or now - p.last_rx > IDLE_S):
-            H.set_idle(IDLE_QUIET, f'the publisher sent nothing for {IDLE_S:.0f} s')
+        for S in STREAMS:                 # each training channel has its own idle timer and frame rate
+            p = S.pub
+            if S.live and (p is None or now - p.last_rx > IDLE_S):
+                S.set_idle('quiet', f'the publisher sent nothing for {IDLE_S:.0f} s')
+            dt = now - S._fps_t
+            if dt >= 2.0:
+                S.fps_in = round(S._fps_n / dt, 1)
+                S._fps_n, S._fps_t = 0, now
         for v in list(H.viewers):
             if v.sending_since and now - v.sending_since > VIEWER_STUCK_S:
                 H.count('viewers_closed_too_far_behind')
                 v.kill(1013, 'too far behind; reconnect for a fresh state')
         REFUSALS.flush(now)
-        dt = now - H._fps_t
-        if dt >= 2.0:
-            H.fps_in = round(H._fps_n / dt, 1)
-            H._fps_n, H._fps_t = 0, now
         P = PONS
         pp = P.pub
         if P.live and (pp is None or now - pp.last_rx > IDLE_S):
@@ -1056,27 +1160,27 @@ async def ws_publish(ws: WebSocket):
     if channel not in CHANNELS:
         H.count('publishers_refused_channel')
         REFUSALS.say(f'refused a publisher from {peer}: unknown channel')
-        await _deny(ws, 400, 'unknown channel (use no channel for training, or channel=pons)')
+        await _deny(ws, 400, 'unknown channel (use no channel for training, channel=maze for the Rat Maze trainer, '
+                             'or channel=pons for the buy rig)')
         return
     pons = channel == 'pons'
-    owner = PONS if pons else H           # each channel has its own publisher slot
-    tag = ' (pons channel)' if pons else ''
+    # each channel has its own publisher slot: the pons hub, or the training stream of that channel
+    owner = PONS if pons else MAZE if channel == MAZE_CHANNEL else H
+    tag = '' if owner is H else f' ({channel} channel)'
+    counter = (lambda key: H.count('pons_' + key)) if pons else owner.count   # pons_* / maze_channel_* / plain
     cur = owner.pub
     if cur is not None and time.monotonic() - cur.last_rx <= IDLE_S:
-        H.count('pons_publishers_refused_busy' if pons else 'publishers_refused_busy')
+        counter('publishers_refused_busy')
         REFUSALS.say(f'refused a second publisher from {peer}{tag}: one is already streaming')
         await _deny(ws, 409, 'another publisher is streaming; try again when it has stopped')
         return
-    pub = Publisher(ws, peer)
+    pub = Publisher(ws, peer, None if pons else owner)
     if cur is not None:
         # the old one has been quiet for over IDLE_S (crashed, half-open connection): the new one takes over
         say('replacing a publisher that went quiet' + tag)
-        H.count('pons_publishers_replaced' if pons else 'publishers_replaced')
+        counter('publishers_replaced')
         owner.pub = None
-        if pons:
-            PONS.set_idle('disconnected', 'publisher replaced')
-        else:
-            H.set_idle(IDLE_GONE, 'publisher replaced')
+        owner.set_idle('disconnected', 'publisher replaced')
         _spawn(_close_quietly(cur.ws, 4001, 'replaced by a newer publisher'))
     owner.pub = pub                   # claim the slot before any await, so two handshakes cannot both win
     try:
@@ -1085,7 +1189,7 @@ async def ws_publish(ws: WebSocket):
         if owner.pub is pub:
             owner.pub = None
         return
-    H.count('pons_publishers_accepted' if pons else 'publishers_accepted')
+    counter('publishers_accepted')
     say(f'publisher connected from {peer}{tag}')
     on_text, on_bytes = (on_pons_text, on_pons_bytes) if pons else (on_pub_text, on_pub_bytes)
     try:
@@ -1115,11 +1219,25 @@ async def ws_publish(ws: WebSocket):
     finally:
         if owner.pub is pub:
             owner.pub = None
-            if pons:
-                PONS.set_idle('disconnected', 'the buy rig disconnected')
-            else:
-                H.set_idle(IDLE_GONE, 'the publisher disconnected')
+            owner.set_idle('disconnected', 'the buy rig disconnected' if pons else 'the publisher disconnected')
             say('publisher disconnected' + tag)
+
+
+def _replay(v, S):
+    """What a late joiner gets for one training stream: its state, then, while it is live, its last frame and the
+    game's newest board (a Rat Tiles snapshot, or the current maze's layout and then the newest maze snapshot)."""
+    v.push_text(S.state_text())
+    if not S.live:
+        return
+    if S.last_frame is not None:
+        (v.push_mz if S.tagged else v.push_bytes)(S.last_frame)
+    if S.tiles is not None:               # a Rat Tiles run: the newest board snapshot (never the tile events)
+        v.push_tiles(S.tiles, S)
+    if S.maze is not None:                # a Rat Maze run: the current maze's layout, then the newest snapshot
+        if S.maze_layout is not None:
+            v.push_text(S.maze_layout)
+        if S.maze is not S.maze_layout:
+            v.push_maze(S.maze, S)
 
 
 @app.websocket('/live')
@@ -1160,16 +1278,9 @@ async def ws_live(ws: WebSocket):
         v = Viewer(ws)
         H.viewers.add(v)
         H.count('viewers_accepted')
-        v.push_text(H.state_text())
-        if H.live and H.last_frame is not None:
-            v.push_bytes(H.last_frame)
-        if H.live and H.tiles is not None:  # a Rat Tiles run: the newest board snapshot (never the tile events)
-            v.push_tiles(H.tiles)
-        if H.live and H.maze is not None:   # a Rat Maze run: the current maze's layout, then the newest snapshot
-            if H.maze_layout is not None:
-                v.push_text(H.maze_layout)
-            if H.maze is not H.maze_layout:
-                v.push_maze(H.maze)
+        _replay(v, H)                     # the default channel: always (its state says live or not)
+        if MAZE.has_state():              # the maze channel, once it has had a session: the same, marked as its own
+            _replay(v, MAZE)
         P = PONS
         if P.has_state():                 # the pons channel, once it has had a session: its state, then its last frame
             v.push_text(P.state_text())
@@ -1197,6 +1308,29 @@ async def ws_live(ws: WebSocket):
 
 
 _NO_CACHE = {'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store'}
+
+
+def _stream_status(S, now):
+    """The maze channel's part of /status: the same fields the default channel has at the top level."""
+    p = S.pub
+    S.state_text()                        # (cached) so state_rows is current
+    return {
+        'channel': S.channel,
+        'live': S.live,
+        'hello': S.hello,
+        'metrics': S.last_row(),
+        'checkpoint': S.checkpoint,
+        'episode': S.episode,
+        'publisher': None if p is None else {'in_session': p.in_session, 'quiet_s': round(now - p.last_rx, 1)},
+        'history_rows': len(S.history),
+        'state_rows': S.state_rows,
+        'frames_in': S.frames_in,
+        'fps_in': S.fps_in if S.live else 0.0,
+        'frame_prefix': MZ_MAGIC.decode('ascii'),
+        'tasks': list(MAZE_CHANNEL_TASKS),
+        'tiles': S.tiles_info,
+        'maze': S.maze_info,
+    }
 
 
 @app.get('/status')
@@ -1237,6 +1371,7 @@ async def status():   # async: runs on the event loop, never alongside a HUB upd
         'counts': dict(H.counts),
         'tiles': H.tiles_info,
         'maze': H.maze_info,
+        'maze_channel': _stream_status(MAZE, now),
         'pons': pons,
     }, headers=_NO_CACHE)
 

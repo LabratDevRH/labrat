@@ -3,7 +3,19 @@
     PowerShell:  $env:LABRAT_PUBLISH_TOKEN = '<token>'       (the relay's LABRAT_PUBLISH_TOKEN)
     python live/publish_training.py --relay wss://<relay host>/publish --watch runs
     python live/publish_training.py --relay ws://localhost:4720/publish --run runs/steer_v2
+    python live/publish_training.py --relay wss://<relay host>/publish --watch runs --channel maze
     python live/publish_training.py --dry-print --run runs/steer_v1 --assume-live-for-test --duration 10
+
+RELAY CHANNEL: by default the stream goes to the relay's default training channel (the one the site's 3D view and
+Rat Tiles panel read, and the one live/buyback.py counts). --channel maze (or the environment variable
+LABRAT_RELAY_CHANNEL=maze; the flag wins) sends it to the relay's second training channel instead, by appending
+?channel=maze to the publish URL: the same protocol, the same token, its own publisher slot on the relay, forwarded to
+viewers marked as the maze channel's (relay/relay.py "The maze channel"). That channel carries Rat Maze runs only
+(the relay closes a hello with another task with 1008) and is what the site's /burn page and the burn engine read.
+The Rat Maze trainer on Railway (trainer/README.md, labrat-trainer-maze) runs with LABRAT_RELAY_CHANNEL=maze.
+The channel name is a short lower-case word; "training" (or empty) means the default channel, and "pons" is refused
+here (that channel is the buy rig's, live/buyrig.py). A relay that does not know the channel refuses the handshake
+with HTTP 400, which ends this script (exit 2) like a wrong token would: retrying cannot help.
 
 WHAT VIEWERS SEE (say it this way): the LATEST SAVED TRAINING CHECKPOINT, PLAYING IN ITS OWN SIMULATION. train.py's
 workers are not watched. Every 5 PPO iterations train.py appends a row to runs/<name>/log.jsonl and saves
@@ -98,12 +110,13 @@ import io  # noqa: E402
 import json  # noqa: E402
 import math  # noqa: E402
 import random  # noqa: E402
+import re  # noqa: E402
 import signal  # noqa: E402
 import sys  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
-from urllib.parse import urlparse  # noqa: E402
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse  # noqa: E402
 
 # MuJoCo compiling scene.xml needs ~1 MiB of C stack; some python.exe builds give the main thread only 1 MiB,
 # so all simulation work runs on a thread with a bigger stack (as live/rig.py does).
@@ -132,6 +145,10 @@ TASK_TEXT = {
     'maze': 'playing Rat Maze: steering a marker through a maze with its head, to the cheese at the exit',
 }
 TOKEN_ENV = 'LABRAT_PUBLISH_TOKEN'
+CHANNEL_ENV = 'LABRAT_RELAY_CHANNEL'   # the relay channel when --channel is not given ("maze" on the maze trainer)
+DEFAULT_CHANNEL_WORDS = ('', 'training', 'default', 'none')   # all mean: the relay's default training channel
+CHANNEL_RE = re.compile(r'^[a-z][a-z0-9_-]{0,31}$')
+PONS_CHANNEL = 'pons'        # the buy rig's channel (live/buyrig.py): never a training stream
 POLL_S = 1.0                 # how often the run's files are checked
 AUTH_CLOSE_CODES = (4401, 4403)
 TILES_MAX_HZ = 10            # Rat Tiles board snapshots per second, at most
@@ -535,6 +552,9 @@ class Link:
             code = e.response.status_code
             if code in (401, 403):
                 raise Fatal(f'the relay refused the publish token (HTTP {code}); check {TOKEN_ENV}') from None
+            if code == 400:
+                raise Fatal(f'the relay does not know this publish channel (HTTP 400); check --channel / '
+                            f'{CHANNEL_ENV} (the relay may need redeploying with the channel)') from None
             if code == 409:
                 raise ConnectionError('HTTP 409: another publisher is streaming to this relay') from None
             if code == 503:
@@ -851,6 +871,32 @@ def check_relay_url(url, allow_insecure):
         log(f'note: the relay publish endpoint is usually .../publish (got path {u.path or "/"!r})')
 
 
+def resolve_channel(flag, env=None):
+    """The relay channel to publish on: --channel if given, else LABRAT_RELAY_CHANNEL. Returns '' for the default
+    training channel, else the channel name. Raises SystemExit on a name the relay could never take."""
+    env = os.environ if env is None else env
+    raw = flag if flag is not None else env.get(CHANNEL_ENV, '')
+    where = '--channel' if flag is not None else CHANNEL_ENV
+    channel = str(raw).strip().lower()
+    if channel in DEFAULT_CHANNEL_WORDS:
+        return ''
+    if channel == PONS_CHANNEL:
+        raise SystemExit(f'{where}: "pons" is the buy rig\'s channel (live/buyrig.py), not a training channel')
+    if not CHANNEL_RE.match(channel):
+        raise SystemExit(f'{where}: a channel is a short lower-case word (letters, digits, _ -), got {raw!r}')
+    return channel
+
+
+def with_channel(url, channel):
+    """The publish URL with ?channel=<channel> (replacing any channel already in its query); unchanged for ''."""
+    if not channel:
+        return url
+    u = urlparse(url)
+    query = [(k, v) for k, v in parse_qsl(u.query, keep_blank_values=True) if k != 'channel']
+    query.append(('channel', channel))
+    return urlunparse(u._replace(query=urlencode(query)))
+
+
 def run(a, token, stop):
     if a.run:
         run_dir = a.run if os.path.isabs(a.run) else os.path.join(os.getcwd(), a.run)
@@ -912,6 +958,11 @@ def main():
     src.add_argument('--watch', metavar='DIR', help='publish whichever run under DIR is training (e.g. runs)')
     src.add_argument('--run', metavar='DIR', help='publish this run (e.g. runs/steer_v2)')
     ap.add_argument('--relay', help='the relay publish URL, ws(s)://<host>/publish')
+    ap.add_argument('--channel', metavar='NAME',
+                    help='the relay channel to publish on, appended as ?channel=NAME to --relay: "maze" is the '
+                         'relay\'s second training channel (Rat Maze runs only; read by the site\'s /burn page and '
+                         'the burn engine). Default: the environment variable LABRAT_RELAY_CHANNEL, else the default '
+                         'training channel')
     ap.add_argument('--fps', type=int, default=25)
     ap.add_argument('--dry-print', action='store_true', help='print messages and frames instead of sending')
     ap.add_argument('--task', choices=TASKS, help='override the task read from the checkpoint')
@@ -925,11 +976,15 @@ def main():
     a = ap.parse_args()
     if not 1 <= a.fps <= 50:
         raise SystemExit('--fps must be 1..50 (the env runs 50 control steps a second)')
+    channel = resolve_channel(a.channel)
     token = ''
     if not a.dry_print:
         if not a.relay:
             raise SystemExit('--relay ws(s)://<host>/publish is required (or --dry-print)')
         check_relay_url(a.relay, a.allow_insecure)
+        a.relay = with_channel(a.relay, channel)
+        if channel:
+            log(f'publishing on the relay\'s {channel!r} channel ({a.relay})')
         token = os.environ.get(TOKEN_ENV, '').strip()
         if not token:
             raise SystemExit(f'set the environment variable {TOKEN_ENV} to the relay\'s publish token')

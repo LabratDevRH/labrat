@@ -22,10 +22,11 @@ local relay started with `RELAY_ALLOW_TEST=1` lets one through. The relay holds 
 
 | | |
 |---|---|
-| `WS /publish` | the training publisher (the default channel). Needs `Authorization: Bearer <LABRAT_PUBLISH_TOKEN>`. Only one publisher at a time |
+| `WS /publish` | the training publisher (the default channel: Rat Tiles, and whatever else trains on the main trainer). Needs `Authorization: Bearer <LABRAT_PUBLISH_TOKEN>`. Only one publisher at a time |
+| `WS /publish?channel=maze` | the second training channel, same token and same protocol: the Rat Maze trainer's publisher (`live/publish_training.py --channel maze`, set by `LABRAT_RELAY_CHANNEL=maze` on the `labrat-trainer-maze` service). Rat Maze runs only. One at a time, independent of the default channel's publisher. See [The maze channel](#the-maze-channel) |
 | `WS /publish?channel=pons` | the buy rig (`live/buyrig.py`), same token: the rat clicking through a $LABRAT buy on the real pons page, as masked JPEG frames plus step messages. One at a time, independent of the training publisher. See [The pons channel](#the-pons-channel) |
-| `WS /live` | public viewers. They can only receive. A viewer may send `ping` (or `{"type":"ping"}`) and gets `{"type":"pong","t":<unix s>}` back. Viewers get both channels on this one socket |
-| `GET /status` | JSON with `live`, `hello`, `metrics` (the last log.jsonl row), `viewers`, and also `checkpoint`, `episode`, `publisher` (`in_session`, `quiet_s`), `history_rows` (kept), `state_rows` (in the state message), `allow_test_streams`, `frames_in`, `fps_in`, `max_viewers`, `max_viewers_per_address`, `counts`, and `pons` (`live`, `hello`, `step`, `result`, `publisher`, `frames_in`, `fps_in`, `last_frame_bytes`, `max_frame_bytes`, `viewer_fps`). Readable cross-origin, with no IP addresses |
+| `WS /live` | public viewers. They can only receive. A viewer may send `ping` (or `{"type":"ping"}`) and gets `{"type":"pong","t":<unix s>}` back. Viewers get all three channels on this one socket |
+| `GET /status` | JSON with `live`, `hello`, `metrics` (the last log.jsonl row), `viewers`, and also `checkpoint`, `episode`, `publisher` (`in_session`, `quiet_s`), `history_rows` (kept), `state_rows` (in the state message), `allow_test_streams`, `frames_in`, `fps_in`, `max_viewers`, `max_viewers_per_address`, `counts`, `maze_channel` (the same stream fields for the maze channel: `live`, `hello`, `metrics`, `checkpoint`, `episode`, `publisher`, `history_rows`, `state_rows`, `frames_in`, `fps_in`, `maze`), and `pons` (`live`, `hello`, `step`, `result`, `publisher`, `frames_in`, `fps_in`, `last_frame_bytes`, `max_frame_bytes`, `viewer_fps`). Readable cross-origin, with no IP addresses |
 | `GET /healthz` | `{"ok":true}` |
 | `GET /` | the site when `SERVE_SITE=1`, otherwise a small JSON pointer |
 
@@ -68,6 +69,50 @@ relay without `RELAY_ALLOW_TEST=1`, closes the publisher with **1008**. The clos
 
 Anyone can try `/publish`, so refused handshakes are logged at most 3 times a minute, then as one summary line; the
 full totals are in `/status` `counts` (`publishers_refused_auth`, `_busy`, `_disabled`, `_channel`).
+
+### The maze channel
+
+One trainer service can stream one run, and the site needs two at once: Rat Tiles drives the buybacks (`/buyback`)
+and Rat Maze drives the burns (`/burn`). So the relay has a second training channel. The Rat Maze trainer's publisher
+(`live/publish_training.py --channel maze`, which `trainer/entry.py` passes on from `LABRAT_RELAY_CHANNEL=maze`)
+connects to `/publish?channel=maze` with the same token. The channel is a second copy of the default channel: its own
+publisher slot (a second one gets **409**, a quiet one is replaced and closed with **4001**), its own `hello`,
+history, checkpoint, episode, last frame and maze snapshots, its own state replay, 15 s idle timer and **live**
+rule. It takes exactly what the default channel takes (`hello`, `metrics`, `checkpoint`, `episode`, `bye`, `maze`,
+`maze_end`, binary frames; the same caps, junk handling and test-stream refusal), with one rule of its own: its
+`hello` must say `"task":"maze"`. Any other task closes the publisher with **1008** ("the maze channel carries Rat
+Maze runs only"), because the `/burn` page and the burn engine read this channel as Rat Maze.
+
+Viewers get it on the same `/live` socket, marked so that the default channel's view (`site/js/live.js`) and
+`live/buyback.py` can skip it and the `/burn` page can pick it out:
+
+- **Text.** Every text of the channel carries `"channel":"maze"`, set by the relay when forwarding (the publisher's
+  own `hello`, `metrics`, `checkpoint`, `episode`, `bye`, `maze` and `maze_end`, re-serialised as compact ASCII
+  JSON with the key added last), and so do the relay's own messages for it: `{"type":"state","channel":"maze",
+  "live":..,"hello":..,"checkpoint":..,"episode":..,"history":[..]}` (the key comes right after `type`) and
+  `{"type":"idle","channel":"maze","reason":"quiet"|"bye"|"disconnected"}`. The default channel's texts are
+  unchanged: **no `channel` key is ever added to them**, so a client that treats every text without one as the
+  default channel's is right.
+- **Frames.** A frame of the channel is `b"MZ"` + the publisher's frame (1868 bytes for the rat, so 1870 in all),
+  the prefix added by the relay. The default channel's frames are unchanged (they start with the float32 magic 7.0,
+  never with `MZ`). Each viewer's outbox keeps a **separate** drop-oldest budget of 16 for them
+  (`maze_channel_frames_dropped_for_slow_viewers`), so neither channel's frames are dropped for the other's.
+- **Late joiners** get, after the default channel's replay (its state, frame and game snapshot) and before the pons
+  channel's, the maze channel's state and then, while it is live, its last frame (`MZ`), the current maze's layout
+  snapshot and the newest snapshot (marked), exactly as the default channel replays a Rat Maze run. Nothing at all
+  is sent for the channel until it has had a session (a `hello`), so a relay with this channel changes nothing for a
+  site or an engine that does not know it, until the maze trainer actually streams. **Deploy in this order:** the
+  relay, then the site (`live.js` ignoring `MZ` frames and `"channel":"maze"` texts, the `/burn` page reading
+  them) and the buyback engine (ignoring texts with a `channel` key), then the maze trainer.
+- **Snapshots** go through the same per-viewer rate caps as on the default channel, but each stream has its own
+  slot and bucket: a maze-channel position snapshot never displaces an unsent default-channel one. Drops are counted
+  under `maze_channel_maze_dropped_for_rate` / `_replaced_for_slow_viewers`.
+- **Counters.** Everything the channel drops, refuses or accepts is counted under `maze_channel_*` in `counts`
+  (`maze_channel_dropped_bad_json`, `maze_channel_refused_wrong_task_hello`, `maze_channel_publishers_accepted`,
+  ...); the default channel's counters are untouched by it. `/status` shows the stream under `maze_channel`.
+
+A Rat Maze run may still stream on the **default** channel (an older publisher without `--channel`, or
+`relay/maze_demo.py`): that path is unchanged, but it then drives the default channel's page, not `/burn`.
 
 ### The pons channel
 
@@ -145,8 +190,9 @@ panel (`site/buyback/index.html#maze`, at `/buyback#maze`) draws the maze from t
   history never carry them. A new run clears the kept snapshots. `/status` shows the newest snapshot's `maze_id`, `w`,
   `h`, `t`, `dist`, `steps`, `bumps` and whether it carried the `layout`, under `maze`.
 - Both are dropped unless the current `hello` says `"task":"maze"` (`dropped_maze_wrong_task`). Episode messages are
-  as for the other tasks (`hits` = mazes escaped, `misses` = mazes that ran out of time), so `live/buyback.py` counts
-  them unchanged.
+  as for the other tasks (`hits` = mazes escaped, `misses` = mazes that ran out of time).
+- On the [maze channel](#the-maze-channel) (the Rat Maze trainer) the same messages arrive with `"channel":"maze"`
+  added and the frames with the `MZ` prefix; that is the stream the `/burn` page and the burn engine read.
 
 ### Caps
 
@@ -271,5 +317,13 @@ next to a training publisher. It checks:
   training stream unchanged next to it, the 256 KB cap and junk frames, dropping any text with a `0x` string (even
   JSON-escaped), at most 5 pons frames a second per viewer with the newest winning, late joiners, bye, a new
   session, disconnects, the 15 s idle timer, resuming, replacement, and refusing other sources and test sessions
+- the maze channel: its own slot and token check next to a Rat Tiles publisher on the default channel, refusing a
+  hello whose task is not `maze` (1008), every text forwarded with `"channel":"maze"` and every frame with the `MZ`
+  prefix while the default channel's texts and frames stay exactly as before, `/status` `maze_channel` and the
+  `maze_channel_*` counters, a late joiner getting both states in order (the default channel's replay, then the maze
+  channel's), caps and junk counted apart, 50 frames of each channel side by side in order, a stuck viewer keeping
+  the newest 16 `MZ` frames on a budget of their own, bye / a new run / a disconnect on either channel leaving the
+  other untouched, the 15 s idle timer, resuming and replacement, and a maze-channel test stream with
+  `RELAY_ALLOW_TEST=1`
 
-It takes about two minutes (190 checks) and only stops the relay processes it started.
+It takes about three minutes (234 checks) and only stops the relay processes it started.
