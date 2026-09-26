@@ -696,7 +696,7 @@ class TestHitCounter(unittest.TestCase):
     def test_lever_presses_are_not_target_hits_by_default(self):
         """Review finding: the lever task has no lit target, so by default its clean presses are not counted as
         'targets the rat hits'; counting them is opt-in and the public rule then says so."""
-        self.assertEqual(bb.Config().tasks, ('cursor', 'steer', 'tiles'))
+        self.assertEqual(bb.Config().tasks, ('cursor', 'steer', 'tiles', 'maze'))
         c = bb.HitCounter()
         out = c.on_text(json.dumps(dict(HELLO, task='lever')))
         self.assertEqual(out[0]['countable'], False)
@@ -709,7 +709,41 @@ class TestHitCounter(unittest.TestCase):
             self.assertNotIn('lever', e.public_status()['rule'])
             e2 = make_engine(os.path.join(tmp, 'l'), chain, cfg(tasks=bb.TASKS))
             self.assertIn('in the lever task, each clean press', e2.public_status()['rule'])
-            self.assertEqual(bb.build_config(bb.parse_args([])).tasks, ('cursor', 'steer', 'tiles'))
+            self.assertEqual(bb.build_config(bb.parse_args([])).tasks, ('cursor', 'steer', 'tiles', 'maze'))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_rat_maze_escapes_count_like_steer_hits(self):
+        """Rat Maze (task "maze"): each maze escaped is a hit, each maze timed out a miss; an attempt is a course of at
+        most MAZE_MAX_HITS mazes, so the steering tasks' cap of 4 holds unchanged."""
+        import maze_env
+        self.assertEqual(maze_env.LIVE_MAZES, bb.MAZE_MAX_HITS)
+        self.assertEqual(bb.MAZE_MAX_HITS, bb.N_TARGETS)
+        maze_hello = dict(HELLO, task='maze', run='maze_live')
+        c = bb.HitCounter()
+        out = c.on_text(json.dumps(maze_hello))
+        self.assertEqual((out[0]['task'], out[0]['countable']), ('maze', True))
+        eps = [e for e in c.on_text(ep(0, 3, 1)) if e['ev'] == 'episode']            # 3 escaped, then a timeout
+        self.assertEqual([(e['w_hits'], e['w_misses'], e['w_wrong'], e['partial']) for e in eps], [(3, 1, 0, False)])
+        self.assertEqual([e['hits'] for e in c.on_text(ep(1, 4, 0)) if e['ev'] == 'episode'], [4])
+        self.assertEqual([e['ev'] for e in c.on_text(ep(2, bb.MAZE_MAX_HITS + 1, 0))], ['rejected'])
+        self.assertEqual([e['ev'] for e in c.on_text(ep(3, 2, 1, presses=4))], ['rejected'], 'presses != hits + misses')
+        self.assertEqual(c.on_text(json.dumps({'type': 'maze_end', 'maze_id': 1, 'result': 'timeout', 'steps': 500,
+                                               'bumps': 3, 'time_s': 10.0})), [], 'maze_end events count nothing')
+        no_maze = bb.HitCounter(tasks=('cursor', 'steer', 'tiles'))
+        self.assertIn('maze is not counted', no_maze.on_text(json.dumps(maze_hello))[0]['why'])
+        chain = FakeChain()
+        tmp = tempfile.mkdtemp(prefix='buyback_test_')
+        try:
+            e = make_engine(tmp, chain)
+            self.assertIn('in Rat Maze a hit is a maze escaped', e.public_status()['rule'])
+            e.on_relay_text(json.dumps(maze_hello))
+            e.on_relay_text(ep(0, 3, 1))
+            e.on_relay_text(ep(1, 4, 0))
+            self.assertEqual(e.ledger.hits, 7)
+            w = e.public_status()['window']
+            self.assertEqual((w['hits'], w['misses'], w['wrong'], w['attempts']), (7, 1, 0, 2))
+            self.assertEqual(w['hit_rate'], 0.875)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

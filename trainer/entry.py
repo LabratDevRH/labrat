@@ -3,8 +3,8 @@ training does not need the owner's PC. Built by trainer/Dockerfile, run on Railw
 
 The job comes from environment variables (on Railway: the service's Variables; every change redeploys it):
 
-    TRAIN_TASK             lever | cursor | steer | tiles (Rat Tiles, tiles_env.py). Empty or "none": idle (nothing
-                           runs, near-zero CPU).
+    TRAIN_TASK             lever | cursor | steer | tiles (Rat Tiles, tiles_env.py) | maze (Rat Maze, maze_env.py).
+                           Empty or "none": idle (nothing runs, near-zero CPU).
     TRAIN_NAME             the run's name; its files go to runs/<TRAIN_NAME>/ on the volume.
     TRAIN_STEPS            environment steps THIS job trains (60000, 2e6, 5M), on top of the start checkpoint's own
                            count. (train.py's --steps is a running total; this script adds the two.)
@@ -36,7 +36,7 @@ exit, so Railway does not restart it. SIGTERM (Railway stopping or redeploying t
 train.py (and its workers) and the publisher (which says bye), then it exits with 0.
 
     python trainer/entry.py              run (or idle)
-    python trainer/entry.py --selftest   check the image: imports, CPU torch, both networks, the four envs
+    python trainer/entry.py --selftest   check the image: imports, CPU torch, both networks, the five envs
 """
 import hashlib
 import json
@@ -60,12 +60,13 @@ RUNS_LINK = os.path.join(APP, 'runs')              # train.py writes to <its dir
 SEED_DIR = os.path.join(APP, 'seed', 'final')      # the image's final networks (trainer/Dockerfile)
 SEED_FILES = ('policy.pt', 'steer.pt')
 TILES_START = os.path.join(HERE, 'tiles_v2_start.pt')   # optional: a trained Rat Tiles network (rule v2) to resume
+MAZE_START = os.path.join(HERE, 'maze_v1_start.pt')     # optional: a trained Rat Maze network (rule v1) to resume
 DEFAULT_DATA = '/data'
 DEFAULT_RELAY = 'wss://labrat-relay-production.up.railway.app/publish'
 TOKEN_ENV = 'LABRAT_PUBLISH_TOKEN'
 JOB_FILE = 'trainer_job.json'
-TASKS = ('lever', 'cursor', 'steer', 'tiles')
-STEERING_TASKS = ('steer', 'tiles')                # the steering network (5 outputs); the others: 38 outputs
+TASKS = ('lever', 'cursor', 'steer', 'tiles', 'maze')
+STEERING_TASKS = ('steer', 'tiles', 'maze')        # the steering network (5 outputs); the others: 38 outputs
 IDLE_WORDS = ('', 'none', 'off', 'idle', 'no', '0', 'false')
 ENTRY_FLAGS = ('--task', '--name', '--steps', '--resume', '--workers', '--envs-per-worker')   # set by this script
 NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')
@@ -280,7 +281,7 @@ def read_job(env):
     if task in IDLE_WORDS:
         return None
     if task not in TASKS:
-        raise JobError(f'TRAIN_TASK must be lever, cursor, steer, tiles or none (got {task!r})')
+        raise JobError(f'TRAIN_TASK must be lever, cursor, steer, tiles, maze or none (got {task!r})')
     name = env.get('TRAIN_NAME', '').strip()
     if not NAME_RE.match(name) or name == 'final' or '.prev-' in name or '..' in name:
         raise JobError(f'TRAIN_NAME must be 1-64 letters, digits, "_", "-" or ".", not "final" (got {name!r})')
@@ -777,19 +778,30 @@ def _selftest():
                                                                     map_location='cpu')['net'])
         log(f'Rat Tiles start: trainer/tiles_v2_start.pt, {int(tk["steps"]):,} steps, rules {TILES_RULES}, '
             f'difficulty {tk.get("difficulty")}; torch loads it')
+    if os.path.isfile(MAZE_START):                    # optional Rat Maze start: TRAIN_RESUME=trainer/maze_v1_start.pt
+        from maze_env import OBS_DIM as MAZE_OBS, RULES as MAZE_RULES
+        mk = load(MAZE_START)
+        assert (mk.get('task') == 'maze' and mk.get('rules') == MAZE_RULES and len(mk['mean']) == MAZE_OBS
+                and mk['net']['pi.6.weight'].shape[0] == 5), 'maze_v1_start.pt: not a Rat Maze network of these rules'
+        Policy(MAZE_OBS, 5, hidden=256).load_state_dict(torch.load(MAZE_START, weights_only=False,
+                                                                  map_location='cpu')['net'])
+        log(f'Rat Maze start: trainer/maze_v1_start.pt, {int(mk["steps"]):,} steps, rules {MAZE_RULES}, '
+            f'difficulty {mk.get("difficulty")}; torch loads it')
 
     import train                                      # noqa: F401  (train.make_env, as the publisher uses it)
     from env import LeverEnv
     from cursor_env import CursorEnv
     from steer_env import SteerEnv
     from tiles_env import TilesEnv, load_songs
+    from maze_env import MazeEnv
     import labrat_frame as lf
     songs = load_songs()                              # assets/songs.json: Rat Tiles' melodies
     log(f'songs: {len(songs)} ({", ".join(s["id"] for s in songs)})')
     for name, env, ck in (('lever', LeverEnv(0), load(press_path)), ('cursor', CursorEnv(0), load(press_path)),
                           ('steer', SteerEnv(0, press_net=press_path), load(steer_path)),
-                          ('tiles', TilesEnv(0, press_net=press_path), load(steer_path))):
-        pol = NumpyPolicy(ck, env.obs_dim)            # tiles: the steering network, widened for the tile features
+                          ('tiles', TilesEnv(0, press_net=press_path), load(steer_path)),
+                          ('maze', MazeEnv(0, press_net=press_path), load(steer_path))):
+        pol = NumpyPolicy(ck, env.obs_dim)            # tiles / maze: the steering network, widened for the game's features
         obs = env.reset()
         for _ in range(5):
             obs, _r, _done, _info = env.step(pol(obs).astype(np.float64))
@@ -801,7 +813,7 @@ def _selftest():
         log(f'env {name}: {env.obs_dim} inputs, 5 steps, one {len(frame)}-byte frame')
     import publish_training
     assert publish_training.infer_task(sk) == 'steer' and publish_training.infer_task(pk) == 'lever'
-    assert 'tiles' in publish_training.TASKS
+    assert 'tiles' in publish_training.TASKS and 'maze' in publish_training.TASKS
     log('live/publish_training.py imports')
 
 

@@ -17,7 +17,7 @@ WORKDIR /app
 COPY trainer/requirements.txt trainer/requirements.txt
 RUN pip install -r trainer/requirements.txt
 
-COPY train.py policy.py env.py cursor_env.py steer_env.py tiles_env.py ptload.py ./
+COPY train.py policy.py env.py cursor_env.py steer_env.py tiles_env.py maze_env.py ptload.py ./
 # the scene, and assets/songs.json (Rat Tiles' public-domain melodies, identical to site/assets/songs.json)
 COPY assets/ assets/
 COPY live/publish_training.py live/labrat_frame.py live/
@@ -27,7 +27,7 @@ COPY live/assets/rat.json live/assets/rat.json
 COPY runs/final/policy.pt runs/final/steer.pt seed/final/
 COPY trainer/ trainer/
 
-# fail the build, not the job: imports, the CPU torch build, both networks, all four envs, the frame packer
+# fail the build, not the job: imports, the CPU torch build, both networks, all five envs, the frame packer
 RUN python trainer/entry.py --selftest
 
 ENTRYPOINT ["/usr/bin/tini", "--"]

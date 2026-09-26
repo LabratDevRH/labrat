@@ -48,15 +48,35 @@ episode per song, plus "missed" = tiles that passed the hit band untapped. After
 trial, as the launch rig does between steps; the frames show it); a fall does not end the song, so "fell" says it fell
 at least once during the song.
 
+Rat Maze (task "maze", maze_env.py, game rule v1): the live view plays COURSES of maze_env.LIVE_MAZES mazes per episode,
+each maze one curriculum notch harder than the one before (training plays one maze per episode; the rest is as training
+builds it), and also sends
+    {"type":"maze","t":sim_time,"maze_id":int,"w":int,"h":int,"walls":str|null,"cell":[cx,cy],"pos":[x,y],
+     "cheese":[gx,gy],"trail":[[cx,cy],...],"bumps":int,"steps":int,"dist":int}
+                                                                   every 4th frame (<= 8 Hz; droppable like a frame,
+                                                                   except the first snapshot of a maze, which carries
+                                                                   "walls" and is never dropped or replaced)
+    {"type":"maze_end","maze_id":int,"result":"escaped"|"timeout","steps":int,"bumps":int,"time_s":float}
+                                                                   once per maze
+"walls" is the maze's layout: one hex char per cell, row-major (row 0 at the top), the bits N=8, E=4, S=2, W=1 set where
+that side of the cell is OPEN; it is sent only in a maze's first snapshot (a new maze_id), and again after a reconnect
+to the relay, otherwise "walls" is null. "cell" is the marker's cell, "pos" its position in cell units (cell (cx,cy)
+spans x in [cx,cx+1), y in [cy,cy+1)), "cheese" the exit cell, "trail" the last 40 cells visited (the current one
+last), "bumps" the wall bumps, "steps" the control steps and "dist" the shortest path (cells) to the cheese from the
+marker's cell. The binary frame's target is the cheese cell and its cursor the marker. Episode messages as for the
+other tasks: hits = mazes escaped in the course, misses = mazes timed out (a course ends at its first timeout or after
+LIVE_MAZES escapes), presses = hits + misses. A lever press has no role in the maze (maze_env ignores the PRESS output).
+After a fall, and between the mazes of a course, maze_env puts the rat back in its standing start pose.
+
 LIVE only while training: a run is live while its log.jsonl was written in the last --silence s (90). When it
 goes silent the script sends bye; --run then exits, --watch waits for the next run whose log.jsonl is written.
 --watch logs and skips a run it cannot publish (e.g. an unknown network shape) until that run stops training.
 --assume-live-for-test streams an old run anyway (for tests): hello.label then starts with "TEST".
 --dry-print sends nothing: stdout gets "TEXT <json>" and "FRAME n=.. t=.. ... b64=<the frame>" lines (logs go
 to stderr), through the same queue and resync logic as a relay connection.
-Task (lever | cursor | steer | tiles) comes from the checkpoint ("task", which train.py saves for tiles) or its shapes
-(5 outputs = steer, or tiles on tiles_env.OBS_DIM inputs; 38 outputs on a 200-input network = lever, wider = cursor)
-unless --task says so.
+Task (lever | cursor | steer | tiles | maze) comes from the checkpoint ("task", which train.py saves for tiles and
+maze) or its shapes (5 outputs = steer, or tiles on tiles_env.OBS_DIM inputs, or maze on maze_env.OBS_DIM inputs; 38
+outputs on a 200-input network = lever, wider = cursor) unless --task says so.
 
 Light on the machine: one process, one env, 25 fps, one BLAS thread, never blocks on the network (a bounded
 send queue drops the oldest frames when the relay is slow; reconnects back off 1 s .. 30 s), and it holds
@@ -101,18 +121,23 @@ from env import CTRL_DT  # noqa: E402
 from ptload import load as pt_load, NumpyPolicy  # noqa: E402
 import labrat_frame as lf  # noqa: E402
 
-TASKS = ('lever', 'cursor', 'steer', 'tiles')
+TASKS = ('lever', 'cursor', 'steer', 'tiles', 'maze')
+GAME_TASKS = ('tiles', 'maze')   # the games: they also stream a board (tiles / maze) and events (tile / maze_end)
 TASK_TEXT = {
     'lever': 'pressing the lever with the whole body',
     'cursor': 'moving a cursor with its head and clicking with a lever press, whole body',
     'steer': 'steering a cursor with its head and clicking with a lever press',
     'tiles': 'playing Rat Tiles: moving between the lanes with its head and pressing the lever as each tile reaches '
              'the red button on the hit line',
+    'maze': 'playing Rat Maze: steering a marker through a maze with its head, to the cheese at the exit',
 }
 TOKEN_ENV = 'LABRAT_PUBLISH_TOKEN'
 POLL_S = 1.0                 # how often the run's files are checked
 AUTH_CLOSE_CODES = (4401, 4403)
 TILES_MAX_HZ = 10            # Rat Tiles board snapshots per second, at most
+MAZE_MAX_HZ = 8              # Rat Maze snapshots per second, at most
+WALLS_RESEND_S = 2.0         # Rat Maze: the layout is sent again this long after a (re)connect to the relay (after its
+                             # resync, which clears the queue), so a relay that lost it gets it back
 
 
 def log(*parts):
@@ -211,7 +236,8 @@ def infer_task(ck):
         return ck['task']
     if out == 5:
         from tiles_env import OBS_DIM as TILES_OBS
-        return 'tiles' if obs == TILES_OBS else 'steer'
+        from maze_env import OBS_DIM as MAZE_OBS
+        return 'tiles' if obs == TILES_OBS else 'maze' if obs == MAZE_OBS else 'steer'
     if out == 38:
         return 'lever' if obs <= 200 else 'cursor'
     raise ValueError(f'unknown checkpoint shape: {obs} inputs, {out} outputs')
@@ -263,14 +289,18 @@ class Player:
         self.env = train.make_env(task, seed, False)
         if task == 'tiles':
             self.env.full_songs = True            # the live view plays whole songs (training: phrases of them)
-        # SteerEnv (and TilesEnv, a SteerEnv) wraps a CursorEnv
-        self.inner = self.env.e if task in ('steer', 'tiles') else self.env
+        if task == 'maze':
+            from maze_env import LIVE_MAZES
+            self.env.mazes_per_episode = LIVE_MAZES   # the live view plays courses of mazes (training: one maze)
+        # SteerEnv (and TilesEnv / MazeEnv, SteerEnvs) wraps a CursorEnv
+        self.inner = self.env.e if task in ('steer', 'tiles', 'maze') else self.env
         self.m, self.d = self.inner.m, self.inner.d
         self.pose = lf.PoseReader(self.m)
         self.pol = None
         self.episode = -1
         self.obs = None
-        self.events = []                          # Rat Tiles: tile outcomes not yet sent
+        self.events = []                          # Rat Tiles / Rat Maze: tile outcomes / maze ends not yet sent
+        self.walls_sent = None                    # Rat Maze: the maze_id whose layout ("walls") went out last
 
     def set_policy(self, ck):
         self.pol = NumpyPolicy(ck, self.env.obs_dim)
@@ -289,6 +319,8 @@ class Player:
         e = self.inner
         if self.task == 'tiles':
             return e.visible_active_rect()        # the on-screen part of the lowest untapped tile
+        if self.task == 'maze':
+            return e.cheese_rect()                # the cheese cell (the marker is the cursor)
         if self.task == 'lever' or e.hold != 0:
             return None
         return (float(e.tc[0]), float(e.tc[1]), float(e.th[0]), float(e.th[1]))
@@ -298,7 +330,7 @@ class Player:
         before = self.lit_target()
         a = self.pol(self.obs).astype(np.float64)
         obs, _r, done, info = self.env.step(a)
-        if self.task == 'tiles':
+        if self.task in GAME_TASKS:
             self.events.extend(self.env.drain_events())
         if not np.all(np.isfinite(obs)):
             log('the simulation went unstable (non-finite observation); new episode')
@@ -331,6 +363,17 @@ class Player:
             return None
         return self.inner.snapshot(float(self.d.time))
 
+    def maze_msg(self, resend_walls=False):
+        """Rat Maze: the maze now ({"type":"maze"}), or None for the other tasks. "walls" (the layout) is in the first
+        snapshot of each maze (and when asked again, after a reconnect); the others carry null."""
+        if self.task != 'maze' or self.inner.maze is None:
+            return None
+        mid = int(self.inner.maze_id)
+        walls = resend_walls or mid != self.walls_sent
+        if walls:
+            self.walls_sent = mid
+        return self.inner.snapshot(float(self.d.time), walls)
+
     def drain_events(self):
         ev, self.events = self.events, []
         return ev
@@ -339,6 +382,9 @@ class Player:
         if self.task == 'lever':
             hits = presses = int(self.pressed)
             misses = 0
+        elif self.task == 'maze':
+            hits, misses = int(self.inner.hits), int(self.inner.timeouts)   # mazes escaped, mazes timed out
+            presses = hits + misses
         else:
             hits, misses = int(self.inner.hits), int(self.inner.misses)
             presses = hits + misses
@@ -674,7 +720,8 @@ def publish(run_dir, a, token, stop):
         player.reset(difficulty)
 
         steps_per_frame = 1.0 / (a.fps * CTRL_DT)
-        board_every = max(1, math.ceil(a.fps / TILES_MAX_HZ))     # Rat Tiles board snapshots: every n-th frame
+        # Rat Tiles board / Rat Maze snapshots: every n-th frame
+        board_every = max(1, math.ceil(a.fps / (MAZE_MAX_HZ if task == 'maze' else TILES_MAX_HZ)))
         cpu0 = time.process_time()
         t_start = time.monotonic()
         t0 = t_start
@@ -684,6 +731,9 @@ def publish(run_dir, a, token, stop):
         next_poll = t_start + POLL_S
         reason = None
         n_eps = 0
+        connects = 0            # Rat Maze: the layout goes out again WALLS_RESEND_S after a (re)connect, when the
+        walls_due = None        # layout was queued for an earlier connection (the resync of a new one clears the queue)
+        walls_conn = None       # the connection count when the layout was last queued
         while reason is None:
             k += 1
             target_steps = int(round(k * steps_per_frame))
@@ -695,12 +745,28 @@ def publish(run_dir, a, token, stop):
                         done = True               # the rest of this frame's sim time is dropped, not carried over
                         break
                 link.frame(player.frame())
-                for ev in player.drain_events():  # Rat Tiles: each tile's outcome, after the frame it happened in
+                for ev in player.drain_events():  # Rat Tiles / Maze: each outcome, after the frame it happened in
                     link.text(ev)
                 if k % board_every == 0:
-                    board = player.tiles_msg()
-                    if board is not None:
-                        link.board(board)
+                    if task == 'maze':
+                        now_c = link.stats['connects']
+                        if now_c != connects:
+                            connects, walls_due = now_c, time.monotonic() + WALLS_RESEND_S
+                        resend = False
+                        if walls_due is not None and time.monotonic() >= walls_due:
+                            walls_due = None
+                            resend = walls_conn != connects
+                        board = player.maze_msg(resend)
+                        if board is not None:
+                            if board['walls'] is not None:
+                                link.text(board)      # a maze's layout: never dropped or replaced
+                                walls_conn = connects
+                            else:
+                                link.board(board)
+                    else:
+                        board = player.tiles_msg()
+                        if board is not None:
+                            link.board(board)
             except Exception as e:                    # never let one bad step end the stream
                 log(f'simulation error ({type(e).__name__}: {e}); new episode')
                 done = True

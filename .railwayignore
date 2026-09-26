@@ -9,6 +9,7 @@
 !/cursor_env.py
 !/steer_env.py
 !/tiles_env.py
+!/maze_env.py
 !/ptload.py
 !/assets/
 !/runs/

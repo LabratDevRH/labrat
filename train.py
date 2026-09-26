@@ -4,6 +4,9 @@
     python train.py --task tiles --resume runs/final/steer.pt --steps <its steps + N> --curriculum   (Rat Tiles)
       (a tiles checkpoint of the same game rules, tiles_env.RULES, goes on at its saved difficulty; an older one, or
       the steering network, is widened for the tile features and starts the curriculum at 0)
+    python train.py --task maze --resume runs/final/steer.pt --steps <its steps + N> --curriculum    (Rat Maze)
+      (the same way: a maze checkpoint of the same rules, maze_env.RULES, goes on at its saved difficulty; the
+      steering network is widened for the maze features and starts the curriculum at 0)
 Checkpoints go to runs/<name>/policy_*.pt with obs-normalisation stats inside.
 """
 import argparse, json, os, time
@@ -25,7 +28,22 @@ def make_env(task, seed, randomize):
     if task == 'tiles':
         from tiles_env import TilesEnv
         return TilesEnv(seed, randomize=randomize)
+    if task == 'maze':
+        from maze_env import MazeEnv
+        return MazeEnv(seed, randomize=randomize)
     return LeverEnv(seed, randomize=randomize)
+
+
+GAME_TASKS = ('tiles', 'maze')       # the games: a checkpoint carries its task, rules and curriculum difficulty
+
+
+def game_rules(task):
+    """The game's rule version (saved in its checkpoints; a resume of another version starts the curriculum over)."""
+    if task == 'tiles':
+        from tiles_env import RULES
+    else:
+        from maze_env import RULES
+    return RULES
 
 
 # Rat Tiles curriculum (--task tiles --curriculum): judged on the episodes played AT the current difficulty only (a
@@ -33,6 +51,8 @@ def make_env(task, seed, randomize):
 # have ended; success = tiles hit / (tiles hit + tiles missed + 0.5 per wrong click). Falls are left to the reward
 # (tiles_env: the rat is set back on its feet and pays for it): the difficulty is about the tiles. Up 0.05 over 75%
 # (0.10 over 95%: the steering network plays the easy levels well from the start), down 0.05 under 45%.
+# Rat Maze (--task maze --curriculum) uses the same rule: success = mazes escaped / (escaped + timed out); there are no
+# wrong clicks (maze_env ignores the PRESS output).
 TILES_CURR_MIN = 16
 TILES_CURR_WINDOW = 48
 TILES_CURR_UP, TILES_CURR_DOWN, TILES_CURR_STEP = 0.75, 0.45, 0.05
@@ -58,7 +78,8 @@ def worker(conn, n_envs, seed, randomize=False, task='lever', init=None):
                     # every end is a true terminal: global time and time-since-press are both in the obs
                     stats.append((ep_ret[i], ep_len[i], info['pressed'], info['fell'], info['paw_dist'],
                                   info.get('hits', 0), info.get('misses', 0), info.get('timeouts', 0),
-                                  info.get('level', -1.0), info.get('timing_abs', float('nan'))))
+                                  info.get('level', -1.0), info.get('timing_abs', float('nan')),
+                                  info.get('cheese_s', float('nan')), info.get('bumps', float('nan'))))
                     ep_ret[i] = 0; ep_len[i] = 0
                     o = e.reset()
                     dones[i] = 1
@@ -128,11 +149,12 @@ def main():
     ap.add_argument('--lr', type=float, default=3e-4)
     ap.add_argument('--lr-end', type=float, default=None, help='anneal linearly to this by --steps')
     ap.add_argument('--snapshot-every', type=int, default=2_500_000)
-    ap.add_argument('--task', default='lever', choices=['lever', 'cursor', 'steer', 'tiles'])
+    ap.add_argument('--task', default='lever', choices=['lever', 'cursor', 'steer', 'tiles', 'maze'])
     ap.add_argument('--init-std', type=float, default=None, help='reset exploration noise after --resume (new task)')
     ap.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'])
     ap.add_argument('--curriculum', action='store_true',
-                    help='cursor / steer: adaptive target difficulty; tiles: adaptive tile speed and spacing')
+                    help='cursor / steer: adaptive target difficulty; tiles: adaptive tile speed and spacing; '
+                         'maze: adaptive maze size and openness')
     a = ap.parse_args()
     import torch
     import torch.nn as nn
@@ -145,20 +167,20 @@ def main():
         torch.set_num_threads(2)   # leave the cores to the simulation workers
 
     init = None
-    tiles_start = None      # the tiles curriculum's starting difficulty: 0, or where a resumed tiles job had got to
-    if a.task == 'tiles' and a.curriculum:
+    tiles_start = None      # a game's curriculum starting difficulty: 0, or where a resumed tiles / maze job had got to
+    if a.task in GAME_TASKS and a.curriculum:
         tiles_start = 0.0
         if a.resume:
             import io
             from ptload import load as pt_load
             with open(a.resume, 'rb') as f:       # read and closed at once (os.replace of policy_last.pt on Windows)
                 pk = pt_load(io.BytesIO(f.read()))
-            from tiles_env import RULES
-            # only a checkpoint of the same game rules goes on at its difficulty (rule v1 checkpoints saved none)
-            if (pk.get('task') == 'tiles' and pk.get('rules') == RULES and isinstance(pk.get('difficulty'), float)):
+            RULES = game_rules(a.task)
+            # only a checkpoint of the same game and rules goes on at its difficulty (rule v1 tiles checkpoints saved none)
+            if (pk.get('task') == a.task and pk.get('rules') == RULES and isinstance(pk.get('difficulty'), float)):
                 tiles_start = float(np.clip(pk['difficulty'], 0.0, 1.0))
-            elif pk.get('task') == 'tiles':
-                print(f'{a.resume}: tiles rules {pk.get("rules", 1)}, now {RULES}: the curriculum starts at 0',
+            elif pk.get('task') == a.task:
+                print(f'{a.resume}: {a.task} rules {pk.get("rules", 1)}, now {RULES}: the curriculum starts at 0',
                       flush=True)
         init = {'difficulty': tiles_start}    # before the workers' first episode (not the envs' default of 1)
     conns, procs = [], []
@@ -169,7 +191,7 @@ def main():
         pr.start(); conns.append(p1); procs.append(pr)
     obs = np.concatenate([c.recv() for c in conns])
     N, obs_dim = obs.shape
-    steering = a.task in ('steer', 'tiles')      # the steering network: 4 neck motors + PRESS
+    steering = a.task in ('steer', 'tiles', 'maze')      # the steering network: 4 neck motors + PRESS
     act_dim = 5 if steering else 38
 
     net = Policy(obs_dim, act_dim, hidden=256 if steering else 512).to(dev)
@@ -262,7 +284,7 @@ def main():
             net.log_std.clamp_(-2.5, 0.0)
 
         total += H * N; it += 1
-        if a.curriculum and a.task == 'tiles':
+        if a.curriculum and a.task in GAME_TASKS:
             cur = [x for x in recent if len(x) > 8 and abs(x[8] - difficulty) < 1e-6][-TILES_CURR_WINDOW:]
             if len(cur) >= TILES_CURR_MIN:
                 rr = np.array([x[:8] for x in cur], dtype=float)
@@ -289,8 +311,8 @@ def main():
                 g['lr'] = a.lr + (a.lr_end - a.lr) * frac
         final = total >= a.steps
         if (it % 5 == 0 or final) and recent:
-            # tiles episodes are long (a few per iteration): its rows average the last 100 episodes, not 2000
-            r = np.array([x[:8] for x in recent[-(100 if a.task == 'tiles' else 2000):]], dtype=float)
+            # tiles episodes are long (a few per iteration): its rows average the last 100 episodes, not 2000 (maze too)
+            r = np.array([x[:8] for x in recent[-(100 if a.task in GAME_TASKS else 2000):]], dtype=float)
             rate = r[:, 2].mean()
             clean = float(np.mean(r[:, 2] * (1 - r[:, 3]))) if a.task == 'lever' else                 float(np.mean(r[:, 5] - r[:, 6] - 5 * r[:, 3]))   # cursor: hits - misses - 5*falls per episode
             row = {'steps': total, 'sps': int((total - step0) / (time.time() - t0)), 'ret': round(r[:, 0].mean(), 2),
@@ -308,13 +330,24 @@ def main():
                 # mean |timing| of the hits (ms from perfect, tiles_env rule v2), over the same last 100 episodes
                 tm = [x[9] for x in recent[-100:] if len(x) > 9 and np.isfinite(x[9])]
                 row['timing_ms'] = round(1000 * float(np.mean(tm)), 1) if tm else None
+            elif a.task == 'maze':
+                from maze_env import level
+                n_mazes = r[:, 5].sum() + r[:, 7].sum()          # mazes resolved: escaped + timed out
+                row['escape_rate'] = round(float(r[:, 5].sum() / n_mazes), 3) if n_mazes else 0.0
+                row['grid'] = level(difficulty)['grid']
+                row['open'] = round(level(difficulty)['open'], 3)
+                # mean seconds to the cheese of the escapes, and bumps per episode, over the same last 100 episodes
+                cs = [x[10] for x in recent[-100:] if len(x) > 10 and np.isfinite(x[10])]
+                row['cheese_s'] = round(float(np.mean(cs)), 2) if cs else None
+                bumps = [x[11] for x in recent[-100:] if len(x) > 11 and np.isfinite(x[11])]
+                row['bumps'] = round(float(np.mean(bumps)), 2) if bumps else None
             print(json.dumps(row), flush=True); log.write(json.dumps(row) + '\n'); log.flush()
             ck = {'net': {k: v.detach().cpu() for k, v in net.state_dict().items()}, 'mean': norm.mean, 'var': norm.var,
                   'count': norm.count, 'steps': total, 'obs_dim': obs_dim, 'press_rate': rate, 'clean_rate': clean,
                   'opt_ok': True}
-            if a.task == 'tiles':
-                from tiles_env import RULES
-                ck.update(task='tiles', difficulty=float(difficulty), rules=RULES)   # read by publish_training/resume
+            if a.task in GAME_TASKS:
+                # read by publish_training (the task) and by --resume (the curriculum goes on at this difficulty)
+                ck.update(task=a.task, difficulty=float(difficulty), rules=game_rules(a.task))
             atomic_save(torch, ck, os.path.join(out, 'policy_last.pt'))
             atomic_save(torch, opt.state_dict(), os.path.join(out, 'opt_last.pt'))
             if total >= next_snap:

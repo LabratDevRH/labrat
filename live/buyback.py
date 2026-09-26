@@ -31,12 +31,16 @@ WHAT COUNTS (hits, misses, wrong clicks)
       connect, a publisher resync) keeps its hits in the totals but stays out of the hour's hit rate (its unknown
       misses could only raise it). An episode that carries "wrong" instead is read as misses = tiles that slid past,
       wrong = wrong clicks (presses = hits + wrong).
+    Rat Maze (task "maze", maze_env.py; one attempt is a course of at most MAZE_MAX_HITS mazes): hits = mazes escaped,
+      misses = mazes timed out (a course ends at its first timeout), no wrong clicks (a press has no role in the maze).
+      The episode's "misses" are the timeouts (presses = hits + misses), exactly as in the steering tasks.
     lever task (only when --tasks names it): hits = clean presses, at most one per attempt.
   Only episodes of a live training hello are counted: hello.source "training", not a TEST stream (unless
   --accept-test-streams, DRY only), and the state message's last episode only while state.live is true (the relay
   keeps the last episode of an ended run; it is never counted). Each episode is keyed by run | task | hello.started | n
   and counted once: a reconnect, a re-sent state or a restart of this program (the journal holds the keys) never
-  counts it twice. An episode claiming more than 4 hits (1 for the lever task, TILES_MAX_HITS for Rat Tiles), counts
+  counts it twice. An episode claiming more than 4 hits (1 for the lever task, TILES_MAX_HITS for Rat Tiles,
+  MAZE_MAX_HITS for Rat Maze), counts
   that do not add up, or anything that is not a non-negative integer is rejected and journalled. Binary frames only
   feed an unconfirmed tally of the attempt in progress: money never depends on them. Episodes the relay forwarded
   while this program was disconnected are missed (journalled as a gap when n jumps).
@@ -180,10 +184,12 @@ POOL_KEY_T = '(address,address,uint24,int24,address)'
 
 RELAY_URL = 'wss://labrat-relay-production.up.railway.app/live'
 ORIGIN = 'https://lab-rat.net'
-TASKS = ('lever', 'cursor', 'steer', 'tiles')
-DEFAULT_TASKS = ('cursor', 'steer', 'tiles')   # the tasks with a lit target; the lever task only has a clean press
+TASKS = ('lever', 'cursor', 'steer', 'tiles', 'maze')
+DEFAULT_TASKS = ('cursor', 'steer', 'tiles', 'maze')   # the tasks with a lit target (in Rat Maze: the cheese); the
+                                                       # lever task only has a clean press
 N_TARGETS = 4                  # cursor_env.N_TARGETS: an attempt ends after 4 targets, so at most 4 hits
 TILES_MAX_HITS = 64            # tiles_env.MAX_SONG_NOTES: a Rat Tiles attempt is one song of at most 64 notes
+MAZE_MAX_HITS = 4              # maze_env.LIVE_MAZES: a Rat Maze attempt is a course of at most 4 mazes (= N_TARGETS)
 FRAME_MAGIC = 7.0              # live/labrat_frame.py
 DEFAULT_JOURNAL_DIR = os.path.join(ROOT, 'runs', 'buyback')
 LIVE_JOURNAL_DIR = DEFAULT_JOURNAL_DIR   # LIVE's ONE journal + lock place (--journal-dir is refused in LIVE)
@@ -949,7 +955,8 @@ class HitCounter:
             self.stats['duplicates'] += 1
             return
         self.seen.add(key)
-        cap = 1 if s['task'] == 'lever' else (TILES_MAX_HITS if s['task'] == 'tiles' else self.max_hits)
+        cap = (1 if s['task'] == 'lever' else TILES_MAX_HITS if s['task'] == 'tiles'
+               else min(MAZE_MAX_HITS, self.max_hits) if s['task'] == 'maze' else self.max_hits)
         why = None
         # the window's three counts: hits, misses and wrong clicks (see "WHAT COUNTS" at the top)
         missed, wrong, source = 0, 0, None
@@ -2312,6 +2319,9 @@ class Engine:
         if 'tiles' in c.tasks:
             what.append('in Rat Tiles a hit is a tile tapped in time, a miss a tile that slid past untapped and a '
                         'wrong click a press with no tile to tap')
+        if 'maze' in c.tasks:
+            what.append('in Rat Maze a hit is a maze escaped (the marker reached the cheese) and a miss a maze that '
+                        'ran out of time')
         if 'lever' in c.tasks:
             what.append('in the lever task, each clean press is a hit')
         budget = (f'The hourly budget is {eth_str(c.hourly_budget_wei)} ETH, paid from {FUNDING}.' if not c.preview
@@ -2755,8 +2765,9 @@ def parse_args(argv=None):
     ap.add_argument('--max-gas-gwei', type=float)
     ap.add_argument('--max-gas-share-bps', type=int)
     ap.add_argument('--venue', choices=('auto', 'curve', 'pool'))
-    ap.add_argument('--tasks', help='comma list of lever,cursor,steer,tiles (default cursor,steer,tiles: the tasks '
-                                    'with a lit target; lever counts clean presses, and the public rule then says so)')
+    ap.add_argument('--tasks', help='comma list of lever,cursor,steer,tiles,maze (default cursor,steer,tiles,maze: the '
+                                    'tasks with a lit target; lever counts clean presses, and the public rule then '
+                                    'says so)')
     return ap.parse_args(argv)
 
 
